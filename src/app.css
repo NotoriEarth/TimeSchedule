@@ -12,6 +12,9 @@
 .editor-dialog .dialog-body{border:0;margin:0;min-width:0}
 
 /* Native transparency comes from the layered child window; its WebView stays opaque. */
+.widget-recover{display:flex;align-items:center;justify-content:center;gap:6px;width:100%;padding:8px 3px;margin-top:7px;font-size:10px;color:#526446;border:1px solid #dce4d3;border-radius:6px}
+.widget-recover:hover{background:#eaf0e2}
+@media(max-width:760px) and (min-width:571px){.widget-recover>span{display:none}}
 html.desktop-widget{background:#1b2420;--widget-surface-opacity:1;color-scheme:dark}
 html.desktop-widget body{background:#1b2420;min-width:0;height:100vh;overflow:hidden}
 html.desktop-widget #app{height:100vh}

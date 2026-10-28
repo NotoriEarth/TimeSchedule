@@ -9,6 +9,7 @@ This is an exploratory prototype, not a production release. The user chose Tauri
 - Korean interface, monthly calendar, selected-date agenda, event create/edit/delete, today's highlight. Small tasks and notes may be included if they do not delay the desktop experiment.
 - Manager window plus a wide desktop month calendar (up to 900×560 logical pixels, fitted to the monitor). Manager close destroys its WebView while the tray and widget remain; explicit Quit exits.
 - Revision 0.1.1 follows the user's DesktopCal-style translucency feedback: daily event snippets, an explicit Move/Lock control, a deep header drag region, and adjustable 40–100% whole-widget opacity. Native constant alpha also affects text; this is not per-pixel background-only transparency.
+- Revision 0.1.2 recovers off-screen widget geometry after display changes, including while locked, and provides a recovery action in the manager and tray. The UI-thread timer preserves the widget's parent, alpha and visibility; Explorer-restart recreation remains outside the scope.
 - SQLite stored in the OS app-data directory. No Google login, AI requests, telemetry, automatic startup, or server deployment in this prototype.
 - A browser preview may use explicitly identified local browser storage; the packaged native application uses SQLite. Browser storage must not be presented as native persistence.
 

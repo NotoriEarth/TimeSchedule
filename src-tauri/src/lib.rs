@@ -209,6 +209,7 @@ fn create_and_show_widget(app: &AppHandle) -> Result<(), String> {
         .map_err(|_| "설정 잠금 오류")?
         .widget_locked;
     desktop::set_locked(&window, locked)?;
+    desktop::recover_position(&window)?;
     let opacity = app
         .state::<AppState>()
         .preferences
@@ -229,6 +230,7 @@ fn create_and_show_widget(app: &AppHandle) -> Result<(), String> {
         .lock()
         .map_err(|_| "설정 잠금 오류")?
         .widget_visible = true;
+    remember_widget_position(app);
     save_preferences(app)
 }
 
@@ -472,8 +474,15 @@ pub fn run() {
             let widget =
                 MenuItem::with_id(app, "widget", "바탕화면 달력 표시", true, None::<&str>)?;
             let hide = MenuItem::with_id(app, "hide", "바탕화면 달력 숨기기", true, None::<&str>)?;
+            let recover = MenuItem::with_id(
+                app,
+                "recover",
+                "바탕화면 달력 위치 복구",
+                true,
+                None::<&str>,
+            )?;
             let exit = MenuItem::with_id(app, "quit", "완전 종료", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &widget, &hide, &exit])?;
+            let menu = Menu::with_items(app, &[&open, &widget, &recover, &hide, &exit])?;
             let mut tray = TrayIconBuilder::with_id("timeschedule-tray")
                 .tooltip("TimeSchedule · 오늘을 차분하게")
                 .menu(&menu)
@@ -481,7 +490,7 @@ pub fn run() {
                 .on_menu_event(|app, event| {
                     let result = match event.id.as_ref() {
                         "open" => show_manager_inner(app, None),
-                        "widget" => show_widget_inner(app),
+                        "widget" | "recover" => show_widget_inner(app),
                         "hide" => hide_widget_inner(app),
                         "quit" => {
                             quit(app);

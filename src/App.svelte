@@ -233,6 +233,16 @@
     widgetActionBusy = false;
   }
 
+  async function recoverWidget(): Promise<void> {
+    if (widgetActionBusy) return;
+    widgetActionBusy = true;
+    await perform(async () => {
+      await api.showWidget();
+      await refreshAppInfo();
+    }, '바탕화면 위젯을 화면 안으로 복구했어요.');
+    widgetActionBusy = false;
+  }
+
   function timeLabel(event: CalendarEvent): string {
     return event.allDay ? '하루 종일' : `${event.startTime} – ${event.endTime}`;
   }
@@ -377,7 +387,7 @@
         <button class:active={page === 'notes'} onclick={() => page = 'notes'}><Icon name="note" size={19} /><span>메모</span></button>
       </nav>
       <div class="sidebar-today"><div class="sidebar-today-label"><Icon name="sun" size={16} />오늘, {parseDate(today).getMonth() + 1}월 {parseDate(today).getDate()}일</div><p>작은 계획으로<br />가벼워지는 하루.</p><button onclick={goToday}>오늘 일정 <strong>{todayEvents.length}개</strong><Icon name="arrow" size={15} /></button></div>
-      <div class="sidebar-bottom"><button class="widget-launch" onclick={toggleWidget} disabled={widgetActionBusy || (isNative && !appInfo)} aria-label={isNative ? appInfo?.widgetVisible ? '바탕화면 위젯 숨기기' : '바탕화면 위젯 표시' : '위젯 미리보기'} aria-pressed={isNative ? appInfo?.widgetVisible ?? false : undefined}><Icon name="monitor" size={18} /><span>{isNative ? appInfo?.widgetVisible ? '위젯 숨기기' : '바탕화면 위젯' : '위젯 미리보기'}</span><Icon name={isNative && appInfo?.widgetVisible ? 'check' : 'arrow'} size={14} /></button><button class="storage-status" onclick={() => showInfo = !showInfo} aria-expanded={showInfo}><span class="status-dot"></span>{isNative ? '내 컴퓨터에 저장' : '브라우저 미리보기'}<span class="info-letter">i</span></button>{#if showInfo}<div class="storage-info"><strong>{isNative ? '오프라인 · SQLite' : '미리보기 · localStorage'}</strong><p>{appInfo?.storagePath ?? '저장 위치 확인 중…'}</p><p>{appInfo?.desktopMessage}</p></div>{/if}<div class="sidebar-version">PERSONAL CALENDAR <span>v{isNative ? appInfo?.version ?? '0.1.0' : '0.1'}</span></div></div>
+      <div class="sidebar-bottom"><button class="widget-launch" onclick={toggleWidget} disabled={widgetActionBusy || (isNative && !appInfo)} aria-label={isNative ? appInfo?.widgetVisible ? '바탕화면 위젯 숨기기' : '바탕화면 위젯 표시' : '위젯 미리보기'} aria-pressed={isNative ? appInfo?.widgetVisible ?? false : undefined}><Icon name="monitor" size={18} /><span>{isNative ? appInfo?.widgetVisible ? '위젯 숨기기' : '바탕화면 위젯' : '위젯 미리보기'}</span><Icon name={isNative && appInfo?.widgetVisible ? 'check' : 'arrow'} size={14} /></button>{#if isNative}<button class="widget-recover" onclick={recoverWidget} disabled={widgetActionBusy} title="화면 밖으로 나간 위젯의 위치와 크기를 복구합니다" aria-label="위젯 위치 복구"><Icon name="refresh" size={15} /><span>위젯 위치 복구</span></button>{/if}<button class="storage-status" onclick={() => showInfo = !showInfo} aria-expanded={showInfo}><span class="status-dot"></span>{isNative ? '내 컴퓨터에 저장' : '브라우저 미리보기'}<span class="info-letter">i</span></button>{#if showInfo}<div class="storage-info"><strong>{isNative ? '오프라인 · SQLite' : '미리보기 · localStorage'}</strong><p>{appInfo?.storagePath ?? '저장 위치 확인 중…'}</p><p>{appInfo?.desktopMessage}</p></div>{/if}<div class="sidebar-version">PERSONAL CALENDAR <span>v{isNative ? appInfo?.version ?? '0.1.0' : '0.1'}</span></div></div>
     </aside>
 
     <main class="main-content">

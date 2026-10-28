@@ -29,8 +29,8 @@ pub struct AttachmentInfo {
 
 #[cfg(windows)]
 pub use native::{
-    attach, detach, prepare_widget_class, set_locked, set_opacity, set_visible, status,
-    with_shell_dpi_context,
+    attach, detach, prepare_widget_class, recover_position, set_locked, set_opacity, set_visible,
+    status, with_shell_dpi_context,
 };
 
 #[cfg(not(windows))]
@@ -60,6 +60,11 @@ pub fn status(window: &WebviewWindow) -> Result<AttachmentInfo, String> {
 
 #[cfg(not(windows))]
 pub fn detach(_: &WebviewWindow) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn recover_position(_: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
@@ -121,15 +126,25 @@ mod native {
     const SWP_HIDEWINDOW: u32 = 0x0080;
     const SWP_NOOWNERZORDER: u32 = 0x0200;
     const SUBCLASS_ID: usize = 0x5449_4d45;
+    const RECOVERY_TIMER_ID: usize = 0x5449_4d46;
     const STRATEGY: &str = "explorer-icon-host-child";
 
     #[repr(C)]
-    #[derive(Clone, Copy, Debug, Default)]
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     struct Rect {
         left: i32,
         top: i32,
         right: i32,
         bottom: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct MonitorInfo {
+        size: u32,
+        monitor: Rect,
+        work: Rect,
+        flags: u32,
     }
 
     #[repr(C)]
@@ -211,6 +226,15 @@ mod native {
         fn GetWindowDpiAwarenessContext(hwnd: Hwnd) -> isize;
         fn GetThreadDpiAwarenessContext() -> isize;
         fn GetDpiForWindow(hwnd: Hwnd) -> u32;
+        fn MonitorFromWindow(hwnd: Hwnd, flags: u32) -> isize;
+        fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
+        fn SetTimer(
+            hwnd: Hwnd,
+            id: usize,
+            interval: u32,
+            callback: Option<unsafe extern "system" fn(Hwnd, u32, usize, u32)>,
+        ) -> usize;
+        fn KillTimer(hwnd: Hwnd, id: usize) -> i32;
         fn SetThreadDpiAwarenessContext(context: isize) -> isize;
         fn AreDpiAwarenessContextsEqual(a: isize, b: isize) -> i32;
         fn SendMessageTimeoutW(
@@ -250,6 +274,9 @@ mod native {
         original_exstyle: u32,
         original_rect: Rect,
         locked: bool,
+        recovering: bool,
+        moving: bool,
+        geometry_error: Option<String>,
     }
 
     fn records() -> &'static Mutex<HashMap<Hwnd, Attachment>> {
@@ -706,6 +733,7 @@ mod native {
         // Remove our callback before restoring geometry; otherwise the lock
         // correctly refuses the restoration move. Only our HWND is touched.
         unsafe {
+            KillTimer(hwnd, RECOVERY_TIMER_ID);
             RemoveWindowSubclass(hwnd, subclass, SUBCLASS_ID);
         }
         set_parent(hwnd, 0)?;
@@ -788,6 +816,9 @@ mod native {
             original_exstyle: exstyle,
             original_rect: screen,
             locked: true,
+            recovering: false,
+            moving: false,
+            geometry_error: None,
         };
         let result = (|| {
             // Child style is required *before* SetParent. Do not make the
@@ -807,6 +838,9 @@ mod native {
                 .lock()
                 .map_err(|_| "바탕화면 상태 잠금 오류")?
                 .insert(hwnd, saved.clone());
+            if unsafe { SetTimer(hwnd, RECOVERY_TIMER_ID, 1000, None) } == 0 {
+                return Err(error("SetTimer(widget recovery)"));
+            }
             let info = status(window)?;
             if !info.attached {
                 return Err(info.message);
@@ -865,11 +899,17 @@ mod native {
         let shell_class = class_name(host);
         let opacity_percent =
             opacity_percent(hwnd, unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32)?;
-        let message = if attached {
+        let mut message = if attached {
             format!("바탕화면 부모 연결 확인 ({shell_class}, HWND={host:#x}). Win+D·클릭 동작은 실제 환경 검증이 필요한 실험 기능입니다.")
         } else {
             format!("바탕화면 연결 안 됨 (실제 부모={parent:#x}, 예상 호스트={host:#x}). 위젯을 다시 연결해야 합니다.")
         };
+        if let Some(error) = saved
+            .as_ref()
+            .and_then(|entry| entry.geometry_error.as_ref())
+        {
+            message.push_str(&format!(" 화면 안 위치 복구 실패: {error}"));
+        }
         Ok(AttachmentInfo {
             attached,
             strategy: STRATEGY.into(),
@@ -886,7 +926,7 @@ mod native {
     fn above_sibling(hwnd: Hwnd, sibling: Hwnd) -> bool {
         let mut next = unsafe { GetWindow(hwnd, GW_HWNDNEXT) };
         // Bounded traversal also fails cleanly if Explorer changes the tree
-        // concurrently. No timer, cursor hook, or per-frame polling is used.
+        // concurrently. No cursor hook or per-frame polling is used.
         for _ in 0..1024 {
             if next == 0 {
                 return false;
@@ -918,6 +958,103 @@ mod native {
             .map_err(|_| "바탕화면 상태 잠금 오류")?
             .remove(&hwnd);
         Ok(())
+    }
+
+    // Use the same DPI scope for monitor, screen and parent coordinates. A child
+    // does not reliably receive display-change broadcasts, so its own UI-thread
+    // timer also checks this after resolution/DPI changes or monitor removal.
+    fn recover_geometry(hwnd: Hwnd) -> Result<(), String> {
+        require_ui_thread(hwnd)?;
+        let saved = record(hwnd)?.ok_or("위젯 연결 상태가 없습니다.")?;
+        if saved.moving || saved.recovering {
+            return Ok(());
+        }
+        if unsafe { GetParent(hwnd) } != saved.host || unsafe { IsWindow(saved.host) } == 0 {
+            return Err("바탕화면 호스트가 변경되어 위치를 복구할 수 없습니다.".into());
+        }
+        let _dpi = DpiGuard::enter(unsafe { GetWindowDpiAwarenessContext(hwnd) })?;
+        let monitor = unsafe { MonitorFromWindow(hwnd, 2) }; // nearest surviving monitor
+        let mut info = MonitorInfo {
+            size: std::mem::size_of::<MonitorInfo>() as u32,
+            ..Default::default()
+        };
+        if monitor == 0 || unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+            return Err(error("GetMonitorInfoW"));
+        }
+        // The widget must fit both the monitor work area and its parent's client
+        // area; clipping by either can otherwise hide the top-right controls.
+        let work = to_parent(info.work, saved.host)?;
+        let mut client = Rect::default();
+        if unsafe { GetClientRect(saved.host, &mut client) } == 0 {
+            return Err(error("GetClientRect"));
+        }
+        let bounds = Rect {
+            left: work.left.max(client.left),
+            top: work.top.max(client.top),
+            right: work.right.min(client.right),
+            bottom: work.bottom.min(client.bottom),
+        };
+        if bounds.right <= bounds.left || bounds.bottom <= bounds.top {
+            return Err("바탕화면 호스트와 모니터의 표시 영역이 겹치지 않습니다.".into());
+        }
+        let current = to_parent(rect(hwnd)?, saved.host)?;
+        let width = (current.right - current.left).clamp(1, bounds.right - bounds.left);
+        let height = (current.bottom - current.top).clamp(1, bounds.bottom - bounds.top);
+        let left = current.left.clamp(bounds.left, bounds.right - width);
+        let top = current.top.clamp(bounds.top, bounds.bottom - height);
+        let target = Rect {
+            left,
+            top,
+            right: left + width,
+            bottom: top + height,
+        };
+        if current == target {
+            return Ok(());
+        }
+        records()
+            .lock()
+            .map_err(|_| "바탕화면 상태 잠금 오류")?
+            .get_mut(&hwnd)
+            .ok_or("위젯 연결 상태가 없습니다.")?
+            .recovering = true;
+        // Never hold the registry mutex across SetWindowPos: it invokes our
+        // subclass synchronously. Only this move bypasses the user's lock.
+        let result = if unsafe {
+            SetWindowPos(
+                hwnd,
+                0,
+                left,
+                top,
+                width,
+                height,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            )
+        } == 0
+        {
+            Err(error("SetWindowPos(widget recovery)"))
+        } else {
+            rect(hwnd)
+                .and_then(|screen| to_parent(screen, saved.host))
+                .and_then(|actual| {
+                    if actual == target {
+                        Ok(())
+                    } else {
+                        Err("창 위치 보정 결과가 요청한 영역과 다릅니다.".into())
+                    }
+                })
+        };
+        if let Some(entry) = records()
+            .lock()
+            .map_err(|_| "바탕화면 상태 잠금 오류")?
+            .get_mut(&hwnd)
+        {
+            entry.recovering = false;
+        }
+        result
+    }
+
+    pub fn recover_position(window: &WebviewWindow) -> Result<(), String> {
+        recover_geometry(hwnd(window)?)
     }
 
     /// Lock position/size, preserving normal pointer clicks on calendar dates.
@@ -972,6 +1109,7 @@ mod native {
     ) -> isize {
         if message == 0x0082 {
             // WM_NCDESTROY; Explorer can destroy its children.
+            KillTimer(hwnd, RECOVERY_TIMER_ID);
             RemoveWindowSubclass(hwnd, subclass, SUBCLASS_ID);
             if let Ok(mut entries) = records().lock() {
                 entries.remove(&hwnd);
@@ -981,10 +1119,31 @@ mod native {
         if message == 0x0021 {
             return 3;
         } // MA_NOACTIVATE, keep the click.
+        if message == 0x0231 || message == 0x0232 {
+            // WM_ENTER/EXITSIZEMOVE
+            if let Ok(mut entries) = records().lock() {
+                if let Some(entry) = entries.get_mut(&hwnd) {
+                    entry.moving = message == 0x0231;
+                }
+            }
+        }
+        if message == 0x0113 && wparam == RECOVERY_TIMER_ID {
+            let error = recover_geometry(hwnd).err();
+            if let Ok(mut entries) = records().lock() {
+                if let Some(entry) = entries.get_mut(&hwnd) {
+                    entry.geometry_error = error;
+                }
+            }
+            return 0;
+        }
         let locked = records()
             .lock()
             .ok()
-            .and_then(|entries| entries.get(&hwnd).map(|entry| entry.locked))
+            .and_then(|entries| {
+                entries
+                    .get(&hwnd)
+                    .map(|entry| entry.locked && !entry.recovering)
+            })
             .unwrap_or(false);
         if locked {
             if message == 0x0112 && matches!(wparam & 0xfff0, 0xf010 | 0xf000) {
@@ -1188,6 +1347,112 @@ mod native {
             assert_eq!(
                 unsafe { GetClassLongW(windows.source, GCL_STYLE) },
                 source_class.style
+            );
+
+            // A locked child must recover when its desktop host becomes smaller.
+            // Use only this process's hidden windows, never resize the real display.
+            position(
+                windows.widget,
+                0,
+                Rect {
+                    left: 150,
+                    top: -20,
+                    right: 230,
+                    bottom: 40,
+                },
+            )
+            .unwrap();
+            records().lock().unwrap().insert(
+                windows.widget,
+                Attachment {
+                    host: windows.source,
+                    view: 0,
+                    shell_pid: unsafe { GetCurrentProcessId() },
+                    original_style,
+                    original_exstyle,
+                    original_rect: rect(windows.widget).unwrap(),
+                    locked: true,
+                    recovering: false,
+                    moving: false,
+                    geometry_error: None,
+                },
+            );
+            assert_ne!(
+                unsafe { SetWindowSubclass(windows.widget, subclass, SUBCLASS_ID, 0) },
+                0
+            );
+            assert_ne!(
+                unsafe {
+                    SetWindowPos(
+                        windows.source,
+                        0,
+                        0,
+                        0,
+                        60,
+                        40,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                },
+                0
+            );
+            let before_recovery = to_parent(rect(windows.widget).unwrap(), windows.source).unwrap();
+            assert!(before_recovery.top < 0 && before_recovery.right > 60);
+            // WM_TIMER, the widget's geometry recovery timer.
+            unsafe {
+                SendMessageW(windows.widget, 0x0113, 0x5449_4d46, 0);
+            }
+            let recovered = to_parent(rect(windows.widget).unwrap(), windows.source).unwrap();
+            assert!(
+                recovered.left >= 0
+                    && recovered.top >= 0
+                    && recovered.right <= 60
+                    && recovered.bottom <= 40,
+                "move/lock controls remain clipped after display shrink: {recovered:?}"
+            );
+            assert!(record(windows.widget).unwrap().unwrap().locked);
+            assert_eq!(unsafe { GetParent(windows.widget) }, windows.source);
+            assert_eq!(unsafe { IsWindowVisible(windows.widget) }, 0);
+            assert_eq!(layer_attributes(windows.widget).unwrap(), before);
+            assert_eq!(
+                (
+                    recovered.right - recovered.left,
+                    recovered.bottom - recovered.top
+                ),
+                (60, 40)
+            );
+            unsafe {
+                SendMessageW(windows.widget, 0x0113, 0x5449_4d46, 0);
+            }
+            assert_eq!(
+                to_parent(rect(windows.widget).unwrap(), windows.source).unwrap(),
+                recovered
+            );
+            // Recovery must not remove the user's movement lock.
+            position(
+                windows.widget,
+                0,
+                Rect {
+                    left: 500,
+                    top: 500,
+                    right: 800,
+                    bottom: 800,
+                },
+            )
+            .unwrap();
+            let still_locked = to_parent(rect(windows.widget).unwrap(), windows.source).unwrap();
+            assert_eq!(
+                (
+                    still_locked.left,
+                    still_locked.top,
+                    still_locked.right,
+                    still_locked.bottom
+                ),
+                (
+                    recovered.left,
+                    recovered.top,
+                    recovered.right,
+                    recovered.bottom
+                )
             );
         }
     }
