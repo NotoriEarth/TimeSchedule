@@ -2,21 +2,7 @@
 //! which executes on the owning event-loop thread. No stored raw window handles.
 use raw_window_handle::RawWindowHandle;
 
-#[allow(dead_code, unused_imports)]
-mod desktop {
-    include!(concat!(env!("OUT_DIR"), "/desktop_bridge.rs"));
-}
-
-pub struct NativeHandle(pub isize);
-pub struct NativeWindow(isize);
-impl NativeWindow {
-    pub fn label(&self) -> &str {
-        "widget"
-    }
-    pub fn hwnd(&self) -> Result<NativeHandle, String> {
-        Ok(NativeHandle(self.0))
-    }
-}
+use timeschedule_desktop::windows as desktop;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Action {
@@ -38,7 +24,7 @@ pub fn run(window: &dyn iced::window::Window, action: Action) -> Result<Report, 
     let RawWindowHandle::Win32(raw) = handle.as_raw() else {
         return Err("Windows 전용 시제품입니다.".into());
     };
-    let owned = NativeWindow(raw.hwnd.get());
+    let owned = unsafe { desktop::NativeWindow::iced_widget(raw.hwnd.get()) };
     match action {
         Action::Attach => {
             desktop::attach(&owned)?;

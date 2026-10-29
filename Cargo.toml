@@ -1,0 +1,10 @@
+[workspace]
+members = ["crates/timeschedule-core", "crates/timeschedule-desktop", "apps/timeschedule-native"]
+exclude = ["src-tauri", "experiments/rust-ui-spike"]
+resolver = "2"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

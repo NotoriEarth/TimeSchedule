@@ -1,0 +1,13 @@
+[package]
+name = "timeschedule-native"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "tokio", "advanced"] }
+tokio = { version = "1", features = ["rt", "time"] }
+raw-window-handle = "0.6"
+chrono = { version = "0.4", features = ["clock"] }
+timeschedule-core = { path = "../../crates/timeschedule-core" }
+timeschedule-desktop = { path = "../../crates/timeschedule-desktop" }

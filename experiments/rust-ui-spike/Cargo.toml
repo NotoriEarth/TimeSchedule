@@ -7,6 +7,10 @@ publish = false
 [dependencies]
 iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "thread-pool", "advanced"] }
 raw-window-handle = "0.6"
+timeschedule-desktop = { path = "../../crates/timeschedule-desktop" }
+
+[dev-dependencies]
+timeschedule-desktop = { path = "../../crates/timeschedule-desktop", features = ["test-support"] }
 
 [profile.release]
 opt-level = "s"

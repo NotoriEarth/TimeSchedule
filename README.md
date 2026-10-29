@@ -1,5 +1,20 @@
 # TimeSchedule
 
+## Rust 네이티브 이식 실험
+
+`codex/rust-native-experiment`에서는 기존 PC 기능을 Iced 기반 Rust 앱으로 옮깁니다. 기존 Tauri 앱과 별도로 빌드하며, 공통 SQLite/Git 코어를 사용합니다. 새 앱 실행에는 WebView/JavaScript 런타임이 필요하지 않습니다.
+
+```powershell
+.\scripts\build-native.ps1
+.\artifacts\TimeSchedule-native.exe
+```
+
+네이티브 기본 저장 폴더는 `%LOCALAPPDATA%\com.timeschedule.personal.native-experiment`, 파일은 `schedule.db`입니다. 기존 앱의 DB를 자동으로 가져오지 않습니다. `TIMESCHEDULE_DATA_DIR`로 별도 테스트 폴더를 지정할 수 있습니다. 기존 DB의 호환성 확인에는 원본 대신 일관되게 백업한 복사본을 사용하세요.
+
+[네이티브 기능 대조·검증·테스트 방법](docs/rust-native/full-port.md)을 참고하세요. 아래 설명과 과거 메모리 표는 별도 표시가 없는 한 기존 Tauri 버전 기준입니다. 새 앱의 최종 RAM 절감률이나 실제 한글 IME/바탕화면 검증 결과로 해석하지 마세요.
+
+## 기존 Tauri 앱
+
 오늘의 일정과 작은 할 일을 정리하는 Windows용 개인 달력 프로토타입입니다. Tauri 2, Svelte 5, TypeScript, Rust, SQLite로 구성하며, 계정이나 서버 없이 내 컴퓨터에 데이터를 저장합니다.
 
 2026-10-29 다이어리 개발 브랜치에서는 **상세 창을 주 화면인 만년 다이어리**로 구성했습니다. 월간 달력의 일요일 앞 주간 버튼은 그 다음 월요일부터 다음 일요일까지 열며, **월간으로** 버튼으로 원래 보던 월에 돌아옵니다. 날짜를 누르면 해당 날짜의 일정 편집창이 열립니다. 주간 기록은 제목을 펼쳐 본문과 출처를 보고, 필요한 만큼 추가할 수 있습니다.

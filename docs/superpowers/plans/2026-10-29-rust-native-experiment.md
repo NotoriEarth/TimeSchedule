@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax.
 
-**2026-10-29 진행:** 사용자가 Task 2 시제품 진행을 승인했다. 기준 EXE와 해시를 보존한 뒤 독립 Iced 시제품을 먼저 준비했다. Task 1 전체 벤치마크와 Task 2 실제 IME/화면/바탕화면 검증은 아직 미완료이며, Task 3 이후 전면 이식은 시작하지 않았다. 결과: `docs/rust-native/gui-spike.md`.
+**2026-10-29 진행:** 독립 Iced 시제품 이후 사용자가 전체 앱 이식을 명시적으로 요청했다. 공통 코어·Windows 플랫폼 분리와 전체 네이티브 UI 구현을 진행한다. Task 1 전체 벤치마크와 Task 2 실제 IME/화면/바탕화면 검증은 아직 미완료이며, 최신 요청에 따라 구현은 먼저 진행하되 실제 검증/머지 승인은 별도로 유지한다. 현재 기록: `SOFTWARE_FACTORY.rust-native.md`, `docs/rust-native/full-port.md`. 시제품 결과: `docs/rust-native/gui-spike.md`.
 
 **Goal:** 현재 다이어리와 동등한 기능의 Rust 네이티브 UI가 실제 메모리·응답성·유지보수 측면에서 유리한지 검증한다.
 
@@ -17,7 +17,7 @@
 - 작업 브랜치 `codex/rust-native-experiment`, 기준 커밋 `a8f47a1fcbf2bcc6dcd499ba1c545f897d5c0ee5`.
 - 사용자 DB 자동 접근/마이그레이션 금지. 별도 데이터 경로·별도 EXE로 비교한다.
 - 기존 기능·schema v2·식별자·기록 원문을 유지한다. 모바일/동기화/AI/블록 편집기 개발을 섞지 않는다.
-- 한글 입력과 바탕화면 호환성 검증 전 전체 GUI 이식에 들어가지 않는다.
+- 초기 계획의 한글 입력·바탕화면 검증 선행 조건은 최신 전체 이식 요청으로 구현 착수에 한해 해제했다. 실제 검증과 머지 승인은 별도로 유지한다.
 - 각 단계는 테스트/실행 결과와 함께 커밋한다. 실패 시 기준판을 제거하지 않는다.
 - 실험 브랜치의 머지는 별도의 사용자 테스트 승인 후에만 한다.
 

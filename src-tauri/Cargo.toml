@@ -18,6 +18,11 @@ serde_json = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["clock"] }
+timeschedule-core = { path = "../crates/timeschedule-core" }
+timeschedule-desktop = { path = "../crates/timeschedule-desktop" }
+
+[dev-dependencies]
+timeschedule-desktop = { path = "../crates/timeschedule-desktop", features = ["test-support"] }
 
 [profile.release]
 codegen-units = 1

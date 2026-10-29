@@ -3380,7 +3380,30 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "timeschedule-core",
+ "timeschedule-desktop",
  "uuid",
+]
+
+[[package]]
+name = "timeschedule-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "timeschedule-desktop"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "timeschedule-core",
+ "tray-icon",
 ]
 
 [[package]]
