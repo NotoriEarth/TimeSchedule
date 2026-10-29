@@ -1,5 +1,6 @@
 mod commands;
 mod desktop;
+mod diary;
 mod storage;
 
 use serde::{Deserialize, Serialize};
@@ -56,6 +57,7 @@ struct AppState {
     preferences: Mutex<Preferences>,
     widget_class: Result<(), String>,
     quitting: AtomicBool,
+    editor_open: AtomicBool,
 }
 
 #[derive(Serialize)]
@@ -431,11 +433,22 @@ async fn set_widget_opacity(app: AppHandle, opacity: u8) -> Result<(), String> {
 }
 
 fn quit(app: &AppHandle) {
+    if app.state::<AppState>().editor_open.load(Ordering::SeqCst) {
+        let _ = app.emit("editor-close-requested", ());
+        return;
+    }
     remember_widget_position(app);
     app.state::<AppState>()
         .quitting
         .store(true, Ordering::SeqCst);
     app.exit(0);
+}
+
+#[tauri::command]
+fn set_editor_open(app: AppHandle, open: bool) {
+    app.state::<AppState>()
+        .editor_open
+        .store(open, Ordering::SeqCst);
 }
 
 pub fn run() {
@@ -462,6 +475,7 @@ pub fn run() {
                 preferences: Mutex::new(preferences),
                 widget_class,
                 quitting: AtomicBool::new(false),
+                editor_open: AtomicBool::new(false),
             });
             if let Err(error) = &app.state::<AppState>().widget_class {
                 log(
@@ -545,6 +559,14 @@ pub fn run() {
                 if let WindowEvent::CloseRequested { api, .. } = event {
                     if !window.state::<AppState>().quitting.load(Ordering::SeqCst) {
                         api.prevent_close();
+                        if window
+                            .state::<AppState>()
+                            .editor_open
+                            .load(Ordering::SeqCst)
+                        {
+                            let _ = window.emit("editor-close-requested", ());
+                            return;
+                        }
                         remember_widget_position(window.app_handle());
                         if let Err(error) = window.destroy() {
                             log(window.app_handle(), &error.to_string());
@@ -563,6 +585,20 @@ pub fn run() {
             commands::list_notes,
             commands::save_note,
             commands::delete_note,
+            commands::list_projects,
+            commands::save_project,
+            commands::delete_project,
+            commands::list_entries,
+            commands::get_entry,
+            commands::save_entry,
+            commands::delete_entry,
+            commands::search_diary,
+            commands::import_git,
+            commands::list_note_headers,
+            commands::get_note,
+            commands::list_event_headers,
+            set_editor_open,
+            commands::open_source_url,
             get_app_info,
             show_manager,
             show_widget,

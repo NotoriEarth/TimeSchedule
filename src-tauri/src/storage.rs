@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const MAX_TITLE_LENGTH: usize = 200;
 const MAX_TEXT_LENGTH: usize = 20_000;
 
@@ -101,17 +101,29 @@ impl Storage {
     }
 
     pub fn list_events(&self, from: &str, to: &str) -> Result<Vec<CalendarEvent>, String> {
+        self.events_in_range(from, to, false)
+    }
+
+    pub fn list_event_headers(&self, from: &str, to: &str) -> Result<Vec<CalendarEvent>, String> {
+        self.events_in_range(from, to, true)
+    }
+
+    fn events_in_range(
+        &self,
+        from: &str,
+        to: &str,
+        headers: bool,
+    ) -> Result<Vec<CalendarEvent>, String> {
         validate_date(from)?;
         validate_date(to)?;
         if from > to {
             return Err("The start date must not be after the end date.".into());
         }
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT id, title, date, start_time, end_time, all_day, notes, color, completed, updated_at
+        let sql = format!("SELECT id, title, date, start_time, end_time, all_day, {}, color, completed, updated_at
              FROM events WHERE date >= ?1 AND date <= ?2
-             ORDER BY date ASC, all_day DESC, start_time ASC, id ASC"
-        ).map_err(database_error)?;
+             ORDER BY date ASC, all_day DESC, start_time ASC, id ASC", if headers { "''" } else { "notes" });
+        let mut statement = connection.prepare(&sql).map_err(database_error)?;
         let events = statement
             .query_map(params![from, to], event_from_row)
             .map_err(database_error)?
@@ -261,6 +273,30 @@ impl Storage {
         Ok(notes)
     }
 
+    pub fn list_note_headers(&self) -> Result<Vec<Note>, String> {
+        let c = self.connection()?;
+        let mut q = c
+            .prepare("SELECT id,title,'' AS body,updated_at FROM notes ORDER BY updated_at DESC,id")
+            .map_err(database_error)?;
+        let rows = q
+            .query_map([], note_from_row)
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(rows)
+    }
+
+    pub fn get_note(&self, id: &str) -> Result<Note, String> {
+        validate_id(id)?;
+        self.connection()?
+            .query_row(
+                "SELECT id,title,body,updated_at FROM notes WHERE id=?1",
+                [id],
+                note_from_row,
+            )
+            .map_err(database_error)
+    }
+
     pub fn save_note(&self, input: NoteInput) -> Result<Note, String> {
         let title = validated_title(&input.title)?;
         validate_text(&input.body, "Note body", MAX_TEXT_LENGTH)?;
@@ -291,7 +327,7 @@ impl Storage {
         self.delete("DELETE FROM notes WHERE id = ?1", "Note", id)
     }
 
-    fn delete(&self, sql: &str, kind: &str, id: &str) -> Result<(), String> {
+    pub(crate) fn delete(&self, sql: &str, kind: &str, id: &str) -> Result<(), String> {
         validate_id(id)?;
         let connection = self.connection()?;
         let changed = connection
@@ -300,7 +336,7 @@ impl Storage {
         require_changed(changed, kind)
     }
 
-    fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
+    pub(crate) fn connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
         self.connection
             .lock()
             .map_err(|_| "Database access was interrupted. Please restart the application.".into())
@@ -350,6 +386,25 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
             PRAGMA user_version = 1;"
         ).map_err(database_error)?;
     }
+    if version < 2 {
+        transaction.execute_batch(
+            "CREATE TABLE projects (
+                id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL,
+                repo_path TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE diary_entries (
+                id TEXT PRIMARY KEY NOT NULL, project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+                date TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL,
+                source_url TEXT NOT NULL DEFAULT '', source_ref TEXT,
+                source_body TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+                UNIQUE(source_ref)
+            );
+            CREATE INDEX diary_date ON diary_entries(date);
+            CREATE INDEX diary_project_date ON diary_entries(project_id, date);
+            PRAGMA user_version = 2;"
+        ).map_err(database_error)?;
+        crate::diary::create_search_index(&transaction)?;
+    }
     transaction.commit().map_err(database_error)
 }
 
@@ -389,7 +444,7 @@ fn validate_time(value: &str) -> Result<NaiveTime, String> {
         .map_err(|_| "Please enter a valid 24-hour time in HH:mm format.".into())
 }
 
-fn validated_title(value: &str) -> Result<String, String> {
+pub(crate) fn validated_title(value: &str) -> Result<String, String> {
     let title = value.trim();
     if title.is_empty() {
         return Err("A title is required.".into());
@@ -398,7 +453,7 @@ fn validated_title(value: &str) -> Result<String, String> {
     Ok(title.to_string())
 }
 
-fn validate_text(value: &str, field: &str, maximum: usize) -> Result<(), String> {
+pub(crate) fn validate_text(value: &str, field: &str, maximum: usize) -> Result<(), String> {
     if value.chars().take(maximum + 1).count() > maximum {
         return Err(format!("{field} must be at most {maximum} characters."));
     }
@@ -408,13 +463,13 @@ fn validate_text(value: &str, field: &str, maximum: usize) -> Result<(), String>
     Ok(())
 }
 
-fn validate_id(id: &str) -> Result<(), String> {
+pub(crate) fn validate_id(id: &str) -> Result<(), String> {
     Uuid::parse_str(id)
         .map(|_| ())
         .map_err(|_| "The record ID is invalid.".into())
 }
 
-fn record_id(id: Option<String>) -> Result<String, String> {
+pub(crate) fn record_id(id: Option<String>) -> Result<String, String> {
     match id {
         Some(id) => {
             validate_id(&id)?;
@@ -424,11 +479,11 @@ fn record_id(id: Option<String>) -> Result<String, String> {
     }
 }
 
-fn timestamp() -> String {
+pub(crate) fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn require_changed(changed: usize, kind: &str) -> Result<(), String> {
+pub(crate) fn require_changed(changed: usize, kind: &str) -> Result<(), String> {
     if changed == 0 {
         Err(format!(
             "{kind} not found. It may have been deleted in another window."
@@ -438,7 +493,7 @@ fn require_changed(changed: usize, kind: &str) -> Result<(), String> {
     }
 }
 
-fn database_error(error: rusqlite::Error) -> String {
+pub(crate) fn database_error(error: rusqlite::Error) -> String {
     format!("Database operation failed: {error}")
 }
 

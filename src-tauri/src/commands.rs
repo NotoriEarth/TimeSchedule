@@ -1,5 +1,102 @@
+use crate::diary::{
+    Entry, EntryInput, EntrySummary, ImportResult, Project, ProjectInput, SearchHit,
+};
 use crate::storage::{CalendarEvent, EventInput, Note, NoteInput, Storage, Task, TaskInput};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+#[tauri::command]
+pub fn open_source_url(url: String) -> Result<(), String> {
+    crate::diary::open_source_url(&url)
+}
+
+#[tauri::command]
+pub fn list_projects(storage: State<'_, Storage>) -> Result<Vec<Project>, String> {
+    storage.list_projects()
+}
+#[tauri::command]
+pub fn save_project(
+    app: AppHandle,
+    storage: State<'_, Storage>,
+    input: ProjectInput,
+) -> Result<Project, String> {
+    let p = storage.save_project(input)?;
+    notify_data_changed(&app)?;
+    Ok(p)
+}
+#[tauri::command]
+pub fn delete_project(
+    app: AppHandle,
+    storage: State<'_, Storage>,
+    id: String,
+) -> Result<(), String> {
+    storage.delete_project(&id)?;
+    notify_data_changed(&app)
+}
+#[tauri::command]
+pub fn list_entries(
+    storage: State<'_, Storage>,
+    from: String,
+    to: String,
+    project_id: Option<String>,
+    offset: u32,
+) -> Result<Vec<EntrySummary>, String> {
+    storage.list_entries(&from, &to, project_id.as_deref(), offset)
+}
+#[tauri::command]
+pub fn get_entry(storage: State<'_, Storage>, id: String) -> Result<Entry, String> {
+    storage.get_entry(&id)
+}
+#[tauri::command]
+pub fn save_entry(
+    app: AppHandle,
+    storage: State<'_, Storage>,
+    input: EntryInput,
+) -> Result<Entry, String> {
+    let e = storage.save_entry(input)?;
+    notify_data_changed(&app)?;
+    Ok(e)
+}
+#[tauri::command]
+pub fn delete_entry(app: AppHandle, storage: State<'_, Storage>, id: String) -> Result<(), String> {
+    storage.delete_entry(&id)?;
+    notify_data_changed(&app)
+}
+#[tauri::command]
+pub async fn search_diary(
+    app: AppHandle,
+    query: String,
+    limit: u32,
+) -> Result<Vec<SearchHit>, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<Storage>().search_diary(&query, limit))
+        .await
+        .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub async fn import_git(app: AppHandle, project_id: String) -> Result<ImportResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = app.state::<Storage>().import_git(&project_id)?;
+        notify_data_changed(&app)?;
+        Ok(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub fn list_note_headers(storage: State<'_, Storage>) -> Result<Vec<Note>, String> {
+    storage.list_note_headers()
+}
+#[tauri::command]
+pub fn get_note(storage: State<'_, Storage>, id: String) -> Result<Note, String> {
+    storage.get_note(&id)
+}
+#[tauri::command]
+pub fn list_event_headers(
+    storage: State<'_, Storage>,
+    from: String,
+    to: String,
+) -> Result<Vec<CalendarEvent>, String> {
+    storage.list_event_headers(&from, &to)
+}
 
 #[tauri::command]
 pub fn list_events(

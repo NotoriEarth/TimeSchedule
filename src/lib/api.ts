@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import type { Project, DiaryEntry } from './diary-api';
 
 export type EventColor = 'sage' | 'blue' | 'amber' | 'rose';
 export type CalendarEvent = {
@@ -14,28 +15,31 @@ export type Note = { id: string; title: string; body: string; updatedAt: string 
 export type NoteInput = Omit<Note, 'id' | 'updatedAt'> & { id?: string };
 export type AppInfo = { storagePath: string; version: string; desktopAttached: boolean; desktopMessage: string; widgetLocked: boolean; widgetVisible: boolean; widgetOpacity: number };
 
-type PreviewDatabase = { events: CalendarEvent[]; tasks: Task[]; notes: Note[] };
+type PreviewDatabase = { events: CalendarEvent[]; tasks: Task[]; notes: Note[]; projects: Project[]; entries: DiaryEntry[] };
 export const isNative = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 const storageKey = 'timeschedule-preview-v1';
 const changeEvent = 'timeschedule-local-change';
 let previewWidgetOpacity = 82;
 
-function readPreview(): PreviewDatabase {
+export function readPreview(): PreviewDatabase {
   const raw = localStorage.getItem(storageKey);
-  if (!raw) return { events: [], tasks: [], notes: [] };
+  if (!raw) return { events: [], tasks: [], notes: [], projects: [], entries: [] };
   const data: unknown = JSON.parse(raw);
   if (!data || typeof data !== 'object' || !('events' in data) || !Array.isArray(data.events) || !('tasks' in data) || !Array.isArray(data.tasks) || !('notes' in data) || !Array.isArray(data.notes)) {
     throw new Error('브라우저 미리보기 데이터를 읽을 수 없습니다. 브라우저 저장소를 확인해 주세요.');
   }
-  return data as PreviewDatabase;
+  const db = data as PreviewDatabase;
+  db.projects ??= []; db.entries ??= [];
+  if (!Array.isArray(db.projects) || !Array.isArray(db.entries)) throw new Error('다이어리 미리보기 데이터를 읽을 수 없습니다.');
+  return db;
 }
 
-function writePreview(data: PreviewDatabase): void {
+export function writePreview(data: PreviewDatabase): void {
   localStorage.setItem(storageKey, JSON.stringify(data));
   window.dispatchEvent(new Event(changeEvent));
 }
 
-function validateDate(value: string): boolean {
+export function validateDate(value: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const [year, month, day] = value.split('-').map(Number);
   const date = new Date(year, month - 1, day, 12);
@@ -60,7 +64,7 @@ function sortEvents(events: CalendarEvent[]): CalendarEvent[] {
   return events.sort((a, b) => a.date.localeCompare(b.date) || Number(b.allDay) - Number(a.allDay) || (a.startTime ?? '').localeCompare(b.startTime ?? '') || a.title.localeCompare(b.title));
 }
 
-async function saveRecord<T extends { id: string; updatedAt: string }>(collection: keyof PreviewDatabase, input: Omit<T, 'id' | 'updatedAt'> & { id?: string }): Promise<T> {
+export async function saveRecord<T extends { id: string; updatedAt: string }>(collection: keyof PreviewDatabase, input: Omit<T, 'id' | 'updatedAt'> & { id?: string }): Promise<T> {
   const db = readPreview();
   const record = { ...input, id: input.id ?? crypto.randomUUID(), updatedAt: new Date().toISOString() } as T;
   const records = db[collection] as unknown as T[];
@@ -71,7 +75,7 @@ async function saveRecord<T extends { id: string; updatedAt: string }>(collectio
   return record;
 }
 
-async function deleteRecord(collection: keyof PreviewDatabase, id: string): Promise<void> {
+export async function deleteRecord(collection: keyof PreviewDatabase, id: string): Promise<void> {
   const db = readPreview();
   const records = db[collection];
   const index = records.findIndex(item => item.id === id);
@@ -81,6 +85,15 @@ async function deleteRecord(collection: keyof PreviewDatabase, id: string): Prom
 }
 
 export const api = {
+  async listEventHeaders(from: string, to: string): Promise<CalendarEvent[]> {
+    return isNative ? invoke('list_event_headers', { from, to }) : readPreview().events.filter(e => e.date >= from && e.date <= to).map(e => ({ ...e, notes: '' }));
+  },
+  async listNoteHeaders(): Promise<Note[]> { return isNative ? invoke('list_note_headers') : readPreview().notes.map(n => ({ ...n, body: '' })); },
+  async getNote(id: string): Promise<Note> {
+    if (isNative) return invoke('get_note', { id });
+    const note = readPreview().notes.find(n => n.id === id);
+    if (!note) throw new Error('메모를 찾을 수 없습니다.'); return note;
+  },
   async listEvents(from: string, to: string): Promise<CalendarEvent[]> {
     return sortEvents(isNative ? await invoke<CalendarEvent[]>('list_events', { from, to }) : readPreview().events.filter(event => event.date >= from && event.date <= to));
   },
