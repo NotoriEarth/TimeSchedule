@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
   import { api, isNative } from './api';
@@ -9,6 +9,8 @@
   import type { EditorRequest } from './editor-types';
   let { request, projects, onclose, onsaved }: { request: EditorRequest; projects: Project[]; onclose: () => void; onsaved: (date?: string) => void } = $props();
   let dialog: HTMLDialogElement;
+  let confirmation = $state<HTMLDivElement>();
+  let backdropPressed = false;
   // A keyed editor instance owns its draft until save or an explicit discard.
   const initialRequest = untrack(() => JSON.parse(JSON.stringify(request)) as EditorRequest);
   let event = $state<EventInput>(initialRequest.type === 'event' ? structuredClone(initialRequest.value) : {title:'', date:initialRequest.date, allDay:true,startTime:null,endTime:null,notes:'',color:'sage',completed:false});
@@ -24,6 +26,21 @@
   const id = $derived(request.type === 'event' ? event.id : request.type === 'entry' ? entry.id : request.type === 'project' ? project.id : request.type === 'note' ? note.id : task.id);
   const name = $derived(request.type === 'event' ? '일정' : request.type === 'entry' ? '다이어리 기록' : request.type === 'project' ? '프로젝트' : request.type === 'note' ? '메모' : '할 일');
   function cancel() { if (busy) return; if (dirty) confirm='discard'; else onclose(); }
+  function isBackdrop(e: MouseEvent) {
+    const bounds = dialog.getBoundingClientRect();
+    return e.target === dialog && (e.clientX < bounds.left || e.clientX > bounds.right || e.clientY < bounds.top || e.clientY > bounds.bottom);
+  }
+  function backdropClick(e: MouseEvent) {
+    const dismiss = backdropPressed && isBackdrop(e);
+    backdropPressed = false;
+    if (dismiss) cancel();
+  }
+  $effect(() => {
+    if (confirm) void tick().then(() => {
+      confirmation?.scrollIntoView({block:'nearest'});
+      confirmation?.querySelector<HTMLButtonElement>('button')?.focus({preventScroll:true});
+    });
+  });
   async function save(e: SubmitEvent) {
     e.preventDefault(); if (busy) return; busy=true; error='';
     try {
@@ -59,7 +76,10 @@
   });
 </script>
 
-<dialog bind:this={dialog} class="diary-editor" aria-labelledby="diary-editor-title" oncancel={(e)=>{e.preventDefault();cancel();}}>
+<dialog bind:this={dialog} class="diary-editor" aria-labelledby="diary-editor-title"
+  onpointerdown={(e)=>backdropPressed=e.button===0&&isBackdrop(e)}
+  onpointercancel={()=>backdropPressed=false} onclick={backdropClick}
+  oncancel={(e)=>{e.preventDefault();cancel();}}>
   <form onsubmit={save}>
     <header><div><small>내 기록을 한 장씩</small><h2 id="diary-editor-title">{name} {id ? '수정' : '추가'}</h2></div><button type="button" aria-label="편집 닫기" onclick={cancel} disabled={busy}>✕</button></header>
     <fieldset disabled={busy}>
@@ -89,7 +109,7 @@
         <label>할 일<input required maxlength="200" bind:value={task.title} /></label><label>날짜 (선택)<input type="date" min="1900-01-01" max="9999-12-31" value={task.date??''} oninput={(e)=>task.date=e.currentTarget.value||null} /></label><label class="check"><input type="checkbox" bind:checked={task.completed} />완료</label>
       {/if}
       {#if error}<p class="diary-error" role="alert">{error}</p>{/if}
-      {#if confirm}<div class="discard-box" role="alert"><p>{confirm==='discard' ? '저장하지 않은 내용을 버리고 닫을까요?' : request.type==='project' ? '프로젝트를 삭제할까요? 연결된 기록은 프로젝트 없이 보존됩니다.' : '삭제한 항목은 되돌릴 수 없습니다. 삭제할까요?'}</p><button class="paper-button" type="button" onclick={()=>confirm=null}>계속 편집</button><button class="paper-button danger" type="button" onclick={()=>confirm==='discard'?onclose():remove()}>{confirm==='discard'?'내용 버리고 닫기':'삭제 확인'}</button></div>{/if}
+      {#if confirm}<div bind:this={confirmation} class="discard-box" role="alert"><p>{confirm==='discard' ? '작성한 내용을 저장하지 않고 닫을까요?' : request.type==='project' ? '프로젝트를 삭제할까요? 연결된 기록은 프로젝트 없이 보존됩니다.' : '삭제한 항목은 되돌릴 수 없습니다. 삭제할까요?'}</p><button class="paper-button" type="button" onclick={()=>confirm=null}>계속 편집</button><button class="paper-button danger" type="button" onclick={()=>confirm==='discard'?onclose():remove()}>{confirm==='discard'?'저장하지 않고 닫기':'삭제 확인'}</button></div>{/if}
     </fieldset>
     <footer>{#if id}<button type="button" class="danger" onclick={remove} disabled={busy}>삭제</button>{/if}<span>{dirty?'저장되지 않은 변경':''}</span><button class="paper-button" type="button" onclick={cancel} disabled={busy}>취소</button><button class="paper-button primary" type="submit" disabled={busy}>{busy?'저장 중…':'저장하기'}</button></footer>
   </form>
