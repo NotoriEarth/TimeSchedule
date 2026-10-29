@@ -72,7 +72,7 @@
     const from = boundaries[0];
     const to = boundaries[3];
     try {
-      const [nextEvents, nextTasks, nextNotes] = await Promise.all([api.listEvents(from, to), api.listTasks(), api.listNotes()]);
+      const [nextEvents, nextTasks, nextNotes] = await Promise.all([widget ? api.listEventHeaders(from, to) : api.listEvents(from, to), widget ? Promise.resolve([]) : api.listTasks(), widget ? Promise.resolve([]) : api.listNotes()]);
       if (version !== loadNumber) return;
       events = nextEvents;
       tasks = nextTasks;

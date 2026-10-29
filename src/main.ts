@@ -1,5 +1,4 @@
 import { mount } from 'svelte';
-import App from './App.svelte';
 import './app.css';
 
 if (new URLSearchParams(window.location.search).get('view') === 'widget') {
@@ -7,4 +6,9 @@ if (new URLSearchParams(window.location.search).get('view') === 'widget') {
   if (!('__TAURI_INTERNALS__' in window)) document.documentElement.classList.add('widget-browser-preview');
 }
 
-mount(App, { target: document.getElementById('app')! });
+async function start() {
+  const { default: Component } = new URLSearchParams(window.location.search).get('view') === 'widget'
+    ? await import('./App.svelte') : await import('./lib/Diary.svelte');
+  mount(Component, { target: document.getElementById('app')! });
+}
+void start();

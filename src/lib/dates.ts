@@ -4,7 +4,25 @@ export function dateKey(date = new Date()): string {
 
 export function parseDate(key: string): Date {
   const [year, month, day] = key.split('-').map(Number);
-  return new Date(year, month - 1, day, 12);
+  const date = new Date(2000, month - 1, day, 12);
+  date.setFullYear(year);
+  return date;
+}
+
+export function addDays(key: string, delta: number): string {
+  const date = parseDate(key);
+  date.setDate(date.getDate() + delta);
+  return dateKey(date);
+}
+
+export function weekAfterSunday(sunday: string): { from: string; to: string } {
+  if (parseDate(sunday).getDay() !== 0) throw new Error('주간 선택 기준은 일요일이어야 합니다.');
+  return { from: addDays(sunday, 1), to: addDays(sunday, 7) };
+}
+
+export function weekContaining(key: string): { from: string; to: string } {
+  const offset = (parseDate(key).getDay() + 6) % 7;
+  return { from: addDays(key, -offset), to: addDays(key, 6 - offset) };
 }
 
 export function monthStart(key: string): Date {
