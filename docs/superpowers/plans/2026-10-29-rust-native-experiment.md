@@ -1,6 +1,8 @@
 # Rust Native Experiment Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax. 현재 요청은 계획 작성까지이며 구현 체크박스는 미완료 상태로 둔다.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax.
+
+**2026-10-29 진행:** 사용자가 Task 2 시제품 진행을 승인했다. 기준 EXE와 해시를 보존한 뒤 독립 Iced 시제품을 먼저 준비했다. Task 1 전체 벤치마크와 Task 2 실제 IME/화면/바탕화면 검증은 아직 미완료이며, Task 3 이후 전면 이식은 시작하지 않았다. 결과: `docs/rust-native/gui-spike.md`.
 
 **Goal:** 현재 다이어리와 동등한 기능의 Rust 네이티브 UI가 실제 메모리·응답성·유지보수 측면에서 유리한지 검증한다.
 

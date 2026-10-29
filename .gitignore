@@ -5,6 +5,7 @@ src-tauri/target/
 .cache/
 .test-data/
 artifacts/
+experiments/rust-ui-spike/target/
 src-tauri/gen/schemas/
 .env
 .env.*
