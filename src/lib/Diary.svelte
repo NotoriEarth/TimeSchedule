@@ -138,7 +138,7 @@
   });
 </script>
 
-<div class="diary-shell">
+<div class="diary-shell" class:week-view={view==='week'}>
   <aside class="diary-sidebar">
     <a class="diary-brand" href="./" onclick={(e)=>{e.preventDefault();navigate('month');}}><span>TS</span><div>TimeSchedule<small>나의 만년 다이어리</small></div></a>
     <p class="nav-caption">하루를 기록하는 공간</p>
@@ -187,8 +187,32 @@
       </div>
       <section class="selected-day"><div class="section-line"><h2>{readableDate(selected)}</h2><button class="paper-button" onclick={()=>{week=weekContaining(selected);navigate('week');}}>이 날짜의 주간 보기</button><button class="paper-button" onclick={()=>newEntry(selected)}>+ 기록</button></div>{#each events.filter(e=>e.date===selected) as e}{@render eventRow(e)}{:else}<p class="quiet">선택한 날짜에 등록된 일정이 없습니다.</p>{/each}</section>
     {:else if view==='week'}
-      <p class="view-hint">항목을 펼치면 본문과 출처를 확인할 수 있습니다. 기록은 필요한 만큼 추가하세요.</p>
-      <div class="week-paper">{#each weekDays as date}<section class="week-day"><header><small>{parseDate(date).getMonth()+1}월</small><strong>{parseDate(date).getDate()}</strong><span>{weekdayNames[parseDate(date).getDay()]}요일</span>{#if date===dateKey()}<em>오늘</em>{/if}</header><div class="week-day-content"><div class="week-day-actions"><button onclick={()=>newEvent(date)}>+ 일정</button><button onclick={()=>newEntry(date)}>+ 기록</button></div>{#each events.filter(e=>e.date===date) as e}{@render eventRow(e)}{/each}{#each entries.filter(e=>e.date===date) as entry (entry.id+entry.updatedAt)}<EntryCard {entry} projectTitle={projects.find(p=>p.id===entry.projectId)?.title} onedit={editEntry} />{/each}{#each tasks.filter(t=>t.date===date) as task}{@render taskRow(task)}{/each}{#if !events.some(e=>e.date===date)&&!entries.some(e=>e.date===date)&&!tasks.some(t=>t.date===date)}<p class="blank-day">오늘의 작은 기록을 남겨 보세요.</p>{/if}</div></section>{/each}</div>
+      <div class="week-paper" aria-label="주간 다이어리 펼침면">
+        <section class="week-overview" aria-label="이번 주">
+          <small>WEEKLY</small>
+          <h2>{parseDate(week.from).getMonth()+1}월</h2>
+          <p>{week.from.slice(5).replace('-','.')} — {week.to.slice(5).replace('-','.')}</p>
+          <p class="week-help">제목을 눌러 상세 보기<br/>날짜 칸 안에서 스크롤</p>
+          {#if more}<button class="paper-button" onclick={loadMore} disabled={busy}>기록 더 불러오기 ({entries.length}개)</button>{/if}
+        </section>
+        {#each weekDays as date}
+          <section class="week-day" class:week-today={date===dateKey()} aria-label={readableDate(date)}>
+            <header class:sunday={parseDate(date).getDay()===0} class:saturday={parseDate(date).getDay()===6}>
+              <strong>{parseDate(date).getDate()}</strong><small>{parseDate(date).getMonth()+1}월</small>
+              {#if date===dateKey()}<em>오늘</em>{/if}<span>{weekdayNames[parseDate(date).getDay()]}요일</span>
+            </header>
+            <div class="week-day-actions"><button aria-label={`${readableDate(date)} 일정 추가`} onclick={()=>newEvent(date)}>+ 일정</button><button aria-label={`${readableDate(date)} 기록 추가`} onclick={()=>newEntry(date)}>+ 기록</button></div>
+            <!-- Keyboard focus lets users scroll this independent day with arrow/PageDown keys. -->
+            <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+            <div class="week-day-content" role="region" aria-label={`${readableDate(date)} 기록 목록`} tabindex="0">
+              {#each events.filter(e=>e.date===date) as e}{@render eventRow(e)}{/each}
+              {#each entries.filter(e=>e.date===date) as entry (entry.id+entry.updatedAt)}<EntryCard {entry} projectTitle={projects.find(p=>p.id===entry.projectId)?.title} onedit={editEntry} />{/each}
+              {#each tasks.filter(t=>t.date===date) as task}{@render taskRow(task)}{/each}
+              {#if !events.some(e=>e.date===date)&&!entries.some(e=>e.date===date)&&!tasks.some(t=>t.date===date)}<p class="blank-day">오늘의 작은 기록을 남겨 보세요.</p>{/if}
+            </div>
+          </section>
+        {/each}
+      </div>
     {:else if view==='projects'}
       <div class="project-picker"><button class:chosen={!projectId} onclick={()=>chooseProject(null)}>모든 프로젝트</button>{#each projects as p}<button class:chosen={projectId===p.id} onclick={()=>chooseProject(p.id)}>{p.title}</button>{/each}</div>
       {#if activeProject}<section class="project-overview"><p class="preserve">{activeProject.description||'프로젝트 설명을 추가해 보세요.'}</p><small>Git 저장소: {activeProject.repoPath||'아직 연결하지 않았습니다.'}</small><div class="diary-actions"><button class="paper-button" onclick={importGit} disabled={busy||!isNative}>{busy?'처리 중…':'Git 커밋 수집'}</button><button class="paper-button" onclick={()=>newEntry(selected,'note')}>+ 자유 노트</button><button class="paper-button" onclick={()=>newEntry(selected,'troubleshooting')}>+ 트러블슈팅</button><button class="paper-button" onclick={()=>newEntry()}>+ 개발 기록</button><button class="paper-button" onclick={()=>draft()} disabled={busy}>프로젝트 근거 요약</button><button class="paper-button" onclick={()=>draft(true)} disabled={busy}>포트폴리오 초안</button></div><p class="hint">최근 500개 커밋을 읽고 저장소·커밋 ID로 중복을 건너뜁니다. 재수집해도 수정한 내용은 보존됩니다. {!isNative?'Git 수집은 데스크톱 앱에서 실행하세요.':''}</p></section>{:else if !projects.length}<section class="diary-empty"><h2>프로젝트의 과정을 모아 보세요.</h2><p>개발 기록, 자유 노트, 문제 해결과 Git 커밋을 한곳에.</p><button class="paper-button primary" onclick={()=>editProject()}>첫 프로젝트 만들기</button></section>{/if}
@@ -203,7 +227,7 @@
       <section class="settings-paper"><h2>내 컴퓨터에 보관하는 다이어리</h2><p>데이터 저장 위치</p><code>{appInfo?.storagePath??'확인 중…'}</code><h3>바탕화면 위젯</h3><p>{appInfo?.desktopMessage}</p><div class="diary-actions"><button class="paper-button" onclick={()=>attempt(async()=>{if(appInfo?.widgetVisible&&isNative)await api.hideWidget();else await api.showWidget();appInfo=await api.getAppInfo();})}>{isNative?(appInfo?.widgetVisible?'위젯 숨기기':'위젯 표시'):'위젯 미리보기'}</button><button class="paper-button" disabled={!isNative} onclick={()=>attempt(async()=>{await api.showWidget();appInfo=await api.getAppInfo();})}>위젯 위치 복구</button></div>{#if isNative}<label>불투명도 {appInfo?.widgetOpacity??82}%<input type="range" min="40" max="100" value={appInfo?.widgetOpacity??82} onchange={(e)=>{const opacity=Number(e.currentTarget.value);void attempt(async()=>{await api.setWidgetOpacity(opacity);appInfo=await api.getAppInfo();});}} /></label>{/if}<h3>근거 초안과 외부 연결</h3><p>요약과 포트폴리오는 저장된 원문을 정리한 편집 가능한 초안입니다. AI 분석 결과로 표시하지 않습니다.</p><p>외부 AI, ChatGPT/Space 연결, 모바일과 여러 기기 동기화는 아직 연결되지 않았습니다. 현재 모든 작업은 로컬에서 동작합니다.</p></section>
     {/if}
     {#if loading}<p class="diary-loading" role="status">기록을 불러오는 중…</p>{/if}
-    {#if more&&['week','projects','records','month'].includes(view)}<button class="paper-button load-more" onclick={loadMore} disabled={busy}>기록 더 불러오기 (현재 {entries.length}개)</button>{/if}
+    {#if more&&['projects','records','month'].includes(view)}<button class="paper-button load-more" onclick={loadMore} disabled={busy}>기록 더 불러오기 (현재 {entries.length}개)</button>{/if}
     <footer class="diary-footnote"><span>하루의 계획과 경험을, 오래 간직하도록.</span><span>TimeSchedule · {isNative?appInfo?.version??'':'미리보기'}</span></footer>
   </main>
 </div>
