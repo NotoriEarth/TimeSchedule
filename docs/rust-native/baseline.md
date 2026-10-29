@@ -1,5 +1,7 @@
 # 비교 기준 보존 — 2026-10-29
 
+후속: 전체 네이티브 이식 이후 기본 월간 상세창+위젯 유휴 상태의 [20회 비교 벤치마크](benchmark.md)를 완료했다. 아래 내용은 최초 시제품 당시 기록으로 보존한다.
+
 - 기준 소스: `a8f47a1fcbf2bcc6dcd499ba1c545f897d5c0ee5` (PR #1 병합).
 - 기능 EXE: `artifacts/TimeSchedule-diary-popup.exe`를 덮어쓰지 않고 `artifacts/baseline/TimeSchedule.exe`로 복사.
 - SHA256: `2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047`.

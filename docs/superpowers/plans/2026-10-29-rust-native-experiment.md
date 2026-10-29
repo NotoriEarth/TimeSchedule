@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox syntax.
 
-**2026-10-29 진행:** 독립 Iced 시제품 이후 사용자가 전체 앱 이식을 명시적으로 요청했다. 공통 코어·Windows 플랫폼 분리와 전체 네이티브 UI 구현을 진행한다. Task 1 전체 벤치마크와 Task 2 실제 IME/화면/바탕화면 검증은 아직 미완료이며, 최신 요청에 따라 구현은 먼저 진행하되 실제 검증/머지 승인은 별도로 유지한다. 현재 기록: `SOFTWARE_FACTORY.rust-native.md`, `docs/rust-native/full-port.md`. 시제품 결과: `docs/rust-native/gui-spike.md`.
+**2026-10-29 진행:** 공통 코어·Windows 플랫폼 분리와 전체 네이티브 UI 구현을 완료했다. 후속 요청으로 기본 월간 상세창+위젯 유휴 상태를 소형/대형 합성 DB에서 각 후보5회, 총20회 측정했다([결과](../../rust-native/benchmark.md)). Task 1/7의 검색·장문 편집·위젯 단독·재열기 및 Task 2 실제 IME/화면/바탕화면 검증은 여전히 미완료다. 사용자 테스트와 머지 승인은 별도로 유지한다. 현재 기록: `SOFTWARE_FACTORY.rust-native.md`, `docs/rust-native/full-port.md`. 시제품 결과: `docs/rust-native/gui-spike.md`.
 
 **Goal:** 현재 다이어리와 동등한 기능의 Rust 네이티브 UI가 실제 메모리·응답성·유지보수 측면에서 유리한지 검증한다.
 

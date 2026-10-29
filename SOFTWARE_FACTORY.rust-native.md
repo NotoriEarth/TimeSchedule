@@ -1,5 +1,109 @@
 # Rust native port — cycle rust-native, specification v1
 
+## Benchmark continuation — specification v2
+
+### Final assessment — benchmark scope technically complete, user review pending
+
+BR /root/native_review independently compared all2400 CSV rows to raw JSONL, recomputed sums/continuous CPU deltas/run and group statistics, checked provenance/profile isolation/order/cadence/exclusions/window and background-load limits, and STOPPED with no publication blockers. Fixed narrative SHA2563037C55204200F9BF930BF27BB0F94CDFF23DB65813F82725B3B83096302D46C; JSON B98BE59CFAE8FBD3EE6AA35FACC234E75016E853AA15AB582523D7B3BB49B936; CSV2A7C0DF98F1C430DF2FD7E2CFF17E0120D3AAC81B63273CF3B470656BD40CDC2; final README E44C7712BEC9EC15B2100BC9698C021B94B896668BFF33FCC0968794D23CE5DA. These are working-file hashes before Git newline normalization. Main accepts reviewed evidence for the scoped idle comparison: private resident memory90.82%/89.62%lower, CPU median3.09x/10.17xhigher for small/large. No source optimization or binary change; no whole-app responsiveness, UI parity, IME, widget-only or long-run acceptance claim. Prior full-port manual acceptance remains pending. User must test/approve latest PR before merge; retain this record.
+
+Close checklist assessment: context distinguishes historical prototype snapshots from current measured scope; fixture/measurement/review roles yielded reusable scripts without a daemon or new automation; no product dependency changes, only an example using existing core dependencies; README/full-port/baseline/plan link the canonical benchmark report and mandatory CLI path argument; independent source/fixture tests and raw-evidence review found no current scoped blocker. Documentation/static review does not prove UI behavior. No need for unrelated repository audit or repeat timed runs.
+
+Needs and friction: preflight caught invalid synthetic IDs and WebView's appended EBWebView directory; corrected and retested before fixed measurements. Final data includes three explicit child-exit exclusions. Higher native idle CPU warrants optional profiling next; its cause is unverified and no optimization is authorized by this result alone.
+
+Harness: fixed process-identity cleanup, fresh profiles/data, deterministic fixtures and repeat runner are now reusable. Actual counter collection averaged0.6855s and background system CPU ranged0–40%at endpoints; results retain these limits. No arbitrary timing reduction. No new installation, hooks, schedules or user setting changes.
+
+Agent memory management: long-run checkpoint/resumption used this cycle file and raw progress/results. A truncated tool output required bounded rereads of final cadence/hashes/cleanup rather than rerunning the benchmark. Historical checkpoints below are chronological evidence superseded by this final assessment. No persistent personal memory read or activation was needed. Main owns commit/push/PR update and user handoff; all workers/reviewer STOPPED.
+
+Final measurement checkpoint: all20 runs completed exit0 on2026-10-29 about14:12Z;2400 samples,2397 valid private/memory and2394 valid CPU. Fixed binaries/fixture hashes unchanged. Raw .test-data/benchmark/runs/comparison-final; published docs/rust-native/benchmark-results.json and benchmark-samples.csv; narrative benchmark.md. Memory aggregation: median of per-run medians; CPU: median of interval-weighted per-run means. Reports and README/full-port/baseline/plan updated for scoped completion. Actual interval mean1.0056756s,0.6109473–6.6280494; collection mean0.6854796s; background CPU before/after0–40%. All20 completed; cleanup results56 stopped,0errors; read-only postcheck found0 matching measured roots alive. Three child-exit samples and following CPU intervals excluded, never zero-filled. No product code or artifact changed. BR final evidence review pending; no merge/user acceptance implied.
+
+User now explicitly requests comparison benchmark. Continue same Rust-experiment branch at 198494913caf74d54e3de4a6819199e47fa31066, clean starting tree, existing PR #2; no merge. Main owns this record and docs. Existing Task1 measurement plan is authorized by this request: synthetic small (1000 events/2000 entries/10 projects) and large (10000/20000/50) databases; fixed dates/IDs/content including Korean, links and100000-character body; logical content hashes; same independent DB copy for each run. Benchmark fixed baseline EXE2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047 against native30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD. Preserve shipped artifacts and user data/processes. No product UI modifications/optimization in measurement task.
+
+Protocol: each dataset,5 alternating paired runs;60s settle then120 samples at1s target cadence. Sequential apps, never measure both concurrently. Include all descendant WebView processes with PID+creation identity, read resident private working set, working set sum (shared double counting caveat), private commit, CPU core-equivalent and machine-normalized percentage. Record unavailable counters as missing, invalid samples excluded with reason, elapsed cadence and process churn. Root identity must match exact expected path/start. Root exit invalidates run; safe cleanup only owned process identities. Startup readiness reports must use equivalent observable definitions or remain non-comparable. Record default window geometry/visibility, OS/hardware/runtime versions; no silent same-layout claim. Existing app names/window sizes may differ. Read-only native telemetry allowed; UI interactions must use CUA. No user setting changes or closing user processes. Save raw synthetic measurement artifacts under .test-data/benchmark, publish compact sanitized evidence/summary under docs/rust-native. Compare default monthly startup-idle first; attempt widget-only/search/note/reopen only through available supported UI, otherwise explicitly unverified, never fabricate scenarios.
+
+Retry/STOP: same3 consecutive external blocker rule. Fail preflight before spending full runs on invalid protocol. Fix harness defects under assigned ownership; refresh review after changes. No arbitrary shortening of5x60+120 protocol. Main runs long measurements with progress updates and performs final commit/push/PR update. Stable completion requires independent measurement/harness review plus honest limits; no user acceptance/merge implied.
+
+```mermaid
+flowchart LR
+ Fixture[Deterministic synthetic SQLite] --> Copies[Fresh per-run copy]
+ Baseline[Fixed Tauri EXE] --> Runner[Alternating run coordinator]
+ Native[Fixed native EXE] --> Runner
+ Copies --> Runner
+ Runner --> Samples[Process-tree samples and identities]
+ Samples --> Review[Independent review and comparison]
+```
+
+```mermaid
+stateDiagram-v2
+ [*] --> Preflight
+ Preflight --> Launch: valid fixture and provenance
+ Launch --> Settle: owned root established
+ Settle --> Sample: 60 seconds
+ Sample --> Cleanup: 120 samples
+ Cleanup --> Launch: next alternating run
+ Cleanup --> Report: all pairs complete
+ Launch --> Invalid: root exit or mismatch
+ Sample --> Invalid: unusable evidence
+ Invalid --> Cleanup: record reason
+```
+
+### Assignment M — measurement harness
+| Field | Value |
+|---|---|
+| cycle | rust-native benchmark continuation |
+| task | M: safe process-tree metrics and serial comparison runner |
+| spec version | v2 |
+| owner | implementation worker benchmark_harness, actual executor assigned by main |
+| allowed files | scripts/measure-memory.ps1, scripts/benchmark-ui.ps1, scripts/tests/measure-memory.tests.ps1 and focused benchmark harness tests/helpers under scripts only |
+| deps | Read original measurement plan Task1, fixed artifact paths/hashes above, fixture worker will supply schedule.db + metadata in .test-data/benchmark/fixtures/small and large. No product source edits. |
+| acceptance | ExpectedExecutablePath/PID/start identity; full descendant tree private WS/commit/CPU with missing/churn handling, efficient cadence, safe owned cleanup, fresh DB folder per run, raw JSON/CSV,5 alternating pairs/dataset60+120. Quick preflight mode supported and labeled. Read-only window/OS geometry metadata, no shell UI actions. Tests for wrong path/dead root/missing counters/identity and aggregation. Optional snapshot backward compatibility. Do not launch full hour benchmark yet. |
+| evidence | Tests/commands, exact CLI invocation and schema, final hashes, STOP before main runs; no unknown counters converted to0 |
+| requested decisions | none; report runtime telemetry limitations before full run |
+| return limit | <=1500 words, no commit/redelegation/product edits |
+
+### Assignment F — deterministic fixture
+| Field | Value |
+|---|---|
+| cycle | rust-native benchmark continuation |
+| task | F: deterministic synthetic DB generation and compatibility verification |
+| spec version | v2 |
+| owner | implementation worker benchmark_fixture, actual executor assigned by main |
+| allowed files | crates/timeschedule-core/examples/seed_benchmark.rs; scripts/tests/benchmark-fixtures.tests.ps1; no shared library or Cargo dependency changes; generated isolated files under .test-data/benchmark/fixtures and .cache |
+| deps | Existing Storage/schema v2 and rusqlite/serde_json/chrono already in core dependencies; schema contains triggers/FTS. Baseline source a8f47a1 and native1984949. |
+| acceptance | Fixed IDs/timestamps/date anchor2026-10-29, correct small/large counts, Korean/search markers/links and100000-char body, tasks/notes bounded representative counts documented. Use existing schema initialization and transaction inserts with valid values and FTS triggers. Generate logical content SHA256 via existing shell hashing if no Rust dependency. Refuse overwrite existing target DB. Reopen/integrity/count/Korean-search checks and deterministic logical dump hashes across two generations. Checkpoint WAL before finalized copy. No real user DB. |
+| evidence | Generator CLI, paths, metadata/counts/hashes/tests, build actual example, final STOP |
+| requested decisions | none; ordinary fixture distributions delegated |
+| return limit | <=1200 words, no commit/redelegation |
+
+### Assignment BR — independent benchmark review
+| Field | Value |
+|---|---|
+| cycle | rust-native benchmark continuation |
+| task | BR: independent harness/fixture then result review |
+| spec version | v2 |
+| owner | reviewer native_review, separate from M/F executors |
+| allowed files | read-only relevant scripts/core example/raw results/docs |
+| deps | Fixed M/F hashes and handoffs after STOP; main supplies final evidence |
+| acceptance | Check measurement validity, process identity/ownership cleanup, CPU units/WS distinctions/missing samples, fixture equality, deterministic hashes, defaults/confounders,5pair cadence and conclusions. Catch blockers before full runs. Actual UI validation remains separate. |
+| evidence | Findings with concrete path and data or no blockers within scope; final STOP per review phase |
+| requested decisions | none |
+| return limit | <=1500 words, no edits/commit/redelegation |
+
+Benchmark checkpoint: /root/benchmark_harness owns M and is implementing; /root/benchmark_fixture completed F and STOPPED. /root/native_review assigned BR first fixture review while M completes. Main coordinates then runs measurements. Prior native implementation below remains fixed; prior manual QA limitations carry forward.
+
+F fixed generator SHA256 7C688B54296BC14C6584B1E841EC22FFB130EF32A8A0DD4020438648FE35EE46; tests2FB5EC9B28F68F9D295E9416B7E7C28966746579818C2AF99D0960AB497811A1. .cache/benchmark-fixtures-test.log passed counts, integrity/foreign keys, FTS, Storage reopen, long body, deterministic logical dump across two generations, refuse-existing DB. Small logical3F194DC2376D5A6A61B362B0CF0CAC6BA9A6745B7A2C058F8119F7E87E7FCD33, DB F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2,9,560,064bytes. Large logical69941896E3C1B064503550050631E091F988B3FAC86367041E311880795FC4CE, DB CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E,68,509,696bytes. Tasks100/1000 and notes20/100;365day distribution. Initial non-UUID fixture failed compatibility before measurement; retained isolated failed-small-invalid-id, corrected fixtures only are accepted for runs.
+
+BR fixture phase /root/native_review STOP: independently read-only/immutable inspected both DBs, exact counts/schema/integrity/foreign keys/FTS1 long-body match and metadata hashes/deterministic copies pass. Date range2026-04-30..2027-04-29,100000-character record on2026-10-29. No fixture blockers. Per-run copy/provenance awaits fixed M review.
+
+M source STOP confirmed. Fixed scripts SHA256: benchmark-support.ps1 9117279BC10D77F662FEAA4030157E3EB3AE92B066A1FA4195DE8DABED4F909C; benchmark-ui.ps1 071472DEB29FF232D17403C3292C95873BBDD11DA8F41921C6CD66071B8405EE; measure-memory.ps1 D499A2A8B9862D66C68B42D55615ADAFA140C847D8F9FFFB69C6DC9B01EDB5D7; tests/measure-memory.tests.ps1 D3CE56366A5D0DC0C2296E9A5CB864745E97EE5E98CD9176B2DF013ECFB974CB. Final short preflight3 used3ssettle/3samples/1pair small, both complete=true with3privateWS/3CPUvalid; separate output .test-data/benchmark/harness-preflight-3. Preflight1 failed exact profile match because WebView appends EBWebView; safe cleanup succeeded and containment check corrected. Preflight2/3 passed; no full run launched. BR now reviews fixed M prior to fullhour run.
+
+BR M review /root/native_review STOP: fixed4hashes match, tests independently pass, raw preflight sums/CPU recalculated. No blocker for default monthly idle full protocol. WebView version156.0.4314.50. Limits: snapshots can miss very short-lived children; startup window polling is coarse and not content-ready; complete=true alone is insufficient, main must audit all120 per-counter counts/cadence/churn/missing; widget geometry differs900x560 vs500x620; system background load measured only before/after. F remains valid. Main now executes scripts/benchmark-ui.ps1 -OutputDirectory .test-data/benchmark/runs/comparison-final with unchanged defaults, no concurrent builds/tests. Final results require BR review before conclusions/publication.
+
+Full run execution reference: exec session42769, started2026-10-29T13:12:03Z; output .test-data/benchmark/runs/comparison-final. Main polls progress.json/runs.json and session output without launching builds. First Tauri run120samples,119privateWS/118CPU valid; sample59 child exited during capture, sample60 CPU excluded due prior missing. First native120/120valid. This is expected explicit exclusion, not zero substitution; final report must carry all exclusions. No comparative conclusion from the first pair. All workers/reviewer STOP while timed runs execute.
+
+Runtime checkpoint13:42Z: all10 small runs completed; native5runs each120privateWS/120CPUvalid. Tauri runs1/4 each119privateWS/118CPU due exited-child capture, remaining runs120/120. Large first Tauri started; same exec session42769. Half protocol completed, results not final reviewed. No product/harness modifications during full run.
+
+M integration requirement: process-local WEBVIEW2_USER_DATA_FOLDER must isolate baseline's profile in each run, restoring parent environment afterwards. Do not set global environment/registry or debugger flags. Preflight verifies observed WebView user-data-dir belongs to that run; fail if ignored/shared. Microsoft official API documents this override (https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/webview2-idl?view=webview2-1.0.3967.48). This preserves user profiles and avoids shared browser processes. Main verified fixed EXE hashes and Win10Pro19045/Ryzen5600X6C12T/~32GB host.
+
 Owner and sole writer of this cycle record: main (/root). Repository: C:/LSH/TimeSchedule. Product branch: codex/rust-native-experiment; starting revision f4c5457cf8dfb1a4188e3fd301b441b454bf9243. Reuse this clean, task-specific branch and existing PR #2. Do not merge.
 
 ## Approved scope and authority

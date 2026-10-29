@@ -1,0 +1,1464 @@
+{
+  "schemaVersion": 1,
+  "sourceRevision": "198494913caf74d54e3de4a6819199e47fa31066",
+  "scenario": "default monthly startup idle; native and Tauri default window layouts may differ",
+  "protocol": {
+    "pairs": 5,
+    "settleSeconds": 60,
+    "samplesPerRun": 120,
+    "targetIntervalMs": 1000,
+    "datasets": [
+      "small",
+      "large"
+    ]
+  },
+  "environment": {
+    "timestamp": "2026-10-29T13:12:03.4984475Z",
+    "os": "Microsoft Windows 10 Pro",
+    "osVersion": "10.0.19045",
+    "osBuild": "19045",
+    "logicalProcessors": 12,
+    "processorNames": [
+      "AMD Ryzen 5 5600X 6-Core Processor             "
+    ],
+    "totalMemoryKiB": 33464284,
+    "freeMemoryKiB": 10034068,
+    "powerShell": "7.6.5",
+    "note": "Other user workloads remain running. No cache flush, power-plan change or UI manipulation."
+  },
+  "webViewVersions": [
+    "156.0.4314.50"
+  ],
+  "aggregation": "RAM: median within each run, then median and range of five run medians. CPU: elapsed-interval-weighted mean within run, then median and range of five run means. Reduction uses group medians.",
+  "totalSamples": 2400,
+  "groups": [
+    {
+      "dataset": "small",
+      "variant": "tauri",
+      "runs": 5,
+      "plannedSamples": 600,
+      "validPrivate": 598.0,
+      "validMemory": 598.0,
+      "validCpu": 596.0,
+      "privateWorkingSetRunMediansMiB": {
+        "median": 141.2421875,
+        "minimum": 139.51953125,
+        "maximum": 145.083984375
+      },
+      "workingSetRunMediansMiB": {
+        "median": 486.6796875,
+        "minimum": 478.21484375,
+        "maximum": 489.95703125
+      },
+      "privateCommitRunMediansMiB": {
+        "median": 250.140625,
+        "minimum": 243.0859375,
+        "maximum": 254.15625
+      },
+      "cpuCoreRunWeightedMeansPercent": {
+        "median": 0.155325027681343,
+        "minimum": 0.12943677045242424,
+        "maximum": 0.9475771377843288
+      },
+      "cpuMachineRunWeightedMeansPercent": {
+        "median": 0.012943752306778583,
+        "minimum": 0.01078639753770202,
+        "maximum": 0.0789647614820274
+      }
+    },
+    {
+      "dataset": "small",
+      "variant": "native",
+      "runs": 5,
+      "plannedSamples": 600,
+      "validPrivate": 600.0,
+      "validMemory": 600.0,
+      "validCpu": 600.0,
+      "privateWorkingSetRunMediansMiB": {
+        "median": 12.9609375,
+        "minimum": 12.921875,
+        "maximum": 13.015625
+      },
+      "workingSetRunMediansMiB": {
+        "median": 29.8984375,
+        "minimum": 29.828125,
+        "maximum": 29.96484375
+      },
+      "privateCommitRunMediansMiB": {
+        "median": 14.05078125,
+        "minimum": 14.01171875,
+        "maximum": 14.1015625
+      },
+      "cpuCoreRunWeightedMeansPercent": {
+        "median": 0.4792093805242247,
+        "minimum": 0.40158712871031427,
+        "maximum": 0.6345450430600174
+      },
+      "cpuMachineRunWeightedMeansPercent": {
+        "median": 0.03993411504368539,
+        "minimum": 0.03346559405919285,
+        "maximum": 0.05287875358833478
+      }
+    },
+    {
+      "dataset": "large",
+      "variant": "tauri",
+      "runs": 5,
+      "plannedSamples": 600,
+      "validPrivate": 599.0,
+      "validMemory": 599.0,
+      "validCpu": 598.0,
+      "privateWorkingSetRunMediansMiB": {
+        "median": 146.01953125,
+        "minimum": 139.3359375,
+        "maximum": 149.03125
+      },
+      "workingSetRunMediansMiB": {
+        "median": 491.5390625,
+        "minimum": 473.978515625,
+        "maximum": 492.04296875
+      },
+      "privateCommitRunMediansMiB": {
+        "median": 286.703125,
+        "minimum": 271.28515625,
+        "maximum": 291.66796875
+      },
+      "cpuCoreRunWeightedMeansPercent": {
+        "median": 0.15791380431894406,
+        "minimum": 0.12945801538941873,
+        "maximum": 0.2200244589335561
+      },
+      "cpuMachineRunWeightedMeansPercent": {
+        "median": 0.013159483693245337,
+        "minimum": 0.010788167949118228,
+        "maximum": 0.01833537157779634
+      }
+    },
+    {
+      "dataset": "large",
+      "variant": "native",
+      "runs": 5,
+      "plannedSamples": 600,
+      "validPrivate": 600.0,
+      "validMemory": 600.0,
+      "validCpu": 600.0,
+      "privateWorkingSetRunMediansMiB": {
+        "median": 15.15625,
+        "minimum": 15.09375,
+        "maximum": 15.17578125
+      },
+      "workingSetRunMediansMiB": {
+        "median": 32.078125,
+        "minimum": 31.9765625,
+        "maximum": 32.0859375
+      },
+      "privateCommitRunMediansMiB": {
+        "median": 16.609375,
+        "minimum": 16.55078125,
+        "maximum": 16.623046875
+      },
+      "cpuCoreRunWeightedMeansPercent": {
+        "median": 1.6061679515370577,
+        "minimum": 1.5534993870347111,
+        "maximum": 1.7090858274919134
+      },
+      "cpuMachineRunWeightedMeansPercent": {
+        "median": 0.13384732929475482,
+        "minimum": 0.1294582822528926,
+        "maximum": 0.14242381895765946
+      }
+    }
+  ],
+  "comparisons": [
+    {
+      "dataset": "small",
+      "privateReductionPercent": 90.82360750041485,
+      "workingSetReductionPercent": 93.85664981138133,
+      "cpuCoreRatio": 3.0852038958418637
+    },
+    {
+      "dataset": "large",
+      "privateReductionPercent": 89.62039538803135,
+      "workingSetReductionPercent": 93.47394185991067,
+      "cpuCoreRatio": 10.171168749079238
+    }
+  ],
+  "excluded": [
+    {
+      "run": "small-p1-tauri",
+      "sample": 59,
+      "privateValid": false,
+      "cpuReason": "missing_process",
+      "missingProcessCount": 1,
+      "missingPrivateCounterCount": 0,
+      "counterError": null
+    },
+    {
+      "run": "small-p1-tauri",
+      "sample": 60,
+      "privateValid": true,
+      "cpuReason": "missing_process",
+      "missingProcessCount": 0,
+      "missingPrivateCounterCount": 0,
+      "counterError": null
+    },
+    {
+      "run": "small-p4-tauri",
+      "sample": 59,
+      "privateValid": false,
+      "cpuReason": "missing_process",
+      "missingProcessCount": 1,
+      "missingPrivateCounterCount": 0,
+      "counterError": null
+    },
+    {
+      "run": "small-p4-tauri",
+      "sample": 60,
+      "privateValid": true,
+      "cpuReason": "missing_process",
+      "missingProcessCount": 0,
+      "missingPrivateCounterCount": 0,
+      "counterError": null
+    },
+    {
+      "run": "large-p4-tauri",
+      "sample": 59,
+      "privateValid": false,
+      "cpuReason": "missing_process",
+      "missingProcessCount": 1,
+      "missingPrivateCounterCount": 0,
+      "counterError": null
+    },
+    {
+      "run": "large-p4-tauri",
+      "sample": 60,
+      "privateValid": true,
+      "cpuReason": "missing_process",
+      "missingProcessCount": 0,
+      "missingPrivateCounterCount": 0,
+      "counterError": null
+    }
+  ],
+  "runs": [
+    {
+      "run": "small-p1-tauri",
+      "dataset": "small",
+      "variant": "tauri",
+      "pair": 1,
+      "fixtureSha256": "F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2",
+      "exeSha256": "2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047",
+      "sampleCount": 120,
+      "validPrivate": 119,
+      "validMemory": 119,
+      "validCpu": 118,
+      "privateWorkingSetMiB": {
+        "median": 139.984375,
+        "minimum": 139.75390625,
+        "maximum": 142.64453125
+      },
+      "workingSetSumMiB": {
+        "median": 484.92578125,
+        "minimum": 483.44921875,
+        "maximum": 486.9296875
+      },
+      "privateCommitMiB": {
+        "median": 250.79296875,
+        "minimum": 250.171875,
+        "maximum": 253.7421875
+      },
+      "cpuCoreWeightedPercent": 0.15795370391933194,
+      "cpuMachineWeightedPercent": 0.013162808659944328,
+      "validCpuIntervalSeconds": 118.70566840000001,
+      "intervalSeconds": {
+        "median": 0.9966399999999993,
+        "minimum": 0.8596097000000213,
+        "maximum": 1.7692863999999986
+      },
+      "collectionSeconds": {
+        "median": 0.7466765,
+        "minimum": 0.6998069,
+        "maximum": 0.9410785
+      },
+      "processCount": {
+        "median": 8.0,
+        "minimum": 8.0,
+        "maximum": 8.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        40.0,
+        13.0
+      ],
+      "firstMainWindowObservedMs": 1824.7787,
+      "elapsedSeconds": 182.6700001,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": true,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "small-p1-native",
+      "dataset": "small",
+      "variant": "native",
+      "pair": 1,
+      "fixtureSha256": "F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2",
+      "exeSha256": "30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 12.9609375,
+        "minimum": 12.9453125,
+        "maximum": 13.03125
+      },
+      "workingSetSumMiB": {
+        "median": 29.96484375,
+        "minimum": 29.8671875,
+        "maximum": 30.04296875
+      },
+      "privateCommitMiB": {
+        "median": 14.05078125,
+        "minimum": 14.01953125,
+        "maximum": 14.10546875
+      },
+      "cpuCoreWeightedPercent": 0.6345450430600174,
+      "cpuMachineWeightedPercent": 0.05287875358833478,
+      "validCpuIntervalSeconds": 120.6573132,
+      "intervalSeconds": {
+        "median": 1.0006893999999988,
+        "minimum": 0.9016202999999905,
+        "maximum": 1.6428446000000037
+      },
+      "collectionSeconds": {
+        "median": 0.63852905,
+        "minimum": 0.597398,
+        "maximum": 0.8839829
+      },
+      "processCount": {
+        "median": 1.0,
+        "minimum": 1.0,
+        "maximum": 1.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        15.0,
+        3.0
+      ],
+      "firstMainWindowObservedMs": 765.929,
+      "elapsedSeconds": 181.8587763,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": null,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "small-p2-native",
+      "dataset": "small",
+      "variant": "native",
+      "pair": 2,
+      "fixtureSha256": "F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2",
+      "exeSha256": "30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 12.94140625,
+        "minimum": 12.8984375,
+        "maximum": 12.94140625
+      },
+      "workingSetSumMiB": {
+        "median": 29.859375,
+        "minimum": 29.82421875,
+        "maximum": 29.859375
+      },
+      "privateCommitMiB": {
+        "median": 14.02734375,
+        "minimum": 13.9375,
+        "maximum": 14.02734375
+      },
+      "cpuCoreWeightedPercent": 0.4792093805242247,
+      "cpuMachineWeightedPercent": 0.03993411504368539,
+      "validCpuIntervalSeconds": 120.64141970000001,
+      "intervalSeconds": {
+        "median": 0.9981423999999919,
+        "minimum": 0.6109472999999923,
+        "maximum": 6.628049399999995
+      },
+      "collectionSeconds": {
+        "median": 0.63240875,
+        "minimum": 0.6094479,
+        "maximum": 6.2634142
+      },
+      "processCount": {
+        "median": 1.0,
+        "minimum": 1.0,
+        "maximum": 1.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        13.0,
+        12.0
+      ],
+      "firstMainWindowObservedMs": 711.3778,
+      "elapsedSeconds": 181.8549273,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": null,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "small-p2-tauri",
+      "dataset": "small",
+      "variant": "tauri",
+      "pair": 2,
+      "fixtureSha256": "F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2",
+      "exeSha256": "2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 141.2421875,
+        "minimum": 140.609375,
+        "maximum": 144.2734375
+      },
+      "workingSetSumMiB": {
+        "median": 486.974609375,
+        "minimum": 485.1640625,
+        "maximum": 488.57421875
+      },
+      "privateCommitMiB": {
+        "median": 244.59765625,
+        "minimum": 243.7421875,
+        "maximum": 247.94140625
+      },
+      "cpuCoreWeightedPercent": 0.12943677045242424,
+      "cpuMachineWeightedPercent": 0.01078639753770202,
+      "validCpuIntervalSeconds": 120.71531099999999,
+      "intervalSeconds": {
+        "median": 1.001453799999993,
+        "minimum": 0.9142168999999996,
+        "maximum": 1.699987500000006
+      },
+      "collectionSeconds": {
+        "median": 0.6910437,
+        "minimum": 0.6623297,
+        "maximum": 0.7952525
+      },
+      "processCount": {
+        "median": 8.0,
+        "minimum": 8.0,
+        "maximum": 8.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        15.0,
+        19.0
+      ],
+      "firstMainWindowObservedMs": 879.324,
+      "elapsedSeconds": 182.1939617,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": true,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "small-p3-tauri",
+      "dataset": "small",
+      "variant": "tauri",
+      "pair": 3,
+      "fixtureSha256": "F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2",
+      "exeSha256": "2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 145.083984375,
+        "minimum": 144.9296875,
+        "maximum": 148.14453125
+      },
+      "workingSetSumMiB": {
+        "median": 489.95703125,
+        "minimum": 488.24609375,
+        "maximum": 492.16015625
+      },
+      "privateCommitMiB": {
+        "median": 254.15625,
+        "minimum": 253.70703125,
+        "maximum": 257.31640625
+      },
+      "cpuCoreWeightedPercent": 0.155325027681343,
+      "cpuMachineWeightedPercent": 0.012943752306778583,
+      "validCpuIntervalSeconds": 120.7146091,
+      "intervalSeconds": {
+        "median": 1.0000696500000004,
+        "minimum": 0.845142199999998,
+        "maximum": 1.716990299999999
+      },
+      "collectionSeconds": {
+        "median": 0.70147525,
+        "minimum": 0.6789645,
+        "maximum": 0.8252259
+      },
+      "processCount": {
+        "median": 8.0,
+        "minimum": 8.0,
+        "maximum": 8.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        20.0,
+        6.0
+      ],
+      "firstMainWindowObservedMs": 844.5345,
+      "elapsedSeconds": 182.1932709,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": true,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "small-p3-native",
+      "dataset": "small",
+      "variant": "native",
+      "pair": 3,
+      "fixtureSha256": "F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2",
+      "exeSha256": "30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 13.0,
+        "minimum": 12.984375,
+        "maximum": 13.01953125
+      },
+      "workingSetSumMiB": {
+        "median": 29.8984375,
+        "minimum": 29.890625,
+        "maximum": 29.92578125
+      },
+      "privateCommitMiB": {
+        "median": 14.08984375,
+        "minimum": 14.0390625,
+        "maximum": 14.09375
+      },
+      "cpuCoreWeightedPercent": 0.5180885008873726,
+      "cpuMachineWeightedPercent": 0.04317404174061438,
+      "validCpuIntervalSeconds": 120.63575989999998,
+      "intervalSeconds": {
+        "median": 1.00080770000001,
+        "minimum": 0.9419024000000036,
+        "maximum": 1.6428764999999999
+      },
+      "collectionSeconds": {
+        "median": 0.629614,
+        "minimum": 0.6099188,
+        "maximum": 0.6913303
+      },
+      "processCount": {
+        "median": 1.0,
+        "minimum": 1.0,
+        "maximum": 1.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        12.0,
+        1.0
+      ],
+      "firstMainWindowObservedMs": 759.2378,
+      "elapsedSeconds": 182.1099884,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": null,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "small-p4-native",
+      "dataset": "small",
+      "variant": "native",
+      "pair": 4,
+      "fixtureSha256": "F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2",
+      "exeSha256": "30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 12.921875,
+        "minimum": 12.87890625,
+        "maximum": 12.921875
+      },
+      "workingSetSumMiB": {
+        "median": 29.828125,
+        "minimum": 29.79296875,
+        "maximum": 29.828125
+      },
+      "privateCommitMiB": {
+        "median": 14.01171875,
+        "minimum": 13.921875,
+        "maximum": 14.01171875
+      },
+      "cpuCoreWeightedPercent": 0.41452431278652635,
+      "cpuMachineWeightedPercent": 0.03454369273221053,
+      "validCpuIntervalSeconds": 120.62018669999999,
+      "intervalSeconds": {
+        "median": 0.9996169999999864,
+        "minimum": 0.8593682999999999,
+        "maximum": 1.6310663000000005
+      },
+      "collectionSeconds": {
+        "median": 0.62843015,
+        "minimum": 0.6072764,
+        "maximum": 0.7616487
+      },
+      "processCount": {
+        "median": 1.0,
+        "minimum": 1.0,
+        "maximum": 1.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        5.0,
+        11.0
+      ],
+      "firstMainWindowObservedMs": 713.8609,
+      "elapsedSeconds": 181.8289707,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": null,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "small-p4-tauri",
+      "dataset": "small",
+      "variant": "tauri",
+      "pair": 4,
+      "fixtureSha256": "F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2",
+      "exeSha256": "2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047",
+      "sampleCount": 120,
+      "validPrivate": 119,
+      "validMemory": 119,
+      "validCpu": 118,
+      "privateWorkingSetMiB": {
+        "median": 142.4453125,
+        "minimum": 141.8125,
+        "maximum": 144.4921875
+      },
+      "workingSetSumMiB": {
+        "median": 486.6796875,
+        "minimum": 477.0703125,
+        "maximum": 488.796875
+      },
+      "privateCommitMiB": {
+        "median": 250.140625,
+        "minimum": 248.82421875,
+        "maximum": 263.0859375
+      },
+      "cpuCoreWeightedPercent": 0.9475771377843288,
+      "cpuMachineWeightedPercent": 0.0789647614820274,
+      "validCpuIntervalSeconds": 118.72384369999997,
+      "intervalSeconds": {
+        "median": 1.0002528500000025,
+        "minimum": 0.6911321000000044,
+        "maximum": 2.4654844000000082
+      },
+      "collectionSeconds": {
+        "median": 0.70152205,
+        "minimum": 0.6779228,
+        "maximum": 2.1723217
+      },
+      "processCount": {
+        "median": 8.0,
+        "minimum": 8.0,
+        "maximum": 8.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        12.0,
+        6.0
+      ],
+      "firstMainWindowObservedMs": 845.7892,
+      "elapsedSeconds": 182.2775596,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": true,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "small-p5-tauri",
+      "dataset": "small",
+      "variant": "tauri",
+      "pair": 5,
+      "fixtureSha256": "F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2",
+      "exeSha256": "2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 139.51953125,
+        "minimum": 139.23828125,
+        "maximum": 142.5625
+      },
+      "workingSetSumMiB": {
+        "median": 478.21484375,
+        "minimum": 476.70703125,
+        "maximum": 480.78515625
+      },
+      "privateCommitMiB": {
+        "median": 243.0859375,
+        "minimum": 242.35546875,
+        "maximum": 246.19921875
+      },
+      "cpuCoreWeightedPercent": 0.1423842476251335,
+      "cpuMachineWeightedPercent": 0.011865353968761124,
+      "validCpuIntervalSeconds": 120.71208919999998,
+      "intervalSeconds": {
+        "median": 0.9987309500000023,
+        "minimum": 0.9320006000000092,
+        "maximum": 1.703089999999996
+      },
+      "collectionSeconds": {
+        "median": 0.7033081,
+        "minimum": 0.6791992,
+        "maximum": 0.7695132
+      },
+      "processCount": {
+        "median": 8.0,
+        "minimum": 8.0,
+        "maximum": 8.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        19.0,
+        5.0
+      ],
+      "firstMainWindowObservedMs": 829.9979,
+      "elapsedSeconds": 182.2174151,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": true,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "small-p5-native",
+      "dataset": "small",
+      "variant": "native",
+      "pair": 5,
+      "fixtureSha256": "F9BB28365BF8BA605A8B5B33F04E99DC4063F1878C3846D101304D2F86217FD2",
+      "exeSha256": "30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 13.015625,
+        "minimum": 12.97265625,
+        "maximum": 13.015625
+      },
+      "workingSetSumMiB": {
+        "median": 29.8984375,
+        "minimum": 29.86328125,
+        "maximum": 29.8984375
+      },
+      "privateCommitMiB": {
+        "median": 14.1015625,
+        "minimum": 14.015625,
+        "maximum": 14.1015625
+      },
+      "cpuCoreWeightedPercent": 0.40158712871031427,
+      "cpuMachineWeightedPercent": 0.03346559405919285,
+      "validCpuIntervalSeconds": 120.6151705,
+      "intervalSeconds": {
+        "median": 1.0002428499999994,
+        "minimum": 0.9217309999999941,
+        "maximum": 1.6156381999999994
+      },
+      "collectionSeconds": {
+        "median": 0.6277006,
+        "minimum": 0.6064228,
+        "maximum": 0.7031364
+      },
+      "processCount": {
+        "median": 1.0,
+        "minimum": 1.0,
+        "maximum": 1.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        12.0,
+        0.0
+      ],
+      "firstMainWindowObservedMs": 716.8409,
+      "elapsedSeconds": 181.9218302,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": null,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "large-p1-tauri",
+      "dataset": "large",
+      "variant": "tauri",
+      "pair": 1,
+      "fixtureSha256": "CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E",
+      "exeSha256": "2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 146.01953125,
+        "minimum": 145.75390625,
+        "maximum": 149.19921875
+      },
+      "workingSetSumMiB": {
+        "median": 487.125,
+        "minimum": 485.5703125,
+        "maximum": 488.61328125
+      },
+      "privateCommitMiB": {
+        "median": 287.90234375,
+        "minimum": 287.3515625,
+        "maximum": 291.44921875
+      },
+      "cpuCoreWeightedPercent": 0.12945801538941873,
+      "cpuMachineWeightedPercent": 0.010788167949118228,
+      "validCpuIntervalSeconds": 120.69550079999999,
+      "intervalSeconds": {
+        "median": 0.9995956499999963,
+        "minimum": 0.9350258000000053,
+        "maximum": 1.713115699999996
+      },
+      "collectionSeconds": {
+        "median": 0.6836569,
+        "minimum": 0.6617119,
+        "maximum": 0.7925465
+      },
+      "processCount": {
+        "median": 8.0,
+        "minimum": 8.0,
+        "maximum": 8.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        11.0,
+        16.0
+      ],
+      "firstMainWindowObservedMs": 797.7914,
+      "elapsedSeconds": 182.1711435,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": true,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "large-p1-native",
+      "dataset": "large",
+      "variant": "native",
+      "pair": 1,
+      "fixtureSha256": "CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E",
+      "exeSha256": "30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 15.09375,
+        "minimum": 15.05078125,
+        "maximum": 15.09375
+      },
+      "workingSetSumMiB": {
+        "median": 31.9765625,
+        "minimum": 31.94140625,
+        "maximum": 31.9765625
+      },
+      "privateCommitMiB": {
+        "median": 16.55078125,
+        "minimum": 16.46484375,
+        "maximum": 16.55078125
+      },
+      "cpuCoreWeightedPercent": 1.658238477525354,
+      "cpuMachineWeightedPercent": 0.1381865397937795,
+      "validCpuIntervalSeconds": 120.60991389999998,
+      "intervalSeconds": {
+        "median": 1.0011533000000128,
+        "minimum": 0.9099209999999971,
+        "maximum": 1.6367469999999997
+      },
+      "collectionSeconds": {
+        "median": 0.62224755,
+        "minimum": 0.6050521,
+        "maximum": 0.7199508
+      },
+      "processCount": {
+        "median": 1.0,
+        "minimum": 1.0,
+        "maximum": 1.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        0.0,
+        2.0
+      ],
+      "firstMainWindowObservedMs": 731.7405,
+      "elapsedSeconds": 181.8053373,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": null,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "large-p2-native",
+      "dataset": "large",
+      "variant": "native",
+      "pair": 2,
+      "fixtureSha256": "CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E",
+      "exeSha256": "30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 15.15625,
+        "minimum": 15.109375,
+        "maximum": 15.15625
+      },
+      "workingSetSumMiB": {
+        "median": 32.0546875,
+        "minimum": 32.015625,
+        "maximum": 32.0546875
+      },
+      "privateCommitMiB": {
+        "median": 16.60546875,
+        "minimum": 16.515625,
+        "maximum": 16.60546875
+      },
+      "cpuCoreWeightedPercent": 1.5534993870347111,
+      "cpuMachineWeightedPercent": 0.1294582822528926,
+      "validCpuIntervalSeconds": 120.69525200000001,
+      "intervalSeconds": {
+        "median": 0.9983287999999959,
+        "minimum": 0.8697872000000189,
+        "maximum": 1.612199699999998
+      },
+      "collectionSeconds": {
+        "median": 0.6202913999999999,
+        "minimum": 0.592772,
+        "maximum": 1.3252664
+      },
+      "processCount": {
+        "median": 1.0,
+        "minimum": 1.0,
+        "maximum": 1.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        6.0,
+        1.0
+      ],
+      "firstMainWindowObservedMs": 682.5765,
+      "elapsedSeconds": 181.8773133,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": null,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "large-p2-tauri",
+      "dataset": "large",
+      "variant": "tauri",
+      "pair": 2,
+      "fixtureSha256": "CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E",
+      "exeSha256": "2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 145.837890625,
+        "minimum": 145.609375,
+        "maximum": 149.328125
+      },
+      "workingSetSumMiB": {
+        "median": 491.6640625,
+        "minimum": 490.12890625,
+        "maximum": 494.0546875
+      },
+      "privateCommitMiB": {
+        "median": 282.849609375,
+        "minimum": 282.2734375,
+        "maximum": 286.42578125
+      },
+      "cpuCoreWeightedPercent": 0.15534666741414235,
+      "cpuMachineWeightedPercent": 0.012945555617845196,
+      "validCpuIntervalSeconds": 120.6977936,
+      "intervalSeconds": {
+        "median": 1.0020677499999948,
+        "minimum": 0.9161479000000128,
+        "maximum": 1.7143933999999987
+      },
+      "collectionSeconds": {
+        "median": 0.7071836,
+        "minimum": 0.6687092,
+        "maximum": 0.8330905
+      },
+      "processCount": {
+        "median": 8.0,
+        "minimum": 8.0,
+        "maximum": 8.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        13.0,
+        3.0
+      ],
+      "firstMainWindowObservedMs": 963.0121,
+      "elapsedSeconds": 182.9270683,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": true,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "large-p3-tauri",
+      "dataset": "large",
+      "variant": "tauri",
+      "pair": 3,
+      "fixtureSha256": "CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E",
+      "exeSha256": "2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 147.140625,
+        "minimum": 146.234375,
+        "maximum": 149.3125
+      },
+      "workingSetSumMiB": {
+        "median": 491.5390625,
+        "minimum": 489.6796875,
+        "maximum": 494.51171875
+      },
+      "privateCommitMiB": {
+        "median": 286.703125,
+        "minimum": 285.6796875,
+        "maximum": 289.21875
+      },
+      "cpuCoreWeightedPercent": 0.18128355185618694,
+      "cpuMachineWeightedPercent": 0.015106962654682246,
+      "validCpuIntervalSeconds": 120.66731800000001,
+      "intervalSeconds": {
+        "median": 1.0028556000000037,
+        "minimum": 0.9237211999999886,
+        "maximum": 1.6905372000000014
+      },
+      "collectionSeconds": {
+        "median": 0.68606615,
+        "minimum": 0.6615384,
+        "maximum": 0.7424307
+      },
+      "processCount": {
+        "median": 8.0,
+        "minimum": 8.0,
+        "maximum": 8.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        0.0,
+        6.0
+      ],
+      "firstMainWindowObservedMs": 861.6692,
+      "elapsedSeconds": 182.6577798,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": true,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "large-p3-native",
+      "dataset": "large",
+      "variant": "native",
+      "pair": 3,
+      "fixtureSha256": "CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E",
+      "exeSha256": "30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 15.171875,
+        "minimum": 15.1328125,
+        "maximum": 15.171875
+      },
+      "workingSetSumMiB": {
+        "median": 32.08203125,
+        "minimum": 32.05078125,
+        "maximum": 32.08203125
+      },
+      "privateCommitMiB": {
+        "median": 16.61328125,
+        "minimum": 16.53125,
+        "maximum": 16.61328125
+      },
+      "cpuCoreWeightedPercent": 1.6061679515370577,
+      "cpuMachineWeightedPercent": 0.13384732929475482,
+      "validCpuIntervalSeconds": 120.62872989999998,
+      "intervalSeconds": {
+        "median": 1.0012398500000046,
+        "minimum": 0.8942326000000094,
+        "maximum": 1.6359588999999986
+      },
+      "collectionSeconds": {
+        "median": 0.6173337999999999,
+        "minimum": 0.5919196,
+        "maximum": 0.7055823
+      },
+      "processCount": {
+        "median": 1.0,
+        "minimum": 1.0,
+        "maximum": 1.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        12.0,
+        4.0
+      ],
+      "firstMainWindowObservedMs": 694.9231,
+      "elapsedSeconds": 181.8252046,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": null,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "large-p4-native",
+      "dataset": "large",
+      "variant": "native",
+      "pair": 4,
+      "fixtureSha256": "CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E",
+      "exeSha256": "30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 15.17578125,
+        "minimum": 15.140625,
+        "maximum": 15.18359375
+      },
+      "workingSetSumMiB": {
+        "median": 32.078125,
+        "minimum": 32.046875,
+        "maximum": 32.08203125
+      },
+      "privateCommitMiB": {
+        "median": 16.623046875,
+        "minimum": 16.55078125,
+        "maximum": 16.63671875
+      },
+      "cpuCoreWeightedPercent": 1.5650047215069784,
+      "cpuMachineWeightedPercent": 0.13041706012558155,
+      "validCpuIntervalSeconds": 120.80634479999999,
+      "intervalSeconds": {
+        "median": 0.9999096499999993,
+        "minimum": 0.8720987000000093,
+        "maximum": 1.7186491000000004
+      },
+      "collectionSeconds": {
+        "median": 0.65376565,
+        "minimum": 0.6136317,
+        "maximum": 0.8084048
+      },
+      "processCount": {
+        "median": 1.0,
+        "minimum": 1.0,
+        "maximum": 1.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        22.0,
+        39.0
+      ],
+      "firstMainWindowObservedMs": 714.2236,
+      "elapsedSeconds": 182.3682646,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": null,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "large-p4-tauri",
+      "dataset": "large",
+      "variant": "tauri",
+      "pair": 4,
+      "fixtureSha256": "CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E",
+      "exeSha256": "2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047",
+      "sampleCount": 120,
+      "validPrivate": 119,
+      "validMemory": 119,
+      "validCpu": 118,
+      "privateWorkingSetMiB": {
+        "median": 149.03125,
+        "minimum": 148.66796875,
+        "maximum": 150.578125
+      },
+      "workingSetSumMiB": {
+        "median": 492.04296875,
+        "minimum": 490.51171875,
+        "maximum": 494.19140625
+      },
+      "privateCommitMiB": {
+        "median": 291.66796875,
+        "minimum": 290.94140625,
+        "maximum": 293.02734375
+      },
+      "cpuCoreWeightedPercent": 0.15791380431894406,
+      "cpuMachineWeightedPercent": 0.013159483693245337,
+      "validCpuIntervalSeconds": 118.7356614,
+      "intervalSeconds": {
+        "median": 0.9964891999999992,
+        "minimum": 0.8418290000000184,
+        "maximum": 1.8559640000000002
+      },
+      "collectionSeconds": {
+        "median": 0.7370747,
+        "minimum": 0.6810711,
+        "maximum": 0.9311485
+      },
+      "processCount": {
+        "median": 8.0,
+        "minimum": 8.0,
+        "maximum": 8.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        15.0,
+        7.0
+      ],
+      "firstMainWindowObservedMs": 976.6535,
+      "elapsedSeconds": 182.2556548,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": true,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "large-p5-tauri",
+      "dataset": "large",
+      "variant": "tauri",
+      "pair": 5,
+      "fixtureSha256": "CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E",
+      "exeSha256": "2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 139.3359375,
+        "minimum": 139.06640625,
+        "maximum": 142.09375
+      },
+      "workingSetSumMiB": {
+        "median": 473.978515625,
+        "minimum": 472.26953125,
+        "maximum": 476.17578125
+      },
+      "privateCommitMiB": {
+        "median": 271.28515625,
+        "minimum": 271.04296875,
+        "maximum": 274.49609375
+      },
+      "cpuCoreWeightedPercent": 0.2200244589335561,
+      "cpuMachineWeightedPercent": 0.01833537157779634,
+      "validCpuIntervalSeconds": 120.72521449999999,
+      "intervalSeconds": {
+        "median": 0.9938530000000014,
+        "minimum": 0.7656259999999975,
+        "maximum": 2.9326935999999932
+      },
+      "collectionSeconds": {
+        "median": 0.7466702000000001,
+        "minimum": 0.6827155,
+        "maximum": 2.6914707
+      },
+      "processCount": {
+        "median": 8.0,
+        "minimum": 8.0,
+        "maximum": 8.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        34.0,
+        6.0
+      ],
+      "firstMainWindowObservedMs": 807.8643,
+      "elapsedSeconds": 182.962653,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": true,
+      "cleanupErrors": 0
+    },
+    {
+      "run": "large-p5-native",
+      "dataset": "large",
+      "variant": "native",
+      "pair": 5,
+      "fixtureSha256": "CF946BFDCB9484742F00ECDBBC2C5CA7F5002097F020EB811E03C9215466DA2E",
+      "exeSha256": "30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD",
+      "sampleCount": 120,
+      "validPrivate": 120,
+      "validMemory": 120,
+      "validCpu": 120,
+      "privateWorkingSetMiB": {
+        "median": 15.15625,
+        "minimum": 15.1171875,
+        "maximum": 15.15625
+      },
+      "workingSetSumMiB": {
+        "median": 32.0859375,
+        "minimum": 32.0546875,
+        "maximum": 32.0859375
+      },
+      "privateCommitMiB": {
+        "median": 16.609375,
+        "minimum": 16.5234375,
+        "maximum": 16.609375
+      },
+      "cpuCoreWeightedPercent": 1.7090858274919134,
+      "cpuMachineWeightedPercent": 0.14242381895765946,
+      "validCpuIntervalSeconds": 120.6785503,
+      "intervalSeconds": {
+        "median": 1.0014637500000063,
+        "minimum": 0.9307967000000019,
+        "maximum": 1.643060300000002
+      },
+      "collectionSeconds": {
+        "median": 0.6513365,
+        "minimum": 0.6265683,
+        "maximum": 0.7613086
+      },
+      "processCount": {
+        "median": 1.0,
+        "minimum": 1.0,
+        "maximum": 1.0
+      },
+      "systemCpuBeforeAfterPercent": [
+        16.0,
+        9.0
+      ],
+      "firstMainWindowObservedMs": 865.929,
+      "elapsedSeconds": 181.9038912,
+      "mainWindowShapes": [
+        {
+          "width": 1176,
+          "height": 859,
+          "dpi": 96,
+          "minimized": false
+        }
+      ],
+      "webViewProfileVerified": null,
+      "cleanupErrors": 0
+    }
+  ]
+}

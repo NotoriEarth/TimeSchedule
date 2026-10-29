@@ -11,7 +11,7 @@
 
 네이티브 기본 저장 폴더는 `%LOCALAPPDATA%\com.timeschedule.personal.native-experiment`, 파일은 `schedule.db`입니다. 기존 앱의 DB를 자동으로 가져오지 않습니다. `TIMESCHEDULE_DATA_DIR`로 별도 테스트 폴더를 지정할 수 있습니다. 기존 DB의 호환성 확인에는 원본 대신 일관되게 백업한 복사본을 사용하세요.
 
-[네이티브 기능 대조·검증·테스트 방법](docs/rust-native/full-port.md)을 참고하세요. 아래 설명과 과거 메모리 표는 별도 표시가 없는 한 기존 Tauri 버전 기준입니다. 새 앱의 최종 RAM 절감률이나 실제 한글 IME/바탕화면 검증 결과로 해석하지 마세요.
+[네이티브 기능 대조·검증·테스트 방법](docs/rust-native/full-port.md)과 [20회 비교 벤치마크](docs/rust-native/benchmark.md)를 참고하세요. 기본 월간 상세창+위젯 유휴 상태에서 전용 상주 RAM은 약90% 줄었지만 유휴 CPU는 늘었습니다. 검색·편집 속도와 실제 한글 IME/바탕화면 동작은 별도 검증 대상입니다. 아래 설명과 과거 메모리 표는 별도 표시가 없는 한 기존 Tauri 버전 기준입니다.
 
 ## 기존 Tauri 앱
 
@@ -124,7 +124,7 @@ $env:TIMESCHEDULE_DATA_DIR = Join-Path $PWD '.test-data'
 전체 작업 집합 합계는 공유 페이지를 중복 계산하므로 앱만의 실제 추가 메모리와 같지 않습니다. 전용 커밋도 현재 RAM 상주량과 다릅니다. 수치는 이 PC에서 한 번 측정한 기준점이며, OS·WebView2 버전·일정 개수에 따라 달라집니다. 작은 실행 파일 크기만으로 메모리 최적화가 끝났다고 판단하지 않습니다. 0.1.0 원본 결과도 로컬 전용 파일 `artifacts/memory-manager-and-widget.json`, `artifacts/memory-widget-only.json`에 있으며 저장소에 포함하지 않습니다. 실행 중인 앱의 프로세스 ID를 지정해 다시 측정할 수 있습니다.
 
 ```powershell
-.\scripts\measure-memory.ps1 -AppProcessId <TimeSchedule의_프로세스_ID>
+.\scripts\measure-memory.ps1 -AppProcessId <TimeSchedule의_프로세스_ID> -ExpectedExecutablePath <실행한_EXE의_절대경로>
 ```
 
 저장소 테스트는 재실행 후 데이터 유지, 날짜 범위의 양 끝 포함, 잘못된 날짜·시간·색상 거부, 일정·할 일·메모 수정과 삭제, 실패한 수정의 기존 데이터 보존 등을 확인합니다. 직접 검사하려면:
