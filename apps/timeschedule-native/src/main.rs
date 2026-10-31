@@ -10,6 +10,8 @@ mod month_jump;
 mod native_alpha_tests;
 mod popup;
 mod quick_editor;
+mod record_cli;
+mod record_inbox;
 mod shell;
 mod text_layout;
 mod theme;
@@ -23,6 +25,9 @@ use iced::Font;
 pub static DPI_INIT_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn main() {
+    if let Some(code) = record_cli::try_run() {
+        std::process::exit(code);
+    }
     if let Err(error) = timeschedule_desktop::windows::initialize_process_dpi_for_shell() {
         let _ = DPI_INIT_ERROR.set(error);
     }

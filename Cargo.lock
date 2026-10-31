@@ -2163,11 +2163,14 @@ dependencies = [
  "iced",
  "png",
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "softbuffer",
  "timeschedule-core",
  "timeschedule-desktop",
  "tiny-skia",
  "tokio",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 
