@@ -3,14 +3,13 @@ use crate::{
     editor::{Confirmation, Form, Kind},
     theme,
 };
-use chrono::{Datelike, Duration, Local, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate};
 use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, row, scrollable, space,
     stack, text, text_editor, text_input, Column, Row,
 };
 use iced::{window, Alignment, Color, Element, Length, Theme};
 use timeschedule_core::{
-    dates::calendar_days,
     diary::{EntrySummary, SearchHit},
     storage::{CalendarEvent, Task},
 };
@@ -84,7 +83,7 @@ fn graph_paper<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
 
 pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
     if Some(id) == app.widget {
-        return widget(app);
+        return crate::desktop_widget::view(app);
     }
     let base = crate::shell::view(app);
     if let Some(editor) = &app.editor {
@@ -604,163 +603,6 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
     c=c.push(title("근거 초안과 외부 연결")).push(text("요약과 포트폴리오는 저장된 원문을 정리한 편집 가능한 초안입니다. AI 분석 결과가 아닙니다. ChatGPT/Space·모바일·여러 기기 동기화는 아직 연결되지 않았습니다.").size(14)).push(quiet("상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."));
     scrollable(paper(c)).height(Length::Fill).into()
 }
-fn widget(app: &App) -> Element<'_, Message> {
-    let dates = calendar_days(app.widget_month);
-    let mut c = column![
-        row![
-            mouse_area(
-                text(format!(
-                    "{}년 {}월",
-                    app.widget_month.year(),
-                    app.widget_month.month()
-                ))
-                .size(22)
-            )
-            .on_press(Message::DragWidget),
-            space().width(Length::Fill),
-            button("‹")
-                .style(theme::text_button)
-                .on_press(Message::WidgetMonth(-1)),
-            button(text("오늘").size(12))
-                .style(theme::text_button)
-                .on_press(Message::WidgetToday),
-            button("›")
-                .style(theme::text_button)
-                .on_press(Message::WidgetMonth(1))
-        ]
-        .align_y(Alignment::Center),
-        Row::with_children(
-            WEEKDAYS
-                .iter()
-                .map(|d| container(text(*d).size(12)).center_x(Length::Fill).into())
-        )
-    ]
-    .spacing(4);
-    for week in dates.chunks(7) {
-        let mut cells = Row::new().spacing(2);
-        for date in week {
-            let events: Vec<_> = app
-                .snapshot
-                .widget_events
-                .iter()
-                .filter(|e| e.date == date.to_string())
-                .collect();
-            let mut day = column![text(format!(
-                "{}{}",
-                date.day(),
-                if events.len() > 2 {
-                    format!(" +{}", events.len() - 2)
-                } else {
-                    String::new()
-                }
-            ))
-            .size(15)]
-            .spacing(1);
-            for event in events.iter().take(2) {
-                day = day.push(
-                    text(format!(
-                        "{}{}",
-                        if event.completed { "✓" } else { "" },
-                        preview(&event.title, 5)
-                    ))
-                    .size(9),
-                );
-            }
-            cells = cells.push(
-                button(day.align_x(Alignment::Center))
-                    .width(Length::Fill)
-                    .height(46)
-                    .padding(2)
-                    .style(if *date == Local::now().date_naive() {
-                        theme::primary
-                    } else {
-                        theme::text_button
-                    })
-                    .on_press(Message::WidgetDate(*date)),
-            );
-        }
-        c = c.push(cells);
-    }
-    let today = Local::now().date_naive();
-    let today_events = &app.snapshot.today_events;
-    let mut today_list = column![button(
-        text(format!(
-            "오늘 {} · 일정 {}개",
-            today.format("%m.%d"),
-            today_events.len()
-        ))
-        .size(12)
-    )
-    .style(theme::text_button)
-    .on_press(Message::WidgetDate(today))]
-    .spacing(2);
-    for event in today_events.iter().take(3) {
-        today_list = today_list.push(
-            button(
-                text(format!(
-                    "{} {}{}",
-                    if event.all_day {
-                        "종일"
-                    } else {
-                        event.start_time.as_deref().unwrap_or("")
-                    },
-                    if event.completed { "✓ " } else { "" },
-                    preview(&event.title, 28)
-                ))
-                .size(11),
-            )
-            .style(theme::text_button)
-            .on_press(Message::WidgetDate(today)),
-        );
-    }
-    if today_events.is_empty() {
-        today_list = today_list.push(text("오늘 등록된 일정이 없어요.").size(11));
-    }
-    c = c.push(scrollable(today_list).height(70));
-    c = c.push(row![
-        button(text("다이어리 열기").size(12))
-            .on_press(Message::ShowManager)
-            .style(theme::text_button),
-        space().width(Length::Fill),
-        button(
-            text(if app.preferences.widget_locked {
-                "잠금 해제"
-            } else {
-                "잠금"
-            })
-            .size(11)
-        )
-        .on_press(Message::Native(NativeAction::Lock(
-            !app.preferences.widget_locked
-        )))
-        .style(theme::text_button)
-    ]);
-    c = c.push(
-        row![
-            text(format!("불투명도 {}%", app.preferences.widget_opacity)).size(11),
-            iced::widget::slider(40..=100, app.preferences.widget_opacity, |v| {
-                Message::Native(NativeAction::Opacity(v))
-            })
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center),
-    );
-    c = c.push(
-        text(if app.widget_attached {
-            "바탕화면에 연결됨"
-        } else {
-            "바탕화면 연결 확인 필요 · 설정에서 재시도"
-        })
-        .size(10),
-    );
-    container(scrollable(c))
-        .padding(10)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(paper_style)
-        .into()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectChoice {
     id: Option<String>,

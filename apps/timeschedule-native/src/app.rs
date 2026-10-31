@@ -37,7 +37,7 @@ fn fit_widget_before_attach(
 }
 fn widget_window_settings() -> window::Settings {
     window::Settings {
-        size: Size::new(500.0, 620.0),
+        size: Size::new(960.0, 640.0),
         // Native fitting may shrink this on small/high-DPI displays.
         min_size: None,
         decorations: false,
@@ -1163,8 +1163,10 @@ impl App {
             }
             Message::ShowManager => return self.show_manager(),
             Message::DragWidget => {
-                if let Some(id) = self.widget {
-                    return window::drag(id);
+                if !self.preferences.widget_locked {
+                    if let Some(id) = self.widget {
+                        return window::drag(id);
+                    }
                 }
             }
             Message::Quit => return self.request_close(CloseIntent::Application),
@@ -1278,6 +1280,70 @@ mod tests {
         );
         let _ = app.update(Message::New(Kind::Event, Some(date.to_string())));
         assert_eq!(app.editor.as_ref().unwrap().form.date, date.to_string());
+    }
+    #[test]
+    fn locked_widget_does_not_start_native_drag() {
+        let mut app = fixture();
+        app.widget = Some(window::Id::unique());
+        assert!(app.preferences.widget_locked);
+        assert_eq!(app.update(Message::DragWidget).units(), 0);
+        app.preferences.widget_locked = false;
+        assert!(app.update(Message::DragWidget).units() > 0);
+    }
+    #[test]
+    fn fitted_widget_keeps_dense_day_content_inside_cells() {
+        use iced::advanced::{layout, widget::Tree};
+        fn check(node: &layout::Node, x: f32, width: f32) {
+            let bounds = node.bounds();
+            let x = x + bounds.x;
+            assert!(
+                x + bounds.width <= width + 0.1,
+                "horizontal overflow: {bounds:?} at {x} / {width}"
+            );
+            for child in node.children() {
+                // Calendar-day descendants are narrower than the outer scroll
+                // viewport. Their contents must fit vertically even when dense.
+                if node.size().width < 160.0 {
+                    let b = child.bounds();
+                    assert!(
+                        b.y + b.height <= node.size().height + 0.1,
+                        "day content {b:?} exceeds {:?}",
+                        node.size()
+                    );
+                }
+                check(child, x, width);
+            }
+        }
+        let mut app = fixture();
+        let widget = window::Id::unique();
+        app.widget = Some(widget);
+        for day in calendar_days(app.widget_month) {
+            for i in 0..6 {
+                let mut form = Form::new(Kind::Event, day.to_string(), None);
+                form.title = format!("{i} 아주 긴 한글 일정 제목 WWWWWWW");
+                form.save(app.store.as_ref().unwrap()).unwrap();
+            }
+        }
+        app.snapshot = worker::snapshot(app.store.as_ref().unwrap(), &app.scope()).unwrap();
+        let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        for size in [
+            Size::new(320.0, 300.0),
+            Size::new(500.0, 620.0),
+            Size::new(960.0, 640.0),
+        ] {
+            for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+                app.preferences.theme = mode;
+                let mut element = app.view(widget);
+                let mut tree = Tree::new(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                assert_eq!(node.size(), size);
+                check(&node, 0.0, size.width);
+            }
+        }
     }
     #[test]
     fn dense_calendar_keeps_chips_within_short_rows() {

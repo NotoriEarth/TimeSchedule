@@ -48,7 +48,30 @@ fn render_theme_previews() {
         f.save(store).unwrap();
     }
     app.snapshot = worker::snapshot(store, &app.scope()).unwrap();
+    let desktop = window::Id::unique();
+    app.widget = Some(desktop);
+    app.widget_attached = true;
     for (name, mode, size) in [
+        (
+            "desktopcal-midnight",
+            AppTheme::Midnight,
+            Size::new(960.0, 640.0),
+        ),
+        (
+            "desktopcal-porcelain",
+            AppTheme::Porcelain,
+            Size::new(960.0, 640.0),
+        ),
+        (
+            "desktopcal-fitted",
+            AppTheme::Midnight,
+            Size::new(500.0, 440.0),
+        ),
+        (
+            "desktopcal-small",
+            AppTheme::Porcelain,
+            Size::new(320.0, 300.0),
+        ),
         ("midnight", AppTheme::Midnight, Size::new(1440.0, 940.0)),
         ("porcelain", AppTheme::Porcelain, Size::new(1440.0, 940.0)),
         (
@@ -72,7 +95,11 @@ fn render_theme_previews() {
         let mut renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
         let bounds = Rectangle::new(Point::ORIGIN, size);
         renderer.reset(bounds);
-        let mut element = app.view(app.manager);
+        let mut element = app.view(if name.starts_with("desktopcal-") {
+            desktop
+        } else {
+            app.manager
+        });
         let mut tree = Tree::new(element.as_widget());
         let node = element.as_widget_mut().layout(
             &mut tree,

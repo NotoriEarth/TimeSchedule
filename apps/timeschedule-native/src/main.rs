@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
+mod desktop_widget;
 mod editor;
 mod frozen;
 mod icons;
 mod shell;
+mod text_layout;
 mod theme;
 mod views;
 mod worker;
