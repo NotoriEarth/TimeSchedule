@@ -149,6 +149,7 @@ export async function sync(options = {}) {
         results.push({ workId: job.source.workId,revision:job.revision, phase: job.phase, skipped: true }); continue;
       }
       processed++; upgradeJob(job);
+      const inheritedUncertainty=job.publicationUncertain;
       const save = () => { job.updatedAt = new Date().toISOString(); atomicJson(file, job); };
       const importRecord=async linked=>{
         const record=diaryPayload(job,linked);
@@ -184,7 +185,7 @@ export async function sync(options = {}) {
       } catch (error) {
         if (error.space) job.space = error.space;
         if (error.conflict) job.phase = 'conflict';
-        if(error.publicationNotStarted){job.publicationUncertain=false;job.phase='waiting_space';}
+        if(error.publicationNotStarted && !error.conflict && !inheritedUncertainty){job.publicationUncertain=false;job.phase='waiting_space';}
         job.attempts=(job.attempts??0)+1;
         job.nextAttemptAt=now+[60000,300000,900000,3600000][Math.min(job.attempts-1,3)];
         job.lastError = String(error.message ?? error).slice(0, 2000); save();

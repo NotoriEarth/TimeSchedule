@@ -45,3 +45,17 @@ test('a later local revision cannot prevent its earlier Space delivery from comp
  await sync({stateDir,retryNow:true,importer,publisher:async j=>published(j)});
  assert.ok(status({stateDir}).every(j=>j.phase==='complete'));assert.equal(stored,4);
 });
+test('failed read-only recovery never clears an earlier uncertain publication',async t=>{
+ const stateDir=setup(t);await prepare(source(),{stateDir});const importer=async r=>saved(r);
+ await sync({stateDir,importer,publisher:async()=>{throw Error('response lost after create');}});
+ await sync({stateDir,retryNow:true,importer,publisher:async(j,o)=>{assert.equal(o.recoverOnly,true);throw Object.assign(Error('authentication unavailable during recovery'),{publicationNotStarted:true});}});
+ await sync({stateDir,retryNow:true,importer,publisher:async(j,o)=>{assert.equal(o.recoverOnly,true);return published(j);}});
+ assert.equal(status({stateDir})[0].phase,'complete');
+});
+test('human Space conflicts remain terminal even when the failed attempt made no write',async t=>{
+ const stateDir=setup(t);await prepare(source(),{stateDir});let calls=0;
+ const publisher=async()=>{calls++;throw Object.assign(Error('user edited Space'),{conflict:true,publicationNotStarted:true});};
+ await sync({stateDir,publisher,importer:async r=>saved(r)});
+ assert.equal(status({stateDir})[0].phase,'conflict');
+ await sync({stateDir,retryNow:true,publisher,importer:async r=>saved(r)});assert.equal(calls,1);
+});
