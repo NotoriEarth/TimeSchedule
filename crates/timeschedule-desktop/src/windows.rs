@@ -9,6 +9,8 @@ pub use super::NativeWindow;
 
 /// Registered before widget creation; the manager retains Tao's original class.
 pub const WIDGET_CLASS: &str = "TimeScheduleDesktopLayered";
+/// Contract with the opt-in Win32 presenter in vendor/softbuffer.
+pub const PER_PIXEL_ALPHA_PROPERTY: &str = "TimeSchedule.PerPixelAlpha.v1";
 
 #[cfg(all(windows, any(test, feature = "test-support")))]
 #[allow(unused_imports)]
@@ -30,10 +32,15 @@ pub struct AttachmentInfo {
 
 #[cfg(windows)]
 pub use native::{
-    attach, detach, initialize_process_dpi_for_shell, position, prepare_widget_class,
-    recover_position, restore_position, set_locked, set_opacity, set_visible, status,
-    with_shell_dpi_context,
+    attach, detach, enable_per_pixel_alpha, initialize_process_dpi_for_shell, position,
+    prepare_widget_class, recover_position, restore_position, set_locked, set_opacity, set_visible,
+    status, with_shell_dpi_context,
 };
+
+#[cfg(not(windows))]
+pub fn enable_per_pixel_alpha(_: &WebviewWindow) -> Result<(), String> {
+    Err("픽셀 투명도는 Windows에서만 지원합니다.".into())
+}
 
 #[cfg(not(windows))]
 pub fn prepare_widget_class(_: &WebviewWindow) -> Result<(), String> {
@@ -108,6 +115,11 @@ mod native {
     type Hwnd = isize;
     type SubclassProc = unsafe extern "system" fn(Hwnd, u32, usize, isize, usize, usize) -> isize;
     type WindowProc = unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize;
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetPropW(hwnd: Hwnd, name: *const u16) -> isize;
+        fn SetPropW(hwnd: Hwnd, name: *const u16, value: isize) -> i32;
+    }
     const GWL_STYLE: i32 = -16;
     const GWL_EXSTYLE: i32 = -20;
     const GCL_STYLE: i32 = -26;
@@ -540,6 +552,10 @@ mod native {
     }
 
     fn opacity_percent(hwnd: Hwnd, exstyle: u32) -> Result<Option<u8>, String> {
+        if unsafe { GetPropW(hwnd, wide(super::PER_PIXEL_ALPHA_PROPERTY).as_ptr()) } != 0 {
+            // Per-pixel presentation has no constant window-alpha attribute.
+            return Ok(None);
+        }
         if exstyle & WS_EX_LAYERED == 0 {
             return Ok(None);
         }
@@ -550,6 +566,32 @@ mod native {
         Ok(Some(
             ((u32::from(attributes.alpha) * 100 + 127) / 255) as u8,
         ))
+    }
+
+    /// Enable premultiplied BGRA presentation only on our native widget.
+    /// No SetLayeredWindowAttributes call may follow: it disables ULW updates.
+    pub fn enable_per_pixel_alpha(window: &WebviewWindow) -> Result<(), String> {
+        let handle = hwnd(window)?;
+        require_ui_thread(handle)?;
+        if class_name(handle) != window.layered_class()
+            || unsafe { GetClassLongW(handle, GCL_STYLE) } & (CS_OWNDC | CS_CLASSDC) != 0
+        {
+            return Err("위젯 창 클래스가 픽셀 투명도와 호환되지 않습니다.".into());
+        }
+        let property = wide(super::PER_PIXEL_ALPHA_PROPERTY);
+        if unsafe { GetPropW(handle, property.as_ptr()) } != 0 {
+            return Ok(());
+        }
+        let previous = unsafe { GetWindowLongW(handle, GWL_EXSTYLE) } as u32;
+        // Clear any constant-alpha redirection, then opt into the presenter.
+        set_style(handle, GWL_EXSTYLE, previous & !WS_EX_LAYERED)?;
+        set_style(handle, GWL_EXSTYLE, previous | WS_EX_LAYERED)?;
+        if unsafe { SetPropW(handle, property.as_ptr(), 1) } == 0 {
+            let failure = error("SetPropW(per-pixel alpha)");
+            set_style(handle, GWL_EXSTYLE, previous)?;
+            return Err(failure);
+        }
+        Ok(())
     }
 
     fn set_native_opacity(hwnd: Hwnd, percent: u8, expected_class: &str) -> Result<(), String> {

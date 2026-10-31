@@ -6,7 +6,8 @@ use crate::{
 };
 use chrono::{Datelike, Local};
 use iced::widget::{
-    button, column, container, mouse_area, responsive, row, scrollable, slider, space, text, Row,
+    button, checkbox, column, container, mouse_area, responsive, row, scrollable, slider, space,
+    text, Row,
 };
 use iced::{Alignment, Border, Element, Length};
 use timeschedule_core::dates::calendar_days;
@@ -49,7 +50,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .padding(8)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(theme::root)
+        .style(|_| container::Style::default())
         .into()
     })
     .into()
@@ -57,6 +58,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
 fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
     let p = theme::palette(app.preferences.theme);
+    let background_alpha = f32::from(app.preferences.widget_opacity) / 100.0;
     let today = Local::now().date_naive();
     let heading = text(format!(
         "{} · {:02}",
@@ -184,11 +186,38 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
                             event.title
                         );
                         let ink = theme::event_color(p, &event.color);
+                        let completion_enabled = !app.busy && !app.loading && app.editor.is_none();
+                        let completion_id = event.id.clone();
+                        let completed = event.completed;
                         entries = entries.push(
                             row![
+                                // Consume even disabled clicks so they cannot
+                                // become a date double-click in the parent.
+                                checkbox(event.completed)
+                                    .size(12)
+                                    .on_toggle(move |value| {
+                                        if completion_enabled {
+                                            Message::CompleteWidgetEvent(
+                                                completion_id.clone(),
+                                                value,
+                                            )
+                                        } else {
+                                            Message::Ignore
+                                        }
+                                    })
+                                    .style(move |theme, status| checkbox::primary(
+                                        theme,
+                                        if completion_enabled {
+                                            status
+                                        } else {
+                                            checkbox::Status::Disabled {
+                                                is_checked: completed,
+                                            }
+                                        }
+                                    )),
                                 container(space().width(2).height(10))
                                     .style(move |_| container::Style::default().background(ink)),
-                                text(fit_label(&label, (size.width - 8.0).max(0.0), EVENT_SIZE))
+                                text(fit_label(&label, (size.width - 26.0).max(0.0), EVENT_SIZE))
                                     .size(EVENT_SIZE)
                                     .wrapping(text::Wrapping::None)
                                     .color(if event.completed || outside {
@@ -197,7 +226,7 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
                                         p.text
                                     })
                             ]
-                            .spacing(6)
+                            .spacing(4)
                             .height(EVENT_HEIGHT)
                             .align_y(Alignment::Center),
                         );
@@ -232,37 +261,35 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
                 lines.into()
             });
             cells = cells.push(
-                button(content)
-                    .padding(CELL_PADDING)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .clip(true)
-                    .on_press(Message::WidgetDate(date))
-                    .style(move |_, status| button::Style {
-                        background:
-                            Some(
-                                if matches!(
-                                    status,
-                                    button::Status::Hovered | button::Status::Pressed
-                                ) {
-                                    p.raised
-                                } else if is_today {
+                mouse_area(
+                    container(content)
+                        .padding(CELL_PADDING)
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .clip(true)
+                        .style(move |_| container::Style {
+                            background: Some(
+                                if is_today {
                                     p.selected
                                 } else if outside {
                                     p.sidebar
                                 } else {
                                     p.background
                                 }
+                                .scale_alpha(background_alpha)
                                 .into(),
                             ),
-                        text_color: p.text,
-                        border: Border {
-                            color: if is_today { p.accent } else { p.line },
-                            width: if is_today { 1.5 } else { 0.5 },
-                            radius: 0.0.into(),
-                        },
-                        ..Default::default()
-                    }),
+                            text_color: Some(p.text),
+                            border: Border {
+                                color: if is_today { p.accent } else { p.line },
+                                width: if is_today { 1.5 } else { 0.5 },
+                                radius: 0.0.into(),
+                            },
+                            ..Default::default()
+                        }),
+                )
+                .on_double_click(Message::WidgetDate(date))
+                .interaction(iced::mouse::Interaction::Pointer),
             );
         }
         grid = grid.push(cells);
@@ -284,7 +311,7 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
         footer = footer
             .push(
                 text(if app.preferences.widget_locked {
-                    "날짜 클릭으로 일정 추가"
+                    "날짜 더블클릭 · 체크로 완료"
                 } else {
                     "월 제목을 드래그해 이동"
                 })
@@ -295,7 +322,7 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
     }
     footer = footer
         .push(
-            text(format!("불투명도 {}%", app.preferences.widget_opacity))
+            text(format!("배경 {}%", app.preferences.widget_opacity))
                 .size(11)
                 .color(p.muted),
         )
@@ -305,14 +332,28 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
             })
             .width(100),
         );
-    let mut body = column![toolbar, grid, footer]
-        .spacing(6)
-        .width(Length::Fill);
+    let panel = move |_: &iced::Theme| {
+        container::Style::default().background(p.background.scale_alpha(background_alpha))
+    };
+    let mut body = column![
+        container(toolbar).padding(4).style(panel),
+        grid,
+        container(footer).padding(4).style(panel)
+    ]
+    .spacing(6)
+    .width(Length::Fill);
     if !app.widget_attached {
         body = body.push(
             button(text("바탕화면 연결 재시도").size(11))
                 .style(theme::text_button)
                 .on_press(Message::Native(NativeAction::Attach)),
+        );
+    }
+    if !app.error.is_empty() {
+        body = body.push(
+            container(text(&app.error).size(11).color(p.danger))
+                .padding(4)
+                .style(panel),
         );
     }
     body

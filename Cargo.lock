@@ -2011,8 +2011,6 @@ dependencies = [
 [[package]]
 name = "softbuffer"
 version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aac18da81ebbf05109ab275b157c22a653bb3c12cf884450179942f81bcbf6c3"
 dependencies = [
  "bytemuck",
  "js-sys",
@@ -2165,10 +2163,12 @@ dependencies = [
  "iced",
  "png",
  "raw-window-handle",
+ "softbuffer",
  "timeschedule-core",
  "timeschedule-desktop",
  "tiny-skia",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

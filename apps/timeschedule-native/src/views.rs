@@ -85,12 +85,26 @@ pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
     if Some(id) == app.widget {
         return crate::desktop_widget::view(app);
     }
-    let base = crate::shell::view(app);
-    if let Some(editor) = &app.editor {
+    let quick = Some(id) == app.quick_window;
+    let base = if quick {
+        crate::quick_editor::view(app)
+    } else {
+        crate::shell::view(app)
+    };
+    if let Some(editor) = app.editor.as_ref().filter(|_| app.editor_in_quick == quick) {
         // This child stays at the same tree path both with and without the
         // confirmation. Retain cursor/selection/scroll and freeze its input.
         let editor_layer = crate::frozen::frozen(
-            modal(base, editor_view(app), Some(Message::CloseEditor), true),
+            if quick {
+                container(editor_view(app))
+                    .padding(14)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(theme::root)
+                    .into()
+            } else {
+                modal(base, editor_view(app), Some(Message::CloseEditor), true)
+            },
             editor.confirmation.is_some(),
         );
         if let Some(confirmation) = editor.confirmation {
@@ -593,7 +607,13 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
             .spacing(6),
         );
         c = c
-            .push(text(format!("불투명도 {}%", app.preferences.widget_opacity)).size(14))
+            .push(
+                text(format!(
+                    "배경 불투명도 {}% · 글자는 선명하게 유지",
+                    app.preferences.widget_opacity
+                ))
+                .size(14),
+            )
             .push(iced::widget::slider(
                 40..=100,
                 app.preferences.widget_opacity,
@@ -716,7 +736,7 @@ fn editor_view(app: &App) -> Element<'_, Message> {
     if form.kind != Kind::Task {
         let editor = text_editor(&e.content)
             .id("editor-body")
-            .height(220)
+            .height(if app.editor_in_quick { 100 } else { 220 })
             .placeholder("생각과 기록을 자유롭게 적어 보세요.")
             .on_action(Message::Body)
             .key_binding(editor_binding);

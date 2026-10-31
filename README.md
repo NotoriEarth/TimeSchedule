@@ -13,6 +13,8 @@
 
 [네이티브 기능 대조·검증·테스트 방법](docs/rust-native/full-port.md)과 [20회 비교 벤치마크](docs/rust-native/benchmark.md)를 참고하세요. 기본 월간 상세창+위젯 유휴 상태에서 전용 상주 RAM은 약90% 줄었지만 유휴 CPU는 늘었습니다. 검색·편집 속도와 실제 한글 IME/바탕화면 동작은 별도 검증 대상입니다. 아래 설명과 과거 메모리 표는 별도 표시가 없는 한 기존 Tauri 버전 기준입니다.
 
+`codex/desktopcal-priority-features`에서는 바탕화면 날짜 더블클릭 빠른 편집, 위젯 완료 체크, 글자 선명도를 유지하는 배경 투명도를 추가합니다. 테스트 실행 파일은 `artifacts/TimeSchedule-desktopcal-priority.exe`이며, [검증 결과와 직접 확인할 순서](docs/desktopcal-priority-verification.md)를 참고하세요. 실제 바탕화면 조작은 사용자 테스트 후 머지합니다.
+
 ## 기존 Tauri 앱
 
 오늘의 일정과 작은 할 일을 정리하는 Windows용 개인 달력 프로토타입입니다. Tauri 2, Svelte 5, TypeScript, Rust, SQLite로 구성하며, 계정이나 서버 없이 내 컴퓨터에 데이터를 저장합니다.

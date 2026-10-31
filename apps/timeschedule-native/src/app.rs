@@ -14,7 +14,7 @@ use std::{
 use timeschedule_core::{
     dates::{calendar_days, shift_month, week_after_sunday, week_containing},
     diary::{Entry, EntrySummary, ImportResult, SearchHit},
-    storage::Storage,
+    storage::{CalendarEvent, Storage},
 };
 use timeschedule_desktop::{
     paths::{self, InstanceLock},
@@ -130,6 +130,10 @@ pub enum Message {
     WidgetMonth(i32),
     WidgetToday,
     WidgetDate(NaiveDate),
+    QuickReady(window::Id),
+    QuickLoaded(u64, bool, Result<Vec<CalendarEvent>, String>),
+    QuickEdit(Option<String>),
+    CompleteWidgetEvent(String, bool),
     Project(Option<String>),
     New(Kind, Option<String>),
     EditForm(Form),
@@ -155,6 +159,7 @@ pub enum Message {
     Discard,
     CloseEditor,
     Escape,
+    EscapeWindow(window::Id),
     Composition(window::Id, bool),
     Saved(u64, Result<(), String>),
     ToggleTask(String),
@@ -179,6 +184,12 @@ pub struct App {
     pub manager: window::Id,
     pub manager_size: Size,
     pub widget: Option<window::Id>,
+    pub quick_window: Option<window::Id>,
+    pub quick_date: Option<NaiveDate>,
+    pub quick_events: Vec<CalendarEvent>,
+    pub quick_generation: u64,
+    pub quick_loading: bool,
+    pub editor_in_quick: bool,
     pub store: Option<Arc<Storage>>,
     pub data_dir: PathBuf,
     pub preferences: Preferences,
@@ -286,6 +297,12 @@ impl App {
             manager,
             manager_size: Size::new(1160.0, 820.0),
             widget: None,
+            quick_window: None,
+            quick_date: None,
+            quick_events: Vec::new(),
+            quick_generation: 0,
+            quick_loading: false,
+            editor_in_quick: false,
             store,
             data_dir,
             preferences: prefs,
@@ -339,6 +356,11 @@ impl App {
     pub fn title(&self, id: window::Id) -> String {
         if Some(id) == self.widget {
             "TimeSchedule Native · 바탕화면".into()
+        } else if Some(id) == self.quick_window {
+            format!(
+                "{} · 빠른 일정",
+                self.quick_date.map(|d| d.to_string()).unwrap_or_default()
+            )
         } else {
             "TimeSchedule Native · 만년 다이어리".into()
         }
@@ -386,7 +408,7 @@ impl App {
                         })
                     )
                 {
-                    return Some(Message::Escape);
+                    return Some(Message::EscapeWindow(id));
                 }
                 None
             }),
@@ -451,6 +473,13 @@ impl App {
         open.map(Message::WidgetReady)
     }
     fn native(&mut self, action: NativeAction) -> Task<Message> {
+        if let NativeAction::Opacity(value) = action {
+            if (40..=100).contains(&value) {
+                self.preferences.widget_opacity = value;
+                return self.save_preferences();
+            }
+            return Task::none();
+        }
         if self.native_busy {
             if !matches!(action, NativeAction::Position) {
                 self.native_pending = Some(action);
@@ -474,7 +503,7 @@ impl App {
                 NativeAction::Attach => {
                     fit_widget_before_attach(&owned, &prefs)?;
                     windows::attach(&owned)?;
-                    windows::set_opacity(&owned, prefs.widget_opacity)?;
+                    windows::enable_per_pixel_alpha(&owned)?;
                     windows::set_locked(&owned, prefs.widget_locked)?;
                     windows::set_visible(&owned, prefs.widget_visible)?;
                     visible = Some(prefs.widget_visible);
@@ -483,7 +512,7 @@ impl App {
                     if !windows::status(&owned)?.attached {
                         fit_widget_before_attach(&owned, &prefs)?;
                         windows::attach(&owned)?;
-                        windows::set_opacity(&owned, prefs.widget_opacity)?;
+                        windows::enable_per_pixel_alpha(&owned)?;
                         windows::set_locked(&owned, prefs.widget_locked)?;
                     }
                     windows::set_visible(&owned, true)?;
@@ -497,7 +526,7 @@ impl App {
                     if !windows::status(&owned)?.attached {
                         fit_widget_before_attach(&owned, &prefs)?;
                         windows::attach(&owned)?;
-                        windows::set_opacity(&owned, prefs.widget_opacity)?;
+                        windows::enable_per_pixel_alpha(&owned)?;
                         windows::set_locked(&owned, prefs.widget_locked)?;
                     }
                     windows::recover_position(&owned)?;
@@ -505,7 +534,7 @@ impl App {
                     visible = Some(true);
                 }
                 NativeAction::Lock(value) => windows::set_locked(&owned, value)?,
-                NativeAction::Opacity(value) => windows::set_opacity(&owned, value)?,
+                NativeAction::Opacity(_) => unreachable!("background opacity is a UI preference"),
                 NativeAction::Position => {}
             }
             let info = windows::status(&owned)?;
@@ -546,7 +575,11 @@ impl App {
             Message::PrefsDone,
         )
     }
-    fn open_form(&mut self, form: Form) -> Task<Message> {
+    pub(crate) fn open_form(&mut self, form: Form) -> Task<Message> {
+        if self.busy || self.loading {
+            self.notice = "저장된 내용을 갱신하는 중입니다. 잠시 후 다시 선택하세요.".into();
+            return Task::none();
+        }
         if self.editor.is_some() {
             self.notice = "현재 편집을 먼저 마쳐 주세요.".into();
             return Task::none();
@@ -558,16 +591,22 @@ impl App {
     fn request_close(&mut self, intent: CloseIntent) -> Task<Message> {
         if let Some(editor) = &mut self.editor {
             if !editor.request_close(intent) {
-                return Task::none();
+                return if self.editor_in_quick {
+                    self.focus_quick()
+                } else {
+                    Task::none()
+                };
             }
         }
         self.finish_close(intent)
     }
     fn finish_close(&mut self, intent: CloseIntent) -> Task<Message> {
         self.editor = None;
+        self.editor_in_quick = false;
         self.editor_generation += 1;
         match intent {
             CloseIntent::Editor => Task::none(),
+            CloseIntent::Quick => self.close_quick(),
             CloseIntent::Manager => {
                 if self.tray.is_none() {
                     return self.exit_when_idle();
@@ -587,7 +626,7 @@ impl App {
         self.log("clean exit");
         iced::exit()
     }
-    fn show_manager(&mut self) -> Task<Message> {
+    pub(crate) fn show_manager(&mut self) -> Task<Message> {
         self.manager_visible = true;
         Task::batch([
             window::set_mode(self.manager, window::Mode::Windowed),
@@ -607,6 +646,9 @@ impl App {
                     | Message::Discard
                     | Message::ConfirmDelete
                     | Message::Escape
+                    | Message::EscapeWindow(_)
+                    | Message::QuickLoaded(..)
+                    | Message::QuickReady(_)
                     | Message::Tick
                     | Message::NativeDone(..)
                     | Message::PrefsDone(_)
@@ -640,6 +682,18 @@ impl App {
                 return self.native(NativeAction::Attach);
             }
             Message::WindowClosed(id) => {
+                if Some(id) == self.quick_window {
+                    // Preserve an unexpected-close draft in the manager.
+                    self.quick_window = None;
+                    self.quick_date = None;
+                    self.quick_generation += 1;
+                    self.quick_loading = false;
+                    self.quick_events.clear();
+                    if self.editor_in_quick {
+                        self.editor_in_quick = false;
+                        return self.show_manager();
+                    }
+                }
                 if Some(id) == self.widget {
                     self.widget = None;
                     self.native_busy = false;
@@ -648,8 +702,17 @@ impl App {
                 }
             }
             Message::CloseWindow(id) => {
-                return if Some(id) == self.widget {
+                return if Some(id) == self.quick_window {
+                    if self.editor_in_quick {
+                        self.request_close(CloseIntent::Quick)
+                    } else {
+                        self.close_quick()
+                    }
+                } else if Some(id) == self.widget {
                     self.native(NativeAction::Hide)
+                } else if self.editor_in_quick {
+                    self.manager_visible = false;
+                    window::set_mode(self.manager, window::Mode::Hidden)
                 } else {
                     self.request_close(CloseIntent::Manager)
                 }
@@ -729,18 +792,45 @@ impl App {
                 return self.refresh();
             }
             Message::WidgetDate(date) => {
-                let show = self.show_manager();
-                if self.editor.is_some() {
-                    self.notice = "편집을 마친 뒤 날짜를 다시 선택해 주세요.".into();
-                    return show;
+                return self.open_quick(date);
+            }
+            Message::QuickReady(id) if Some(id) == self.quick_window => {
+                return window::gain_focus(id);
+            }
+            Message::QuickLoaded(g, initial, result)
+                if g == self.quick_generation && self.quick_window.is_some() =>
+            {
+                self.quick_loading = false;
+                match result {
+                    Ok(events) => {
+                        self.quick_events = events;
+                        if initial && self.editor.is_none() {
+                            let id = (self.quick_events.len() == 1)
+                                .then(|| self.quick_events[0].id.clone());
+                            if self.quick_events.len() <= 1 {
+                                return self.edit_quick(id);
+                            }
+                        }
+                    }
+                    Err(e) => self.error = e,
                 }
-                self.selected = date;
-                self.month = date.with_day(1).unwrap();
-                self.week = week_containing(date).from;
-                self.page = Page::Month;
-                let load = self.refresh();
-                let edit = self.open_form(Form::new(Kind::Event, date.to_string(), None));
-                return Task::batch([show, load, edit]);
+            }
+            Message::QuickEdit(id) => return self.edit_quick(id),
+            Message::CompleteWidgetEvent(id, completed)
+                if !self.busy && !self.loading && self.editor.is_none() =>
+            {
+                if !self.snapshot.widget_events.iter().any(|e| e.id == id) {
+                    return Task::none();
+                }
+                if let Some(store) = self.store.clone() {
+                    self.busy = true;
+                    self.error.clear();
+                    return worker::job(
+                        store,
+                        move |s| s.set_event_completed(&id, completed),
+                        Message::MutationDone,
+                    );
+                }
             }
             Message::Project(id) if self.editor.is_none() => {
                 self.project = id;
@@ -915,7 +1005,10 @@ impl App {
                 // The editor stays mounted; keep its existing focus and selection.
                 return Task::none();
             }
-            Message::Composition(id, active) if id == self.manager => {
+            Message::Composition(id, active)
+                if (self.editor_in_quick && Some(id) == self.quick_window)
+                    || (!self.editor_in_quick && id == self.manager) =>
+            {
                 if let Some(e) = &mut self.editor {
                     e.composing = active;
                 }
@@ -945,6 +1038,20 @@ impl App {
                 }
             }
             Message::CloseEditor => return self.request_close(CloseIntent::Editor),
+            Message::EscapeWindow(id) => {
+                let editing_here = if self.editor_in_quick {
+                    Some(id) == self.quick_window
+                } else {
+                    id == self.manager
+                };
+                if self.editor.is_some() && !editing_here {
+                    return Task::none();
+                }
+                if self.editor.is_none() && Some(id) == self.quick_window {
+                    return self.close_quick();
+                }
+                return self.update(Message::Escape);
+            }
             Message::Escape => {
                 if let Some(e) = &mut self.editor {
                     if e.confirmation.is_some() {
@@ -971,9 +1078,10 @@ impl App {
                             }
                         }
                         self.editor = None;
+                        self.editor_in_quick = false;
                         self.editor_generation += 1;
                         self.notice = "내 컴퓨터에 저장했습니다.".into();
-                        return self.refresh();
+                        return Task::batch([self.refresh(), self.load_quick(false)]);
                     }
                     Err(error) => {
                         if let Some(e) = &mut self.editor {
@@ -998,7 +1106,7 @@ impl App {
             Message::MutationDone(result) => {
                 self.busy = false;
                 match result {
-                    Ok(()) => return self.refresh(),
+                    Ok(()) => return Task::batch([self.refresh(), self.load_quick(false)]),
                     Err(e) => self.error = e,
                 }
             }
@@ -1217,6 +1325,12 @@ mod tests {
             manager: window::Id::unique(),
             manager_size: Size::new(1160.0, 820.0),
             widget: None,
+            quick_window: None,
+            quick_date: None,
+            quick_events: Vec::new(),
+            quick_generation: 0,
+            quick_loading: false,
+            editor_in_quick: false,
             store: Some(Arc::new(Storage::open(":memory:").unwrap())),
             data_dir: PathBuf::new(),
             preferences: Preferences::default(),
@@ -1267,6 +1381,149 @@ mod tests {
             date: None,
             project_id: None,
         }
+    }
+    #[test]
+    fn widget_double_click_does_not_open_the_manager() {
+        let mut app = fixture();
+        app.manager_visible = false;
+        let _ = app.update(Message::WidgetDate(app.selected));
+        assert!(
+            !app.manager_visible,
+            "quick editing must not open the manager"
+        );
+    }
+
+    #[test]
+    fn quick_editor_preserves_full_event_and_save_error_then_saves() {
+        let mut app = fixture();
+        let date = app.selected;
+        let mut original = Form::new(Kind::Event, date.to_string(), None);
+        original.title = "짧은 편집".into();
+        original.body = "위젯 헤더에는 없는 원문\n두 번째 줄".into();
+        original.save(app.store.as_ref().unwrap()).unwrap();
+        let events = app
+            .store
+            .as_ref()
+            .unwrap()
+            .list_events(&date.to_string(), &date.to_string())
+            .unwrap();
+        let _ = app.update(Message::WidgetDate(date));
+        let window = app.quick_window;
+        let _ = app.update(Message::QuickLoaded(
+            app.quick_generation,
+            true,
+            Ok(events.clone()),
+        ));
+        assert!(app.editor_in_quick);
+        assert_eq!(app.editor.as_ref().unwrap().form.body, original.body);
+        let _ = app.update(Message::Field(Field::Title("수정한 제목".into())));
+        let generation = app.editor.as_ref().unwrap().generation;
+        let _ = app.update(Message::Saved(generation, Err("저장 실패 fixture".into())));
+        assert_eq!(app.quick_window, window);
+        assert!(app.editor_in_quick);
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "수정한 제목");
+        app.editor
+            .as_ref()
+            .unwrap()
+            .form
+            .save(app.store.as_ref().unwrap())
+            .unwrap();
+        let _ = app.update(Message::Saved(generation, Ok(())));
+        assert!(app.editor.is_none());
+        let saved = app
+            .store
+            .as_ref()
+            .unwrap()
+            .list_events(&date.to_string(), &date.to_string())
+            .unwrap();
+        assert_eq!(saved[0].id, events[0].id);
+        assert_eq!(saved[0].notes, original.body);
+        assert_eq!(saved[0].title, "수정한 제목");
+    }
+
+    #[test]
+    fn quick_editor_close_protects_dirty_and_composing_text_and_rejects_stale_load() {
+        let mut app = fixture();
+        let date = app.selected;
+        let _ = app.update(Message::WidgetDate(date));
+        let id = app.quick_window.unwrap();
+        let g = app.quick_generation;
+        let _ = app.update(Message::QuickLoaded(g, true, Ok(vec![])));
+        let _ = app.update(Message::Field(Field::Title("한글 초안".into())));
+        let _ = app.update(Message::Composition(id, true));
+        let _ = app.update(Message::CloseWindow(id));
+        assert!(app.editor.as_ref().unwrap().confirmation.is_none());
+        assert_eq!(app.quick_window, Some(id));
+        let _ = app.update(Message::Composition(id, false));
+        let _ = app.update(Message::WidgetDate(date + Duration::days(1)));
+        assert_eq!(app.quick_date, Some(date));
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "한글 초안");
+        let _ = app.update(Message::CloseWindow(id));
+        assert_eq!(
+            app.editor.as_ref().unwrap().confirmation,
+            Some(Confirmation::Discard(CloseIntent::Quick))
+        );
+        let _ = app.update(Message::Keep);
+        assert!(app.editor.as_ref().unwrap().confirmation.is_none());
+        let _ = app.update(Message::CloseWindow(id));
+        let _ = app.update(Message::Discard);
+        assert!(app.quick_window.is_none());
+        let _ = app.update(Message::QuickLoaded(g, true, Ok(vec![])));
+        assert!(app.editor.is_none());
+    }
+
+    #[test]
+    fn background_opacity_does_not_schedule_a_constant_window_alpha_change() {
+        let mut app = fixture();
+        app.native_busy = true;
+        let _ = app.update(Message::Native(NativeAction::Opacity(40)));
+        assert_eq!(app.preferences.widget_opacity, 40);
+        assert!(app.native_pending.is_none());
+        let _ = app.update(Message::Native(NativeAction::Opacity(0)));
+        assert_eq!(app.preferences.widget_opacity, 40);
+    }
+
+    #[test]
+    fn snapshot_editing_waits_for_completion_write_and_refresh() {
+        let mut app = fixture();
+        let mut form = Form::new(Kind::Event, app.selected.to_string(), None);
+        form.title = "완료 직후 수정".into();
+        form.save(app.store.as_ref().unwrap()).unwrap();
+        let event = app
+            .store
+            .as_ref()
+            .unwrap()
+            .list_events(&form.date, &form.date)
+            .unwrap()
+            .remove(0);
+        app.busy = true;
+        let _ = app.update(Message::EditForm(Form::event(event.clone())));
+        assert!(
+            app.editor.is_none(),
+            "a pending completion write must not open stale event data"
+        );
+        app.busy = false;
+        app.loading = true;
+        let _ = app.update(Message::EditForm(Form::event(event.clone())));
+        assert!(
+            app.editor.is_none(),
+            "wait for refreshed completion state before editing"
+        );
+        app.loading = false;
+        app.store
+            .as_ref()
+            .unwrap()
+            .set_event_completed(&event.id, true)
+            .unwrap();
+        let event = app
+            .store
+            .as_ref()
+            .unwrap()
+            .list_events(&form.date, &form.date)
+            .unwrap()
+            .remove(0);
+        let _ = app.update(Message::EditForm(Form::event(event)));
+        assert!(app.editor.as_ref().unwrap().form.completed);
     }
     #[test]
     fn selecting_calendar_day_shows_details_without_opening_editor() {

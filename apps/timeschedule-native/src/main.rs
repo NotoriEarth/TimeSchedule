@@ -4,6 +4,9 @@ mod desktop_widget;
 mod editor;
 mod frozen;
 mod icons;
+#[cfg(all(test, windows))]
+mod native_alpha_tests;
+mod quick_editor;
 mod shell;
 mod text_layout;
 mod theme;
@@ -22,6 +25,10 @@ fn main() {
         .title(App::title)
         .default_font(Font::with_name("Malgun Gothic"))
         .theme(App::theme)
+        .style(|_, theme| iced::theme::Style {
+            background_color: iced::Color::TRANSPARENT,
+            text_color: theme.palette().text,
+        })
         .subscription(App::subscription)
         .run()
     {
