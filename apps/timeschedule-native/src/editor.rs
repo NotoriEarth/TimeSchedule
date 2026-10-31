@@ -190,6 +190,7 @@ impl Form {
 pub enum CloseIntent {
     Editor,
     Manager,
+    Quick,
     Application,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

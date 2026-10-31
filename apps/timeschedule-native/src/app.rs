@@ -14,7 +14,7 @@ use std::{
 use timeschedule_core::{
     dates::{calendar_days, shift_month, week_after_sunday, week_containing},
     diary::{Entry, EntrySummary, ImportResult, SearchHit},
-    storage::Storage,
+    storage::{CalendarEvent, Storage},
 };
 use timeschedule_desktop::{
     paths::{self, InstanceLock},
@@ -37,7 +37,7 @@ fn fit_widget_before_attach(
 }
 fn widget_window_settings() -> window::Settings {
     window::Settings {
-        size: Size::new(500.0, 620.0),
+        size: Size::new(960.0, 640.0),
         // Native fitting may shrink this on small/high-DPI displays.
         min_size: None,
         decorations: false,
@@ -101,6 +101,7 @@ pub enum NativeAction {
     Lock(bool),
     Opacity(u8),
     Position,
+    Resize(u32, u32),
 }
 #[derive(Clone, Debug)]
 pub struct NativeReport {
@@ -110,9 +111,13 @@ pub struct NativeReport {
     pub opacity: Option<u8>,
     pub visible: Option<bool>,
     pub position: Option<(i32, i32)>,
+    pub size: Option<(u32, u32)>,
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    WidgetSetting(crate::widget_settings::Change),
+    Jump(crate::month_jump::JumpMessage),
+    ResizeWidget,
     ToggleTheme,
     Resized(window::Id, Size),
     Ready(window::Id),
@@ -130,6 +135,11 @@ pub enum Message {
     WidgetMonth(i32),
     WidgetToday,
     WidgetDate(NaiveDate),
+    QuickReady(window::Id),
+    PopupPositioned(window::Id, window::Id, Result<(), String>),
+    QuickLoaded(u64, bool, Result<Vec<CalendarEvent>, String>),
+    QuickEdit(Option<String>),
+    CompleteWidgetEvent(String, bool),
     Project(Option<String>),
     New(Kind, Option<String>),
     EditForm(Form),
@@ -155,6 +165,7 @@ pub enum Message {
     Discard,
     CloseEditor,
     Escape,
+    EscapeWindow(window::Id),
     Composition(window::Id, bool),
     Saved(u64, Result<(), String>),
     ToggleTask(String),
@@ -176,9 +187,17 @@ pub enum Message {
 }
 
 pub struct App {
+    pub widget_ui: crate::widget_settings::State,
     pub manager: window::Id,
     pub manager_size: Size,
     pub widget: Option<window::Id>,
+    pub quick_window: Option<window::Id>,
+    pub placing_popups: HashMap<window::Id, window::Id>,
+    pub quick_date: Option<NaiveDate>,
+    pub quick_events: Vec<CalendarEvent>,
+    pub quick_generation: u64,
+    pub quick_loading: bool,
+    pub editor_in_quick: bool,
     pub store: Option<Arc<Storage>>,
     pub data_dir: PathBuf,
     pub preferences: Preferences,
@@ -283,9 +302,17 @@ impl App {
             errors.push(error.clone());
         }
         let mut app = Self {
+            widget_ui: crate::widget_settings::State::new(&prefs, today),
             manager,
             manager_size: Size::new(1160.0, 820.0),
             widget: None,
+            quick_window: None,
+            placing_popups: HashMap::new(),
+            quick_date: None,
+            quick_events: Vec::new(),
+            quick_generation: 0,
+            quick_loading: false,
+            editor_in_quick: false,
             store,
             data_dir,
             preferences: prefs,
@@ -339,8 +366,17 @@ impl App {
     pub fn title(&self, id: window::Id) -> String {
         if Some(id) == self.widget {
             "TimeSchedule Native · 바탕화면".into()
+        } else if Some(id) == self.quick_window {
+            format!(
+                "{} · 빠른 일정",
+                self.quick_date.map(|d| d.to_string()).unwrap_or_default()
+            )
         } else {
-            "TimeSchedule Native · 만년 다이어리".into()
+            if self.widget_ui.jump.as_ref().is_some_and(|j| j.window == id) {
+                "TimeSchedule · 연·월 이동".into()
+            } else {
+                "TimeSchedule Native · 만년 다이어리".into()
+            }
         }
     }
     pub fn log(&self, value: &str) {
@@ -386,7 +422,7 @@ impl App {
                         })
                     )
                 {
-                    return Some(Message::Escape);
+                    return Some(Message::EscapeWindow(id));
                 }
                 None
             }),
@@ -394,7 +430,7 @@ impl App {
     }
     pub fn scope(&self) -> Scope {
         let days = calendar_days(self.month);
-        let widget_days = calendar_days(self.widget_month);
+        let widget_range = self.widget_range();
         let (event_from, event_to) = if self.page == Page::Week {
             (self.week, self.week + Duration::days(6))
         } else {
@@ -410,8 +446,8 @@ impl App {
             to,
             event_from: event_from.to_string(),
             event_to: event_to.to_string(),
-            widget_from: widget_days[0].to_string(),
-            widget_to: widget_days[41].to_string(),
+            widget_from: widget_range.from.to_string(),
+            widget_to: widget_range.to.to_string(),
             today: Local::now().date_naive().to_string(),
             project: if self.page == Page::Projects {
                 self.project.clone()
@@ -446,11 +482,23 @@ impl App {
         if self.widget.is_some() {
             return Task::none();
         }
-        let (id, open) = window::open(widget_window_settings());
+        let mut settings = widget_window_settings();
+        settings.size = Size::new(
+            self.preferences.widget.width as f32,
+            self.preferences.widget.height as f32,
+        );
+        let (id, open) = window::open(settings);
         self.widget = Some(id);
         open.map(Message::WidgetReady)
     }
-    fn native(&mut self, action: NativeAction) -> Task<Message> {
+    pub(crate) fn native(&mut self, action: NativeAction) -> Task<Message> {
+        if let NativeAction::Opacity(value) = action {
+            if (40..=100).contains(&value) {
+                self.preferences.widget_opacity = value;
+                return self.save_preferences();
+            }
+            return Task::none();
+        }
         if self.native_busy {
             if !matches!(action, NativeAction::Position) {
                 self.native_pending = Some(action);
@@ -474,7 +522,7 @@ impl App {
                 NativeAction::Attach => {
                     fit_widget_before_attach(&owned, &prefs)?;
                     windows::attach(&owned)?;
-                    windows::set_opacity(&owned, prefs.widget_opacity)?;
+                    windows::enable_per_pixel_alpha(&owned)?;
                     windows::set_locked(&owned, prefs.widget_locked)?;
                     windows::set_visible(&owned, prefs.widget_visible)?;
                     visible = Some(prefs.widget_visible);
@@ -483,7 +531,7 @@ impl App {
                     if !windows::status(&owned)?.attached {
                         fit_widget_before_attach(&owned, &prefs)?;
                         windows::attach(&owned)?;
-                        windows::set_opacity(&owned, prefs.widget_opacity)?;
+                        windows::enable_per_pixel_alpha(&owned)?;
                         windows::set_locked(&owned, prefs.widget_locked)?;
                     }
                     windows::set_visible(&owned, true)?;
@@ -497,7 +545,7 @@ impl App {
                     if !windows::status(&owned)?.attached {
                         fit_widget_before_attach(&owned, &prefs)?;
                         windows::attach(&owned)?;
-                        windows::set_opacity(&owned, prefs.widget_opacity)?;
+                        windows::enable_per_pixel_alpha(&owned)?;
                         windows::set_locked(&owned, prefs.widget_locked)?;
                     }
                     windows::recover_position(&owned)?;
@@ -505,8 +553,11 @@ impl App {
                     visible = Some(true);
                 }
                 NativeAction::Lock(value) => windows::set_locked(&owned, value)?,
-                NativeAction::Opacity(value) => windows::set_opacity(&owned, value)?,
+                NativeAction::Opacity(_) => unreachable!("background opacity is a UI preference"),
                 NativeAction::Position => {}
+                NativeAction::Resize(width, height) => {
+                    windows::resize_logical(&owned, width, height)?
+                }
             }
             let info = windows::status(&owned)?;
             let position = if info.attached {
@@ -521,11 +572,19 @@ impl App {
                 opacity: info.opacity_percent,
                 visible,
                 position,
+                size: if info.attached
+                    && matches!(action, NativeAction::Resize(..) | NativeAction::Lock(true))
+                {
+                    windows::logical_size(&owned).ok().flatten()
+                } else {
+                    None
+                },
             })
         })
         .map(move |result| Message::NativeDone(action, result))
     }
-    fn save_preferences(&mut self) -> Task<Message> {
+    pub(crate) fn save_preferences(&mut self) -> Task<Message> {
+        self.widget_ui.save_due = None;
         if self._instance.is_none() {
             return Task::none();
         }
@@ -546,7 +605,11 @@ impl App {
             Message::PrefsDone,
         )
     }
-    fn open_form(&mut self, form: Form) -> Task<Message> {
+    pub(crate) fn open_form(&mut self, form: Form) -> Task<Message> {
+        if self.busy || self.loading {
+            self.notice = "저장된 내용을 갱신하는 중입니다. 잠시 후 다시 선택하세요.".into();
+            return Task::none();
+        }
         if self.editor.is_some() {
             self.notice = "현재 편집을 먼저 마쳐 주세요.".into();
             return Task::none();
@@ -558,16 +621,22 @@ impl App {
     fn request_close(&mut self, intent: CloseIntent) -> Task<Message> {
         if let Some(editor) = &mut self.editor {
             if !editor.request_close(intent) {
-                return Task::none();
+                return if self.editor_in_quick {
+                    self.focus_quick()
+                } else {
+                    Task::none()
+                };
             }
         }
         self.finish_close(intent)
     }
     fn finish_close(&mut self, intent: CloseIntent) -> Task<Message> {
         self.editor = None;
+        self.editor_in_quick = false;
         self.editor_generation += 1;
         match intent {
             CloseIntent::Editor => Task::none(),
+            CloseIntent::Quick => self.close_quick(),
             CloseIntent::Manager => {
                 if self.tray.is_none() {
                     return self.exit_when_idle();
@@ -579,6 +648,10 @@ impl App {
         }
     }
     fn exit_when_idle(&mut self) -> Task<Message> {
+        if self.widget_ui.save_due.is_some() {
+            self.quit_when_idle = true;
+            return self.save_preferences();
+        }
         if self.busy || self.prefs_saving || self.native_busy {
             self.quit_when_idle = true;
             self.notice = "진행 중인 저장·Git·설정 작업을 마친 뒤 종료합니다.".into();
@@ -587,7 +660,7 @@ impl App {
         self.log("clean exit");
         iced::exit()
     }
-    fn show_manager(&mut self) -> Task<Message> {
+    pub(crate) fn show_manager(&mut self) -> Task<Message> {
         self.manager_visible = true;
         Task::batch([
             window::set_mode(self.manager, window::Mode::Windowed),
@@ -596,6 +669,16 @@ impl App {
         .chain(window::gain_focus(self.manager))
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if let Message::CloseWindow(id) | Message::EscapeWindow(id) = &message {
+            if self
+                .widget_ui
+                .jump
+                .as_ref()
+                .is_some_and(|j| j.window == *id)
+            {
+                return self.jump_message(crate::month_jump::JumpMessage::Cancel);
+            }
+        }
         // Background completions are allowed during modals; all unrelated user edits are blocked.
         if self
             .editor
@@ -607,6 +690,11 @@ impl App {
                     | Message::Discard
                     | Message::ConfirmDelete
                     | Message::Escape
+                    | Message::EscapeWindow(_)
+                    | Message::QuickLoaded(..)
+                    | Message::QuickReady(_)
+                    | Message::PopupPositioned(..)
+                    | Message::Jump(crate::month_jump::JumpMessage::Ready(_))
                     | Message::Tick
                     | Message::NativeDone(..)
                     | Message::PrefsDone(_)
@@ -626,20 +714,66 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::WidgetSetting(change) => return self.widget_setting(change),
+            Message::Jump(change) => return self.jump_message(change),
+            Message::ResizeWidget if !self.preferences.widget_locked && !self.native_busy => {
+                if let Some(id) = self.widget {
+                    return window::drag_resize(id, window::Direction::SouthEast);
+                }
+            }
             Message::ToggleTheme => {
                 self.preferences.theme = match self.preferences.theme {
                     AppTheme::Midnight => AppTheme::Porcelain,
                     AppTheme::Porcelain => AppTheme::Midnight,
                 };
+                self.sync_color_draft();
                 return self.save_preferences();
             }
             Message::Resized(id, size) if id == self.manager => self.manager_size = size,
+            Message::Resized(id, size) if Some(id) == self.widget => {
+                self.widget_ui.actual_size = size;
+                // Iced reports logical client dimensions. Capture the last
+                // user resize immediately; debounce disk writes, not the data.
+                // Locked monitor recovery must not replace the preferred size.
+                let (width, height) = (size.width.round() as u32, size.height.round() as u32);
+                if self.widget_attached
+                    && !self.preferences.widget_locked
+                    && (320..=3840).contains(&width)
+                    && (220..=2160).contains(&height)
+                    && (width, height)
+                        != (
+                            self.preferences.widget.width,
+                            self.preferences.widget.height,
+                        )
+                {
+                    self.preferences.widget.width = width;
+                    self.preferences.widget.height = height;
+                    self.widget_ui.save_due =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
+                }
+            }
             Message::Ready(id) => self.log(&format!("manager ready {id:?}")),
             Message::WidgetReady(id) => {
                 self.log(&format!("widget ready {id:?}"));
                 return self.native(NativeAction::Attach);
             }
             Message::WindowClosed(id) => {
+                self.placing_popups.remove(&id);
+                if self.widget_ui.jump.as_ref().is_some_and(|j| j.window == id) {
+                    self.widget_ui.jump = None;
+                }
+                if Some(id) == self.quick_window {
+                    // Preserve an unexpected-close draft in the manager.
+                    self.quick_window = None;
+                    self.quick_date = None;
+                    self.quick_generation += 1;
+                    self.quick_loading = false;
+                    self.quick_events.clear();
+                    if self.editor_in_quick {
+                        self.editor_in_quick = false;
+                        return self.show_manager();
+                    }
+                }
                 if Some(id) == self.widget {
                     self.widget = None;
                     self.native_busy = false;
@@ -648,8 +782,17 @@ impl App {
                 }
             }
             Message::CloseWindow(id) => {
-                return if Some(id) == self.widget {
+                return if Some(id) == self.quick_window {
+                    if self.editor_in_quick {
+                        self.request_close(CloseIntent::Quick)
+                    } else {
+                        self.close_quick()
+                    }
+                } else if Some(id) == self.widget {
                     self.native(NativeAction::Hide)
+                } else if self.editor_in_quick {
+                    self.manager_visible = false;
+                    window::set_mode(self.manager, window::Mode::Hidden)
                 } else {
                     self.request_close(CloseIntent::Manager)
                 }
@@ -674,9 +817,18 @@ impl App {
                         }
                     };
                 }
-                if self.ticks % 10 == 0 && !self.native_busy && self.widget.is_some() {
-                    return self.native(NativeAction::Position);
+                let mut tasks = vec![self.widget_today_changed()];
+                if self
+                    .widget_ui
+                    .save_due
+                    .is_some_and(|due| due <= std::time::Instant::now())
+                {
+                    tasks.push(self.save_preferences());
                 }
+                if self.ticks % 2 == 0 && !self.native_busy && self.widget.is_some() {
+                    tasks.push(self.native(NativeAction::Position));
+                }
+                return Task::batch(tasks);
             }
             Message::Navigate(page) if self.editor.is_none() => {
                 self.page = page;
@@ -704,6 +856,8 @@ impl App {
                 self.month = self.selected.with_day(1).unwrap();
                 self.week = week_containing(self.selected).from;
                 self.widget_month = self.month;
+                self.widget_ui.anchor = self.selected;
+                self.widget_ui.follow_today = true;
                 return self.refresh();
             }
             Message::OpenWeek(sunday) if self.editor.is_none() => match week_after_sunday(sunday) {
@@ -721,26 +875,62 @@ impl App {
                 self.selected = date;
             }
             Message::WidgetMonth(delta) => {
-                self.widget_month = shift_month(self.widget_month, delta);
-                return self.refresh();
+                let date = if self.preferences.widget.rolling {
+                    self.widget_ui
+                        .anchor
+                        .checked_add_signed(Duration::weeks(i64::from(delta)))
+                        .unwrap_or(self.widget_ui.anchor)
+                } else {
+                    shift_month(self.widget_month, delta)
+                };
+                return self.jump_widget(date, false);
             }
             Message::WidgetToday => {
-                self.widget_month = Local::now().date_naive().with_day(1).unwrap();
-                return self.refresh();
+                return self.jump_widget(Local::now().date_naive(), true);
             }
             Message::WidgetDate(date) => {
-                let show = self.show_manager();
-                if self.editor.is_some() {
-                    self.notice = "편집을 마친 뒤 날짜를 다시 선택해 주세요.".into();
-                    return show;
+                return self.open_quick(date);
+            }
+            Message::PopupPositioned(id, token, result) => {
+                return self.popup_positioned(id, token, result)
+            }
+            Message::QuickReady(id) if Some(id) == self.quick_window => {
+                return self.place_popup(self.widget.unwrap_or(self.manager), id);
+            }
+            Message::QuickLoaded(g, initial, result)
+                if g == self.quick_generation && self.quick_window.is_some() =>
+            {
+                self.quick_loading = false;
+                match result {
+                    Ok(events) => {
+                        self.quick_events = events;
+                        if initial && self.editor.is_none() {
+                            let id = (self.quick_events.len() == 1)
+                                .then(|| self.quick_events[0].id.clone());
+                            if self.quick_events.len() <= 1 {
+                                return self.edit_quick(id);
+                            }
+                        }
+                    }
+                    Err(e) => self.error = e,
                 }
-                self.selected = date;
-                self.month = date.with_day(1).unwrap();
-                self.week = week_containing(date).from;
-                self.page = Page::Month;
-                let load = self.refresh();
-                let edit = self.open_form(Form::new(Kind::Event, date.to_string(), None));
-                return Task::batch([show, load, edit]);
+            }
+            Message::QuickEdit(id) => return self.edit_quick(id),
+            Message::CompleteWidgetEvent(id, completed)
+                if !self.busy && !self.loading && self.editor.is_none() =>
+            {
+                if !self.snapshot.widget_events.iter().any(|e| e.id == id) {
+                    return Task::none();
+                }
+                if let Some(store) = self.store.clone() {
+                    self.busy = true;
+                    self.error.clear();
+                    return worker::job(
+                        store,
+                        move |s| s.set_event_completed(&id, completed),
+                        Message::MutationDone,
+                    );
+                }
             }
             Message::Project(id) if self.editor.is_none() => {
                 self.project = id;
@@ -915,7 +1105,10 @@ impl App {
                 // The editor stays mounted; keep its existing focus and selection.
                 return Task::none();
             }
-            Message::Composition(id, active) if id == self.manager => {
+            Message::Composition(id, active)
+                if (self.editor_in_quick && Some(id) == self.quick_window)
+                    || (!self.editor_in_quick && id == self.manager) =>
+            {
                 if let Some(e) = &mut self.editor {
                     e.composing = active;
                 }
@@ -945,6 +1138,20 @@ impl App {
                 }
             }
             Message::CloseEditor => return self.request_close(CloseIntent::Editor),
+            Message::EscapeWindow(id) => {
+                let editing_here = if self.editor_in_quick {
+                    Some(id) == self.quick_window
+                } else {
+                    id == self.manager
+                };
+                if self.editor.is_some() && !editing_here {
+                    return Task::none();
+                }
+                if self.editor.is_none() && Some(id) == self.quick_window {
+                    return self.close_quick();
+                }
+                return self.update(Message::Escape);
+            }
             Message::Escape => {
                 if let Some(e) = &mut self.editor {
                     if e.confirmation.is_some() {
@@ -971,9 +1178,10 @@ impl App {
                             }
                         }
                         self.editor = None;
+                        self.editor_in_quick = false;
                         self.editor_generation += 1;
                         self.notice = "내 컴퓨터에 저장했습니다.".into();
-                        return self.refresh();
+                        return Task::batch([self.refresh(), self.load_quick(false)]);
                     }
                     Err(error) => {
                         if let Some(e) = &mut self.editor {
@@ -998,7 +1206,7 @@ impl App {
             Message::MutationDone(result) => {
                 self.busy = false;
                 match result {
-                    Ok(()) => return self.refresh(),
+                    Ok(()) => return Task::batch([self.refresh(), self.load_quick(false)]),
                     Err(e) => self.error = e,
                 }
             }
@@ -1112,6 +1320,8 @@ impl App {
                             self.preferences.widget_locked,
                             self.preferences.widget_visible,
                             self.preferences.widget_opacity,
+                            self.preferences.widget.width,
+                            self.preferences.widget.height,
                         );
                         self.desktop_message = report.message;
                         self.widget_attached = report.attached;
@@ -1128,12 +1338,22 @@ impl App {
                             self.preferences.widget_x = Some(x);
                             self.preferences.widget_y = Some(y);
                         }
+                        if let Some((width, height)) = report.size {
+                            self.preferences.widget.width = width.clamp(320, 3840);
+                            self.preferences.widget.height = height.clamp(220, 2160);
+                            if matches!(action, NativeAction::Resize(..)) {
+                                self.widget_ui.width = self.preferences.widget.width.to_string();
+                                self.widget_ui.height = self.preferences.widget.height.to_string();
+                            }
+                        }
                         let after = (
                             self.preferences.widget_x,
                             self.preferences.widget_y,
                             self.preferences.widget_locked,
                             self.preferences.widget_visible,
                             self.preferences.widget_opacity,
+                            self.preferences.widget.width,
+                            self.preferences.widget.height,
                         );
                         if before != after {
                             save = self.save_preferences();
@@ -1163,8 +1383,10 @@ impl App {
             }
             Message::ShowManager => return self.show_manager(),
             Message::DragWidget => {
-                if let Some(id) = self.widget {
-                    return window::drag(id);
+                if !self.preferences.widget_locked {
+                    if let Some(id) = self.widget {
+                        return window::drag(id);
+                    }
                 }
             }
             Message::Quit => return self.request_close(CloseIntent::Application),
@@ -1212,9 +1434,17 @@ mod tests {
     fn fixture() -> App {
         let date = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
         App {
+            widget_ui: crate::widget_settings::State::new(&Preferences::default(), date),
             manager: window::Id::unique(),
             manager_size: Size::new(1160.0, 820.0),
             widget: None,
+            quick_window: None,
+            placing_popups: HashMap::new(),
+            quick_date: None,
+            quick_events: Vec::new(),
+            quick_generation: 0,
+            quick_loading: false,
+            editor_in_quick: false,
             store: Some(Arc::new(Storage::open(":memory:").unwrap())),
             data_dir: PathBuf::new(),
             preferences: Preferences::default(),
@@ -1256,6 +1486,231 @@ mod tests {
             native_pending: None,
         }
     }
+
+    #[test]
+    fn customization_range_matches_queries_and_appearance_does_not_reload() {
+        let mut app = fixture();
+        app.widget_month = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        assert_eq!(app.scope().widget_to, "2026-02-28");
+        let generation = app.view_generation;
+        let _ = app.update(Message::WidgetSetting(
+            crate::widget_settings::Change::EventSize(18),
+        ));
+        assert_eq!(app.preferences.widget.event_size, 18);
+        assert_eq!(app.view_generation, generation);
+        let _ = app.update(Message::WidgetSetting(
+            crate::widget_settings::Change::Rolling(true),
+        ));
+        let _ = app.update(Message::WidgetSetting(
+            crate::widget_settings::Change::Weeks(2),
+        ));
+        let _ = app.update(Message::WidgetSetting(
+            crate::widget_settings::Change::Past(2),
+        ));
+        assert_eq!(app.preferences.widget.past_weeks, 1);
+        let days = app.widget_days();
+        assert_eq!(days.len(), 14);
+        assert_eq!(app.scope().widget_from, days[0].to_string());
+        assert_eq!(app.scope().widget_to, days.last().unwrap().to_string());
+    }
+
+    #[test]
+    fn month_jump_focus_cancel_validation_and_draft_preservation() {
+        use crate::month_jump::{JumpField, JumpMessage};
+        let mut app = fixture();
+        app.widget_month = NaiveDate::from_ymd_opt(2025, 9, 1).unwrap();
+        let _ = app.update(Message::Jump(JumpMessage::Open(
+            crate::month_jump::JumpTarget::Widget,
+            JumpField::Month,
+        )));
+        let jump = app.widget_ui.jump.as_ref().unwrap();
+        assert_eq!((jump.year, jump.month), (2025, 9));
+        assert_eq!(jump.level, JumpField::Month);
+        let _ = app.update(Message::Jump(JumpMessage::PickMonth(13)));
+        assert!(app.widget_ui.jump.as_ref().unwrap().error.len() > 0);
+        assert_eq!(app.widget_month.month(), 9);
+        let _ = app.update(Message::Jump(JumpMessage::Cancel));
+        assert!(app.widget_ui.jump.is_none());
+        let _ = app.update(Message::New(Kind::Event, None));
+        let _ = app.update(Message::Field(Field::Title("미저장 원문".into())));
+        let _ = app.update(Message::Jump(JumpMessage::Open(
+            crate::month_jump::JumpTarget::Widget,
+            JumpField::Year,
+        )));
+        let _ = app.update(Message::Jump(JumpMessage::PickYear(2028)));
+        let _ = app.update(Message::Jump(JumpMessage::PickMonth(2)));
+        assert_eq!(
+            app.widget_month,
+            NaiveDate::from_ymd_opt(2028, 2, 1).unwrap()
+        );
+        assert!(!app.widget_ui.follow_today);
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "미저장 원문");
+    }
+    #[test]
+    fn diary_jump_changes_only_diary_and_replaces_other_origin_popup() {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        let mut app = fixture();
+        app.month = NaiveDate::from_ymd_opt(2025, 9, 1).unwrap();
+        let widget_month = app.widget_month;
+        let _ = app.update(Message::Jump(JumpMessage::Open(
+            JumpTarget::Widget,
+            JumpField::Year,
+        )));
+        let old_id = app.widget_ui.jump.as_ref().unwrap().window;
+        let _ = app.update(Message::Jump(JumpMessage::Open(
+            JumpTarget::Diary,
+            JumpField::Month,
+        )));
+        let jump = app.widget_ui.jump.as_ref().unwrap();
+        assert_ne!(jump.window, old_id);
+        assert_eq!((jump.year, jump.month), (2025, 9));
+        assert_eq!(jump.target.source(&app), app.manager);
+        let _ = app.update(Message::New(Kind::Event, None));
+        let _ = app.update(Message::Field(Field::Title("기존 초안".into())));
+        let _ = app.update(Message::Jump(JumpMessage::Date("2028-02-29".into())));
+        let _ = app.update(Message::Jump(JumpMessage::ApplyDate));
+        assert_eq!(app.selected.to_string(), "2028-02-29");
+        assert_eq!(app.month.to_string(), "2028-02-01");
+        assert_eq!(app.widget_month, widget_month);
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "기존 초안");
+    }
+    #[test]
+    fn popup_placement_reveals_once_and_ignores_closed_or_stale_requests() {
+        let mut app = fixture();
+        let id = window::Id::unique();
+        app.quick_window = Some(id);
+        let _ = app.place_popup(app.manager, id);
+        let token = app.placing_popups[&id];
+        let _ = app.place_popup(app.manager, id);
+        let newer = app.placing_popups[&id];
+        assert_eq!(
+            app.update(Message::PopupPositioned(id, token, Ok(())))
+                .units(),
+            0
+        );
+        assert!(
+            app.update(Message::PopupPositioned(
+                id,
+                newer,
+                Err("source closed".into())
+            ))
+            .units()
+                > 0
+        );
+        assert_eq!(
+            app.update(Message::PopupPositioned(id, newer, Ok(())))
+                .units(),
+            0
+        );
+        let _ = app.place_popup(app.manager, id);
+        let token = app.placing_popups[&id];
+        app.quick_window = None;
+        assert_eq!(
+            app.update(Message::PopupPositioned(id, token, Ok(())))
+                .units(),
+            0
+        );
+    }
+    #[test]
+    fn quick_editor_does_not_show_before_native_placement() {
+        let mut app = fixture();
+        app.widget = Some(window::Id::unique());
+        let date = app.selected;
+        let _ = app.open_quick(date);
+        assert_eq!(
+            app.focus_quick().units(),
+            0,
+            "focus must not restore a hidden popup at the default screen position"
+        );
+    }
+    #[test]
+    fn reopening_jump_repositions_without_resetting_its_draft() {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        let mut app = fixture();
+        let _ = app.jump_message(JumpMessage::Open(JumpTarget::Diary, JumpField::Year));
+        let id = app.widget_ui.jump.as_ref().unwrap().window;
+        app.placing_popups.clear(); // Placement of the first opening completed.
+        let _ = app.jump_message(JumpMessage::PickYear(2035));
+        let _ = app.jump_message(JumpMessage::Open(JumpTarget::Diary, JumpField::Month));
+        assert!(
+            app.placing_popups.contains_key(&id),
+            "reused popup must recapture the moved diary position"
+        );
+        let jump = app.widget_ui.jump.as_ref().unwrap();
+        assert_eq!(jump.year, 2035);
+        assert_eq!(jump.level, JumpField::Month);
+    }
+    #[test]
+    fn picker_browsing_cancels_and_neighbor_years_are_selectable() {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        let mut app = fixture();
+        app.widget_month = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let original = app.widget_month;
+        let _ = app.jump_message(JumpMessage::Open(JumpTarget::Widget, JumpField::Year));
+        let _ = app.jump_message(JumpMessage::Page(1));
+        assert_eq!(app.widget_ui.jump.as_ref().unwrap().decade, 2030);
+        assert_eq!(app.widget_ui.jump.as_ref().unwrap().year, 2026);
+        assert_eq!(app.widget_month, original);
+        let _ = app.jump_message(JumpMessage::Page(-1));
+        let _ = app.jump_message(JumpMessage::PickYear(2019));
+        let jump = app.widget_ui.jump.as_ref().unwrap();
+        assert_eq!(jump.level, JumpField::Month);
+        assert_eq!((jump.year, jump.month), (2019, 10));
+        let _ = app.jump_message(JumpMessage::Page(1));
+        assert_eq!(app.widget_ui.jump.as_ref().unwrap().year, 2020);
+        let _ = app.jump_message(JumpMessage::ShowYears);
+        assert_eq!(app.widget_ui.jump.as_ref().unwrap().decade, 2020);
+        let id = app.widget_ui.jump.as_ref().unwrap().window;
+        let _ = app.update(Message::EscapeWindow(id));
+        assert!(app.widget_ui.jump.is_none());
+        assert_eq!(app.widget_month, original);
+    }
+    #[test]
+    fn picker_pages_respect_supported_years_and_direct_date_validation() {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        for (year, direction, invalid) in [(1900, -1, 1899), (9998, 1, 9999)] {
+            let mut app = fixture();
+            app.widget_month = NaiveDate::from_ymd_opt(year, 9, 1).unwrap();
+            let _ = app.jump_message(JumpMessage::Open(JumpTarget::Widget, JumpField::Year));
+            let decade = app.widget_ui.jump.as_ref().unwrap().decade;
+            let _ = app.jump_message(JumpMessage::Page(direction));
+            let _ = app.jump_message(JumpMessage::PickYear(invalid));
+            assert_eq!(app.widget_ui.jump.as_ref().unwrap().decade, decade);
+            assert_eq!(app.widget_ui.jump.as_ref().unwrap().level, JumpField::Year);
+            let _ = app.jump_message(JumpMessage::PickYear(year));
+            let _ = app.jump_message(JumpMessage::Page(direction));
+            assert_eq!(app.widget_ui.jump.as_ref().unwrap().year, year);
+            let _ = app.jump_message(JumpMessage::ToggleDate);
+            assert!(app.widget_ui.jump.as_ref().unwrap().direct);
+            let _ = app.jump_message(JumpMessage::Date("2027-02-29".into()));
+            let _ = app.jump_message(JumpMessage::ApplyDate);
+            assert!(!app.widget_ui.jump.as_ref().unwrap().error.is_empty());
+            assert_eq!(app.widget_month.year(), year);
+            let _ = app.jump_message(JumpMessage::Date("2028-02-29".into()));
+            let _ = app.jump_message(JumpMessage::ApplyDate);
+            assert!(app.widget_ui.jump.is_none());
+            assert_eq!(app.widget_ui.selected.unwrap().to_string(), "2028-02-29");
+        }
+    }
+    #[test]
+    fn picker_bounds_sources_reached_by_diary_month_arrows() {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        for (year, month, delta, outside) in [(1900, 1, -1, 1899), (9998, 12, 1, 9999)] {
+            let mut app = fixture();
+            app.month = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+            let _ = app.update(Message::Month(delta));
+            assert_eq!(app.month.year(), outside);
+            let _ = app.jump_message(JumpMessage::Open(JumpTarget::Diary, JumpField::Month));
+            assert_eq!(
+                app.widget_ui.jump.as_ref().unwrap().year,
+                year,
+                "picker must start in the supported range even if the source has crossed it"
+            );
+            let _ = app.jump_message(JumpMessage::PickMonth(6));
+            assert_eq!(app.month.to_string(), format!("{year}-06-01"));
+            assert!(app.widget_ui.jump.is_none());
+        }
+    }
     fn hit(title: &str) -> SearchHit {
         SearchHit {
             id: "test".into(),
@@ -1265,6 +1720,149 @@ mod tests {
             date: None,
             project_id: None,
         }
+    }
+    #[test]
+    fn widget_double_click_does_not_open_the_manager() {
+        let mut app = fixture();
+        app.manager_visible = false;
+        let _ = app.update(Message::WidgetDate(app.selected));
+        assert!(
+            !app.manager_visible,
+            "quick editing must not open the manager"
+        );
+    }
+
+    #[test]
+    fn quick_editor_preserves_full_event_and_save_error_then_saves() {
+        let mut app = fixture();
+        let date = app.selected;
+        let mut original = Form::new(Kind::Event, date.to_string(), None);
+        original.title = "짧은 편집".into();
+        original.body = "위젯 헤더에는 없는 원문\n두 번째 줄".into();
+        original.save(app.store.as_ref().unwrap()).unwrap();
+        let events = app
+            .store
+            .as_ref()
+            .unwrap()
+            .list_events(&date.to_string(), &date.to_string())
+            .unwrap();
+        let _ = app.update(Message::WidgetDate(date));
+        let window = app.quick_window;
+        let _ = app.update(Message::QuickLoaded(
+            app.quick_generation,
+            true,
+            Ok(events.clone()),
+        ));
+        assert!(app.editor_in_quick);
+        assert_eq!(app.editor.as_ref().unwrap().form.body, original.body);
+        let _ = app.update(Message::Field(Field::Title("수정한 제목".into())));
+        let generation = app.editor.as_ref().unwrap().generation;
+        let _ = app.update(Message::Saved(generation, Err("저장 실패 fixture".into())));
+        assert_eq!(app.quick_window, window);
+        assert!(app.editor_in_quick);
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "수정한 제목");
+        app.editor
+            .as_ref()
+            .unwrap()
+            .form
+            .save(app.store.as_ref().unwrap())
+            .unwrap();
+        let _ = app.update(Message::Saved(generation, Ok(())));
+        assert!(app.editor.is_none());
+        let saved = app
+            .store
+            .as_ref()
+            .unwrap()
+            .list_events(&date.to_string(), &date.to_string())
+            .unwrap();
+        assert_eq!(saved[0].id, events[0].id);
+        assert_eq!(saved[0].notes, original.body);
+        assert_eq!(saved[0].title, "수정한 제목");
+    }
+
+    #[test]
+    fn quick_editor_close_protects_dirty_and_composing_text_and_rejects_stale_load() {
+        let mut app = fixture();
+        let date = app.selected;
+        let _ = app.update(Message::WidgetDate(date));
+        let id = app.quick_window.unwrap();
+        let g = app.quick_generation;
+        let _ = app.update(Message::QuickLoaded(g, true, Ok(vec![])));
+        let _ = app.update(Message::Field(Field::Title("한글 초안".into())));
+        let _ = app.update(Message::Composition(id, true));
+        let _ = app.update(Message::CloseWindow(id));
+        assert!(app.editor.as_ref().unwrap().confirmation.is_none());
+        assert_eq!(app.quick_window, Some(id));
+        let _ = app.update(Message::Composition(id, false));
+        let _ = app.update(Message::WidgetDate(date + Duration::days(1)));
+        assert_eq!(app.quick_date, Some(date));
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "한글 초안");
+        let _ = app.update(Message::CloseWindow(id));
+        assert_eq!(
+            app.editor.as_ref().unwrap().confirmation,
+            Some(Confirmation::Discard(CloseIntent::Quick))
+        );
+        let _ = app.update(Message::Keep);
+        assert!(app.editor.as_ref().unwrap().confirmation.is_none());
+        let _ = app.update(Message::CloseWindow(id));
+        let _ = app.update(Message::Discard);
+        assert!(app.quick_window.is_none());
+        let _ = app.update(Message::QuickLoaded(g, true, Ok(vec![])));
+        assert!(app.editor.is_none());
+    }
+
+    #[test]
+    fn background_opacity_does_not_schedule_a_constant_window_alpha_change() {
+        let mut app = fixture();
+        app.native_busy = true;
+        let _ = app.update(Message::Native(NativeAction::Opacity(40)));
+        assert_eq!(app.preferences.widget_opacity, 40);
+        assert!(app.native_pending.is_none());
+        let _ = app.update(Message::Native(NativeAction::Opacity(0)));
+        assert_eq!(app.preferences.widget_opacity, 40);
+    }
+
+    #[test]
+    fn snapshot_editing_waits_for_completion_write_and_refresh() {
+        let mut app = fixture();
+        let mut form = Form::new(Kind::Event, app.selected.to_string(), None);
+        form.title = "완료 직후 수정".into();
+        form.save(app.store.as_ref().unwrap()).unwrap();
+        let event = app
+            .store
+            .as_ref()
+            .unwrap()
+            .list_events(&form.date, &form.date)
+            .unwrap()
+            .remove(0);
+        app.busy = true;
+        let _ = app.update(Message::EditForm(Form::event(event.clone())));
+        assert!(
+            app.editor.is_none(),
+            "a pending completion write must not open stale event data"
+        );
+        app.busy = false;
+        app.loading = true;
+        let _ = app.update(Message::EditForm(Form::event(event.clone())));
+        assert!(
+            app.editor.is_none(),
+            "wait for refreshed completion state before editing"
+        );
+        app.loading = false;
+        app.store
+            .as_ref()
+            .unwrap()
+            .set_event_completed(&event.id, true)
+            .unwrap();
+        let event = app
+            .store
+            .as_ref()
+            .unwrap()
+            .list_events(&form.date, &form.date)
+            .unwrap()
+            .remove(0);
+        let _ = app.update(Message::EditForm(Form::event(event)));
+        assert!(app.editor.as_ref().unwrap().form.completed);
     }
     #[test]
     fn selecting_calendar_day_shows_details_without_opening_editor() {
@@ -1278,6 +1876,152 @@ mod tests {
         );
         let _ = app.update(Message::New(Kind::Event, Some(date.to_string())));
         assert_eq!(app.editor.as_ref().unwrap().form.date, date.to_string());
+    }
+    #[test]
+    fn locked_widget_does_not_start_native_drag() {
+        let mut app = fixture();
+        app.widget = Some(window::Id::unique());
+        assert!(app.preferences.widget_locked);
+        assert_eq!(app.update(Message::DragWidget).units(), 0);
+        assert_eq!(app.update(Message::ResizeWidget).units(), 0);
+        app.preferences.widget_locked = false;
+        assert!(app.update(Message::DragWidget).units() > 0);
+        assert!(app.update(Message::ResizeWidget).units() > 0);
+    }
+    #[test]
+    fn final_resize_is_saved_before_immediate_lock_or_quit() {
+        let mut app = fixture();
+        let id = window::Id::unique();
+        app.widget = Some(id);
+        app.widget_attached = true;
+        app.preferences.widget_locked = false;
+        let _ = app.update(Message::Resized(id, Size::new(740., 480.)));
+        assert_eq!(
+            (app.preferences.widget.width, app.preferences.widget.height),
+            (740, 480)
+        );
+        assert!(app.widget_ui.save_due.is_some());
+        // There has been no polling message between the resize and the lock.
+        let _ = app.update(Message::NativeDone(
+            NativeAction::Lock(true),
+            Ok(NativeReport {
+                attached: true,
+                message: String::new(),
+                locked: true,
+                opacity: None,
+                visible: None,
+                position: None,
+                size: None,
+            }),
+        ));
+        assert_eq!(
+            (app.preferences.widget.width, app.preferences.widget.height),
+            (740, 480)
+        );
+        app.preferences.widget_locked = false;
+        let _ = app.update(Message::Resized(id, Size::new(760., 490.)));
+        let _ = app.update(Message::Quit);
+        assert!(
+            app.quit_when_idle,
+            "quit waits for the last geometry preference save"
+        );
+        assert!(app.widget_ui.save_due.is_none());
+        assert_eq!(
+            (app.preferences.widget.width, app.preferences.widget.height),
+            (760, 490)
+        );
+    }
+    #[test]
+    fn appearance_overrides_are_per_theme_and_invalid_inputs_do_not_replace_settings() {
+        use crate::widget_settings::{Change, ColorRole};
+        let mut app = fixture();
+        let _ = app.update(Message::WidgetSetting(Change::ColorRole(ColorRole::Text)));
+        let _ = app.update(Message::WidgetSetting(Change::ColorText("#ABCDEF".into())));
+        let _ = app.update(Message::WidgetSetting(Change::ApplyColor));
+        assert_eq!(app.preferences.widget.dark.text.as_deref(), Some("#ABCDEF"));
+        let _ = app.update(Message::ToggleTheme);
+        assert!(app.preferences.widget.light.text.is_none());
+        let _ = app.update(Message::WidgetSetting(Change::ColorText("#12zz00".into())));
+        let _ = app.update(Message::WidgetSetting(Change::ApplyColor));
+        assert!(app.preferences.widget.light.text.is_none());
+        assert!(!app.widget_ui.error.is_empty());
+        app.preferences.widget_locked = false;
+        let _ = app.update(Message::WidgetSetting(Change::Width("9999".into())));
+        assert_eq!(
+            app.update(Message::WidgetSetting(Change::Resize)).units(),
+            0
+        );
+        assert_eq!(app.preferences.widget.width, 960);
+    }
+    #[test]
+    fn fitted_widget_keeps_dense_day_content_inside_cells() {
+        use iced::advanced::{layout, widget::Tree};
+        fn check(node: &layout::Node, x: f32, width: f32) {
+            let bounds = node.bounds();
+            let x = x + bounds.x;
+            assert!(
+                x + bounds.width <= width + 0.1,
+                "horizontal overflow: {bounds:?} at {x} / {width}"
+            );
+            for child in node.children() {
+                // Calendar-day descendants are narrower than the outer scroll
+                // viewport. Their contents must fit vertically even when dense.
+                if node.size().width < 160.0 {
+                    let b = child.bounds();
+                    assert!(
+                        b.y + b.height <= node.size().height + 0.1,
+                        "day content {b:?} exceeds {:?}",
+                        node.size()
+                    );
+                }
+                check(child, x, width);
+            }
+        }
+        let mut app = fixture();
+        let widget = window::Id::unique();
+        app.widget = Some(widget);
+        for day in calendar_days(app.widget_month) {
+            for i in 0..6 {
+                let mut form = Form::new(Kind::Event, day.to_string(), None);
+                form.title = format!("{i} 아주 긴 한글 일정 제목 WWWWWWW");
+                form.save(app.store.as_ref().unwrap()).unwrap();
+            }
+        }
+        app.snapshot = worker::snapshot(app.store.as_ref().unwrap(), &app.scope()).unwrap();
+        let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        for size in [
+            Size::new(320.0, 300.0),
+            Size::new(500.0, 620.0),
+            Size::new(960.0, 640.0),
+        ] {
+            for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+                app.preferences.theme = mode;
+                let mut element = app.view(widget);
+                let mut tree = Tree::new(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                assert_eq!(node.size(), size);
+                check(&node, 0.0, size.width);
+            }
+        }
+        // Outside-month 10/1 must fit the selected large font, not a fixed threshold.
+        app.widget_month = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        app.preferences.widget.font = "Arial".into();
+        app.preferences.widget.date_size = 32;
+        app.preferences.widget.cell_gap = 0;
+        app.preferences.widget.cell_padding = 0;
+        let size = Size::new(400., 500.);
+        let mut element = app.view(widget);
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        check(&node, 0., size.width);
     }
     #[test]
     fn dense_calendar_keeps_chips_within_short_rows() {

@@ -156,6 +156,28 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .unwrap_or("프로젝트".into()),
         _ => app.page.label().into(),
     };
+    let heading: Element<'_, Message> = if app.page == Page::Month {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        row![
+            button(text(format!("{}년", app.month.year())).size(23))
+                .padding([2, 4])
+                .style(theme::text_button)
+                .on_press(Message::Jump(JumpMessage::Open(
+                    JumpTarget::Diary,
+                    JumpField::Year
+                ))),
+            button(text(format!("{}월", app.month.month())).size(23))
+                .padding([2, 4])
+                .style(theme::text_button)
+                .on_press(Message::Jump(JumpMessage::Open(
+                    JumpTarget::Diary,
+                    JumpField::Month
+                ))),
+        ]
+        .into()
+    } else {
+        title(heading)
+    };
     let search = text_input("일정, 프로젝트, 기록 검색", &app.search)
         .on_input(|s| Message::Search(s.chars().take(200).collect()))
         .width(220)
@@ -169,7 +191,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ]
         .align_y(Alignment::Center),
         row![
-            title(heading),
+            heading,
             space().width(Length::Fill),
             control("오늘", Message::Today),
             button(text("↻").size(18))
@@ -345,9 +367,13 @@ pub(crate) fn calendar(app: &App) -> Element<'_, Message> {
                         format!("{}{}", if event.completed { "✓ " } else { "" }, event.title);
                     cell = cell.push(
                         container(
-                            text(fit_calendar_label(&label, (size.width - 10.0).max(0.0)))
-                                .size(10)
-                                .wrapping(text::Wrapping::None),
+                            text(crate::text_layout::fit_label(
+                                &label,
+                                (size.width - 10.0).max(0.0),
+                                10.0,
+                            ))
+                            .size(10)
+                            .wrapping(text::Wrapping::None),
                         )
                         .padding([4, 5])
                         .width(Length::Fill)
@@ -364,51 +390,59 @@ pub(crate) fn calendar(app: &App) -> Element<'_, Message> {
                         summary.push_str(&format!("  기록 {records}"));
                     }
                     cell = cell.push(
-                        text(fit_calendar_label(summary.trim(), size.width))
-                            .size(10)
-                            .wrapping(text::Wrapping::None)
-                            .color(p.muted),
+                        text(crate::text_layout::fit_label(
+                            summary.trim(),
+                            size.width,
+                            10.0,
+                        ))
+                        .size(10)
+                        .wrapping(text::Wrapping::None)
+                        .color(p.muted),
                     );
                 }
                 cell.into()
             });
             cells = cells.push(
-                button(content)
-                    .padding(6)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .clip(true)
-                    .on_press(Message::SelectDay(date))
-                    .style(move |_, status| {
-                        let hovered =
-                            matches!(status, button::Status::Hovered | button::Status::Pressed);
-                        button::Style {
-                            background: Some(
-                                if selected {
-                                    p.selected
-                                } else if hovered || highlight {
-                                    p.raised
-                                } else {
-                                    p.background
-                                }
-                                .into(),
-                            ),
-                            text_color: p.text,
-                            border: Border {
-                                color: if selected { p.accent } else { p.line },
-                                width: 1.0,
-                                radius: 2.0.into(),
-                            },
-                            ..Default::default()
-                        }
-                    }),
+                button(
+                    mouse_area(content)
+                        .on_press(Message::SelectDay(date))
+                        .on_double_click(Message::New(Kind::Event, Some(date.to_string()))),
+                )
+                .padding(6)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .clip(true)
+                .on_press(Message::SelectDay(date))
+                .style(move |_, status| {
+                    let hovered =
+                        matches!(status, button::Status::Hovered | button::Status::Pressed);
+                    button::Style {
+                        background: Some(
+                            if selected {
+                                p.selected
+                            } else if hovered || highlight {
+                                p.raised
+                            } else {
+                                p.background
+                            }
+                            .into(),
+                        ),
+                        text_color: p.text,
+                        border: Border {
+                            color: if selected { p.accent } else { p.line },
+                            width: 1.0,
+                            radius: 2.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
             );
         }
         grid = grid.push(cells);
     }
     let calendar = column![
         grid.height(Length::Fill),
-        quiet("날짜를 선택해 상세 보기 · 왼쪽 › 버튼으로 주간 열기")
+        quiet("한 번 클릭해 상세 보기 · 두 번 클릭해 일정 추가 · 왼쪽 › 주간 보기")
     ]
     .spacing(8)
     .width(Length::Fill)
@@ -445,75 +479,6 @@ fn month(app: &App) -> Element<'_, Message> {
         .spacing(16)
         .height(Length::Fill)
         .into()
-    }
-}
-
-// Measure with the same font/shaping as the rendered chip. Character counts
-// alone do not bound mixed Korean/Latin titles, especially at minimum width.
-fn calendar_text_width(content: &str) -> f32 {
-    use iced::advanced::{
-        graphics::text::Paragraph,
-        text::{Paragraph as _, Text},
-    };
-    Paragraph::with_text(Text {
-        content,
-        bounds: iced::Size::new(f32::INFINITY, 13.0),
-        size: 10.into(),
-        line_height: Default::default(),
-        font: iced::Font::with_name("Malgun Gothic"),
-        align_x: Default::default(),
-        align_y: iced::alignment::Vertical::Top,
-        shaping: Default::default(),
-        wrapping: text::Wrapping::None,
-    })
-    .min_width()
-}
-
-fn fit_calendar_label(content: &str, width: f32) -> String {
-    let content = content.replace(['\n', '\r', '\t'], " ");
-    if calendar_text_width(&content) <= width {
-        return content;
-    }
-    if calendar_text_width("…") > width {
-        return String::new();
-    }
-    let boundaries: Vec<_> = content.char_indices().map(|(index, _)| index).collect();
-    let (mut low, mut high) = (0, boundaries.len());
-    while low < high {
-        let mid = (low + high + 1) / 2;
-        let end = boundaries.get(mid).copied().unwrap_or(content.len());
-        if calendar_text_width(&format!("{}…", &content[..end])) <= width {
-            low = mid;
-        } else {
-            high = mid - 1;
-        }
-    }
-    format!(
-        "{}…",
-        &content[..boundaries.get(low).copied().unwrap_or(content.len())]
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn mixed_language_calendar_titles_fit_their_actual_width() {
-        for title in [
-            "아주 긴 일정 제목과 English WWWWW",
-            "✓ 좁은 칸의 완료 일정",
-            "한 줄\n다음 줄",
-            "🙂 한글 일정",
-        ] {
-            for width in [0.0, 8.0, 28.0, 53.0, 95.0, 180.0] {
-                let fitted = fit_calendar_label(title, width);
-                assert!(
-                    calendar_text_width(&fitted) <= width + 0.1,
-                    "{fitted}: {width}"
-                );
-                assert!(!fitted.contains('\n'));
-            }
-        }
     }
 }
 
