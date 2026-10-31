@@ -156,6 +156,28 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .unwrap_or("프로젝트".into()),
         _ => app.page.label().into(),
     };
+    let heading: Element<'_, Message> = if app.page == Page::Month {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        row![
+            button(text(format!("{}년", app.month.year())).size(23))
+                .padding([2, 4])
+                .style(theme::text_button)
+                .on_press(Message::Jump(JumpMessage::Open(
+                    JumpTarget::Diary,
+                    JumpField::Year
+                ))),
+            button(text(format!("{}월", app.month.month())).size(23))
+                .padding([2, 4])
+                .style(theme::text_button)
+                .on_press(Message::Jump(JumpMessage::Open(
+                    JumpTarget::Diary,
+                    JumpField::Month
+                ))),
+        ]
+        .into()
+    } else {
+        title(heading)
+    };
     let search = text_input("일정, 프로젝트, 기록 검색", &app.search)
         .on_input(|s| Message::Search(s.chars().take(200).collect()))
         .width(220)
@@ -169,7 +191,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ]
         .align_y(Alignment::Center),
         row![
-            title(heading),
+            heading,
             space().width(Length::Fill),
             control("오늘", Message::Today),
             button(text("↻").size(18))
@@ -381,42 +403,46 @@ pub(crate) fn calendar(app: &App) -> Element<'_, Message> {
                 cell.into()
             });
             cells = cells.push(
-                button(content)
-                    .padding(6)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .clip(true)
-                    .on_press(Message::SelectDay(date))
-                    .style(move |_, status| {
-                        let hovered =
-                            matches!(status, button::Status::Hovered | button::Status::Pressed);
-                        button::Style {
-                            background: Some(
-                                if selected {
-                                    p.selected
-                                } else if hovered || highlight {
-                                    p.raised
-                                } else {
-                                    p.background
-                                }
-                                .into(),
-                            ),
-                            text_color: p.text,
-                            border: Border {
-                                color: if selected { p.accent } else { p.line },
-                                width: 1.0,
-                                radius: 2.0.into(),
-                            },
-                            ..Default::default()
-                        }
-                    }),
+                button(
+                    mouse_area(content)
+                        .on_press(Message::SelectDay(date))
+                        .on_double_click(Message::New(Kind::Event, Some(date.to_string()))),
+                )
+                .padding(6)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .clip(true)
+                .on_press(Message::SelectDay(date))
+                .style(move |_, status| {
+                    let hovered =
+                        matches!(status, button::Status::Hovered | button::Status::Pressed);
+                    button::Style {
+                        background: Some(
+                            if selected {
+                                p.selected
+                            } else if hovered || highlight {
+                                p.raised
+                            } else {
+                                p.background
+                            }
+                            .into(),
+                        ),
+                        text_color: p.text,
+                        border: Border {
+                            color: if selected { p.accent } else { p.line },
+                            width: 1.0,
+                            radius: 2.0.into(),
+                        },
+                        ..Default::default()
+                    }
+                }),
             );
         }
         grid = grid.push(cells);
     }
     let calendar = column![
         grid.height(Length::Fill),
-        quiet("날짜를 선택해 상세 보기 · 왼쪽 › 버튼으로 주간 열기")
+        quiet("한 번 클릭해 상세 보기 · 두 번 클릭해 일정 추가 · 왼쪽 › 주간 보기")
     ]
     .spacing(8)
     .width(Length::Fill)

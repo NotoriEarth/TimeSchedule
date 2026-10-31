@@ -14,6 +14,8 @@ use timeschedule_core::{
     storage::{CalendarEvent, Task},
 };
 
+pub(crate) const EDITOR_SIZE: iced::Size = iced::Size::new(650.0, 560.0);
+
 const WEEKDAYS: [&str; 7] = ["일", "월", "화", "수", "목", "금", "토"];
 pub(crate) fn preview(value: &str, limit: usize) -> String {
     let mut chars = value.chars();
@@ -82,15 +84,31 @@ fn graph_paper<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
 }
 
 pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
+    if app.widget_ui.jump.as_ref().is_some_and(|j| j.window == id) {
+        return crate::month_jump::view(app);
+    }
     if Some(id) == app.widget {
         return crate::desktop_widget::view(app);
     }
-    let base = crate::shell::view(app);
-    if let Some(editor) = &app.editor {
+    let quick = Some(id) == app.quick_window;
+    let base = if quick {
+        crate::quick_editor::view(app)
+    } else {
+        crate::shell::view(app)
+    };
+    if let Some(editor) = app.editor.as_ref().filter(|_| app.editor_in_quick == quick) {
         // This child stays at the same tree path both with and without the
         // confirmation. Retain cursor/selection/scroll and freeze its input.
         let editor_layer = crate::frozen::frozen(
-            modal(base, editor_view(app), Some(Message::CloseEditor), true),
+            if quick {
+                container(panel(editor_view(app), true))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
+                    .style(theme::root)
+                    .into()
+            } else {
+                modal(base, editor_view(app), Some(Message::CloseEditor), true)
+            },
             editor.confirmation.is_some(),
         );
         if let Some(confirmation) = editor.confirmation {
@@ -265,7 +283,7 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
         })
     ]
     .align_y(Alignment::Center);
-    graph_paper(
+    mouse_area(graph_paper(
         column![
             header,
             row![
@@ -284,7 +302,10 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
         .spacing(7)
         .height(Length::Fill)
         .into(),
-    )
+    ))
+    .on_press(Message::SelectDay(date))
+    .on_double_click(Message::New(Kind::Event, Some(key)))
+    .into()
 }
 pub(crate) fn event_card<'a>(app: &'a App, event: &'a CalendarEvent) -> Element<'a, Message> {
     let expanded = app.expanded_events.contains(&event.id);
@@ -593,13 +614,20 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
             .spacing(6),
         );
         c = c
-            .push(text(format!("불투명도 {}%", app.preferences.widget_opacity)).size(14))
+            .push(
+                text(format!(
+                    "배경 불투명도 {}% · 글자는 선명하게 유지",
+                    app.preferences.widget_opacity
+                ))
+                .size(14),
+            )
             .push(iced::widget::slider(
                 40..=100,
                 app.preferences.widget_opacity,
                 |v| Message::Native(NativeAction::Opacity(v)),
             ));
     }
+    c = c.push(crate::widget_settings::view(app));
     c=c.push(title("근거 초안과 외부 연결")).push(text("요약과 포트폴리오는 저장된 원문을 정리한 편집 가능한 초안입니다. AI 분석 결과가 아닙니다. ChatGPT/Space·모바일·여러 기기 동기화는 아직 연결되지 않았습니다.").size(14)).push(quiet("상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."));
     scrollable(paper(c)).height(Length::Fill).into()
 }
@@ -784,6 +812,18 @@ fn editor_view(app: &App) -> Element<'_, Message> {
     .height(Length::Fill)
     .into()
 }
+// Shared form surface: widget quick window and diary modal use one template.
+fn panel<'a>(content: Element<'a, Message>, editor: bool) -> Element<'a, Message> {
+    let mut surface = container(content)
+        .padding(22)
+        .width(EDITOR_SIZE.width)
+        .style(paper_style);
+    if editor {
+        surface = surface.height(EDITOR_SIZE.height);
+    }
+    opaque(mouse_area(surface).on_scroll(|_| Message::Ignore)).into()
+}
+
 fn modal<'a>(
     base: Element<'a, Message>,
     content: Element<'a, Message>,
@@ -800,11 +840,7 @@ fn modal<'a>(
     )
     .on_press(backdrop.unwrap_or(Message::Ignore))
     .on_scroll(|_| Message::Ignore);
-    let mut box_ = container(content).padding(22).width(650).style(paper_style);
-    if editor {
-        box_ = box_.height(560);
-    }
-    let box_ = opaque(mouse_area(box_).on_scroll(|_| Message::Ignore));
+    let box_ = panel(content, editor);
     stack![
         base,
         shade,

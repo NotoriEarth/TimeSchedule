@@ -203,6 +203,20 @@ impl Storage {
         self.delete("DELETE FROM events WHERE id = ?1", "Event", id)
     }
 
+    /// Widget queries omit notes; update only completion so those headers can
+    /// never overwrite the full event or a newer edit to its other fields.
+    pub fn set_event_completed(&self, id: &str, completed: bool) -> Result<(), String> {
+        validate_id(id)?;
+        let changed = self
+            .connection()?
+            .execute(
+                "UPDATE events SET completed = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, completed, timestamp()],
+            )
+            .map_err(database_error)?;
+        require_changed(changed, "Event")
+    }
+
     pub fn list_tasks(&self) -> Result<Vec<Task>, String> {
         let connection = self.connection()?;
         let mut statement = connection
@@ -605,6 +619,40 @@ mod tests {
         );
         assert_eq!(reopened.list_tasks().unwrap(), vec![task]);
         assert_eq!(reopened.list_notes().unwrap(), vec![note]);
+    }
+
+    #[test]
+    fn completing_a_header_preserves_notes_times_color_and_identity() {
+        let database = TestDatabase::new();
+        let storage = database.open();
+        let original = storage.save_event(event_on("2026-10-28")).unwrap();
+        let header = storage
+            .list_event_headers(&original.date, &original.date)
+            .unwrap()
+            .remove(0);
+        assert!(header.notes.is_empty());
+        storage.set_event_completed(&header.id, true).unwrap();
+        let mut actual = storage
+            .list_events(&original.date, &original.date)
+            .unwrap()
+            .remove(0);
+        assert!(actual.completed);
+        actual.completed = original.completed;
+        actual.updated_at = original.updated_at.clone();
+        assert_eq!(actual, original);
+        storage.set_event_completed(&header.id, false).unwrap();
+        drop(storage);
+        assert!(
+            !database
+                .open()
+                .list_events(&original.date, &original.date)
+                .unwrap()[0]
+                .completed
+        );
+        assert!(database
+            .open()
+            .set_event_completed(&Uuid::new_v4().to_string(), true)
+            .is_err());
     }
 
     #[test]

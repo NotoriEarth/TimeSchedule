@@ -9,6 +9,8 @@ pub use super::NativeWindow;
 
 /// Registered before widget creation; the manager retains Tao's original class.
 pub const WIDGET_CLASS: &str = "TimeScheduleDesktopLayered";
+/// Contract with the opt-in Win32 presenter in vendor/softbuffer.
+pub const PER_PIXEL_ALPHA_PROPERTY: &str = "TimeSchedule.PerPixelAlpha.v1";
 
 #[cfg(all(windows, any(test, feature = "test-support")))]
 #[allow(unused_imports)]
@@ -30,10 +32,24 @@ pub struct AttachmentInfo {
 
 #[cfg(windows)]
 pub use native::{
-    attach, detach, initialize_process_dpi_for_shell, position, prepare_widget_class,
-    recover_position, restore_position, set_locked, set_opacity, set_visible, status,
-    with_shell_dpi_context,
+    attach, detach, enable_per_pixel_alpha, initialize_process_dpi_for_shell, logical_size,
+    position, prepare_widget_class, recover_position, resize_logical, restore_position, set_locked,
+    set_opacity, set_visible, status, with_shell_dpi_context,
 };
+
+#[cfg(not(windows))]
+pub fn resize_logical(_: &WebviewWindow, _: u32, _: u32) -> Result<(), String> {
+    Err("Windows 전용 크기 조정입니다.".into())
+}
+#[cfg(not(windows))]
+pub fn logical_size(_: &WebviewWindow) -> Result<Option<(u32, u32)>, String> {
+    Ok(None)
+}
+
+#[cfg(not(windows))]
+pub fn enable_per_pixel_alpha(_: &WebviewWindow) -> Result<(), String> {
+    Err("픽셀 투명도는 Windows에서만 지원합니다.".into())
+}
 
 #[cfg(not(windows))]
 pub fn prepare_widget_class(_: &WebviewWindow) -> Result<(), String> {
@@ -108,6 +124,11 @@ mod native {
     type Hwnd = isize;
     type SubclassProc = unsafe extern "system" fn(Hwnd, u32, usize, isize, usize, usize) -> isize;
     type WindowProc = unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize;
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetPropW(hwnd: Hwnd, name: *const u16) -> isize;
+        fn SetPropW(hwnd: Hwnd, name: *const u16, value: isize) -> i32;
+    }
     const GWL_STYLE: i32 = -16;
     const GWL_EXSTYLE: i32 = -20;
     const GCL_STYLE: i32 = -26;
@@ -540,6 +561,10 @@ mod native {
     }
 
     fn opacity_percent(hwnd: Hwnd, exstyle: u32) -> Result<Option<u8>, String> {
+        if unsafe { GetPropW(hwnd, wide(super::PER_PIXEL_ALPHA_PROPERTY).as_ptr()) } != 0 {
+            // Per-pixel presentation has no constant window-alpha attribute.
+            return Ok(None);
+        }
         if exstyle & WS_EX_LAYERED == 0 {
             return Ok(None);
         }
@@ -550,6 +575,61 @@ mod native {
         Ok(Some(
             ((u32::from(attributes.alpha) * 100 + 127) / 255) as u8,
         ))
+    }
+
+    /// Enable premultiplied BGRA presentation only on our native widget.
+    /// No SetLayeredWindowAttributes call may follow: it disables ULW updates.
+    pub fn enable_per_pixel_alpha(window: &WebviewWindow) -> Result<(), String> {
+        let handle = hwnd(window)?;
+        require_ui_thread(handle)?;
+        if class_name(handle) != window.layered_class()
+            || unsafe { GetClassLongW(handle, GCL_STYLE) } & (CS_OWNDC | CS_CLASSDC) != 0
+        {
+            return Err("위젯 창 클래스가 픽셀 투명도와 호환되지 않습니다.".into());
+        }
+        let property = wide(super::PER_PIXEL_ALPHA_PROPERTY);
+        if unsafe { GetPropW(handle, property.as_ptr()) } != 0 {
+            return configure_native_sizing(handle);
+        }
+        let previous = unsafe { GetWindowLongW(handle, GWL_EXSTYLE) } as u32;
+        // Clear any constant-alpha redirection, then opt into the presenter.
+        set_style(handle, GWL_EXSTYLE, previous & !WS_EX_LAYERED)?;
+        set_style(handle, GWL_EXSTYLE, previous | WS_EX_LAYERED)?;
+        if unsafe { SetPropW(handle, property.as_ptr(), 1) } == 0 {
+            let failure = error("SetPropW(per-pixel alpha)");
+            set_style(handle, GWL_EXSTYLE, previous)?;
+            return Err(failure);
+        }
+        configure_native_sizing(handle)
+    }
+
+    fn configure_native_sizing(hwnd: Hwnd) -> Result<(), String> {
+        require_ui_thread(hwnd)?;
+        let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+        if style & WS_CHILD == 0
+            || unsafe { GetPropW(hwnd, wide(super::PER_PIXEL_ALPHA_PROPERTY).as_ptr()) } == 0
+        {
+            return Err("네이티브 바탕화면 위젯만 크기 조정 프레임을 사용할 수 있습니다.".into());
+        }
+        // WM_NCCALCSIZE below keeps the entire window as client area. Retain
+        // WS_THICKFRAME so DefWindowProc can actually enter the OS size loop.
+        // Never use winit's style setters: they still cache a top-level window.
+        set_style(hwnd, GWL_STYLE, style | WS_THICKFRAME)?;
+        if unsafe {
+            SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            )
+        } == 0
+        {
+            return Err(error("SetWindowPos(native sizing frame)"));
+        }
+        Ok(())
     }
 
     fn set_native_opacity(hwnd: Hwnd, percent: u8, expected_class: &str) -> Result<(), String> {
@@ -1247,6 +1327,84 @@ mod native {
         recover_geometry(hwnd(window)?)
     }
 
+    pub fn logical_size(window: &WebviewWindow) -> Result<Option<(u32, u32)>, String> {
+        let hwnd = hwnd(window)?;
+        require_ui_thread(hwnd)?;
+        if record(hwnd)?.is_some_and(|s| s.moving || s.recovering) {
+            return Ok(None);
+        }
+        let _physical = DpiGuard::enter(-4)?;
+        let r = rect(hwnd)?;
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        Ok(Some((
+            ((r.right - r.left) as f64 * 96.0 / f64::from(dpi)).round() as u32,
+            ((r.bottom - r.top) as f64 * 96.0 / f64::from(dpi)).round() as u32,
+        )))
+    }
+
+    /// Numeric size changes touch only our unlocked child and retain parent/style.
+    pub fn resize_logical(window: &WebviewWindow, width: u32, height: u32) -> Result<(), String> {
+        if !(320..=3840).contains(&width) || !(220..=2160).contains(&height) {
+            return Err("위젯 크기가 허용 범위를 벗어났습니다.".into());
+        }
+        let hwnd = hwnd(window)?;
+        require_ui_thread(hwnd)?;
+        let saved = record(hwnd)?.ok_or("바탕화면 연결이 필요합니다.")?;
+        if saved.locked || saved.moving {
+            return Err("잠금 해제 후 이동을 마치고 크기를 조절하세요.".into());
+        }
+        if unsafe { GetParent(hwnd) } != saved.host || unsafe { IsWindow(saved.host) } == 0 {
+            return Err("바탕화면 호스트가 변경되었습니다.".into());
+        }
+        let _physical = DpiGuard::enter(-4)?;
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        let current = to_parent(rect(hwnd)?, saved.host)?;
+        let desired = Rect {
+            right: current.left + (f64::from(width) * f64::from(dpi) / 96.).round() as i32,
+            bottom: current.top + (f64::from(height) * f64::from(dpi) / 96.).round() as i32,
+            ..current
+        };
+        let monitor = unsafe { MonitorFromWindow(hwnd, 2) };
+        let mut info = MonitorInfo {
+            size: std::mem::size_of::<MonitorInfo>() as u32,
+            ..Default::default()
+        };
+        let mut client = Rect::default();
+        if monitor == 0
+            || unsafe { GetMonitorInfoW(monitor, &mut info) } == 0
+            || unsafe { GetClientRect(saved.host, &mut client) } == 0
+        {
+            return Err(error("위젯 크기 조정 영역 조회"));
+        }
+        let work = to_parent(info.work, saved.host)?;
+        let bounds = Rect {
+            left: work.left.max(client.left),
+            top: work.top.max(client.top),
+            right: work.right.min(client.right),
+            bottom: work.bottom.min(client.bottom),
+        };
+        let target = clamp_requested_rect(desired, current.left, current.top, bounds)?;
+        if unsafe {
+            SetWindowPos(
+                hwnd,
+                0,
+                target.left,
+                target.top,
+                target.right - target.left,
+                target.bottom - target.top,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+            )
+        } == 0
+        {
+            return Err(error("SetWindowPos(resize)"));
+        }
+        let actual = to_parent(rect(hwnd)?, saved.host)?;
+        if actual != target {
+            return Err("크기 조정 결과가 요청한 영역과 다릅니다.".into());
+        }
+        Ok(())
+    }
+
     /// Lock position/size, preserving normal pointer clicks on calendar dates.
     pub fn set_locked(window: &WebviewWindow, locked: bool) -> Result<(), String> {
         let hwnd = hwnd(window)?;
@@ -1297,6 +1455,12 @@ mod native {
         _: usize,
         _: usize,
     ) -> isize {
+        if message == 0x0083 && GetPropW(hwnd, wide(super::PER_PIXEL_ALPHA_PROPERTY).as_ptr()) != 0
+        {
+            // Preserve a borderless client while retaining the native sizing style.
+            // https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-nccalcsize
+            return 0;
+        }
         if message == 0x0082 {
             // WM_NCDESTROY; Explorer can destroy its children.
             KillTimer(hwnd, RECOVERY_TIMER_ID);
@@ -1335,6 +1499,38 @@ mod native {
                     .map(|entry| entry.locked && !entry.recovering)
             })
             .unwrap_or(false);
+        // Native widget's custom grip uses the OS size loop. Keep its logical
+        // limits here, while allowing monitor recovery below them when needed.
+        if message == 0x0214
+            && lparam != 0
+            && !locked
+            && GetPropW(hwnd, wide(super::PER_PIXEL_ALPHA_PROPERTY).as_ptr()) != 0
+        {
+            let r = &mut *(lparam as *mut Rect);
+            let scale = f64::from(GetDpiForWindow(hwnd).max(96)) / 96.0;
+            let width = (i64::from(r.right) - i64::from(r.left)).clamp(
+                (320.0 * scale).round() as i64,
+                (3840.0 * scale).round() as i64,
+            );
+            let height = (i64::from(r.bottom) - i64::from(r.top)).clamp(
+                (220.0 * scale).round() as i64,
+                (2160.0 * scale).round() as i64,
+            );
+            if matches!(wparam, 1 | 4 | 7) {
+                r.left =
+                    (i64::from(r.right) - width).clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+            } else {
+                r.right =
+                    (i64::from(r.left) + width).clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+            }
+            if matches!(wparam, 3 | 4 | 5) {
+                r.top =
+                    (i64::from(r.bottom) - height).clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+            } else {
+                r.bottom =
+                    (i64::from(r.top) + height).clamp(i32::MIN.into(), i32::MAX.into()) as i32;
+            }
+        }
         if locked {
             if message == 0x0112 && matches!(wparam & 0xfff0, 0xf010 | 0xf000) {
                 return 0; // SC_MOVE / SC_SIZE, including Tauri startDragging.
@@ -1677,6 +1873,88 @@ mod native {
                     recovered.bottom
                 )
             );
+            let owned = unsafe { WebviewWindow::iced_widget(windows.widget) };
+            let locked_size = rect(windows.widget).unwrap();
+            assert!(
+                resize_logical(&owned, 400, 300).is_err(),
+                "locked numeric resize must fail"
+            );
+            assert_eq!(rect(windows.widget).unwrap(), locked_size);
+            records()
+                .lock()
+                .unwrap()
+                .get_mut(&windows.widget)
+                .unwrap()
+                .locked = false;
+            assert_ne!(
+                unsafe {
+                    SetWindowPos(
+                        windows.source,
+                        0,
+                        0,
+                        0,
+                        1000,
+                        800,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                },
+                0
+            );
+            resize_logical(&owned, 400, 300).unwrap();
+            assert_eq!(logical_size(&owned).unwrap(), Some((400, 300)));
+            let resized = rect(windows.widget).unwrap();
+            assert!(resize_logical(&owned, 0, 0).is_err());
+            assert_eq!(rect(windows.widget).unwrap(), resized);
+            assert_eq!(unsafe { GetParent(windows.widget) }, windows.source);
+            assert_eq!(layer_attributes(windows.widget).unwrap(), before);
+            records()
+                .lock()
+                .unwrap()
+                .get_mut(&windows.widget)
+                .unwrap()
+                .moving = true;
+            assert_eq!(
+                logical_size(&owned).unwrap(),
+                None,
+                "do not persist intermediate drag sizes"
+            );
+            records()
+                .lock()
+                .unwrap()
+                .get_mut(&windows.widget)
+                .unwrap()
+                .moving = false;
+            let marker = wide(super::super::PER_PIXEL_ALPHA_PROPERTY);
+            assert_ne!(unsafe { SetPropW(windows.widget, marker.as_ptr(), 1) }, 0);
+            configure_native_sizing(windows.widget).unwrap();
+            let sizing_style = unsafe { GetWindowLongW(windows.widget, GWL_STYLE) } as u32;
+            assert_ne!(
+                sizing_style & WS_THICKFRAME,
+                0,
+                "custom grip must be able to start the OS sizing loop"
+            );
+            assert_ne!(sizing_style & WS_CHILD, 0);
+            assert_eq!(sizing_style & (WS_POPUP | WS_CAPTION), 0);
+            let outer = rect(windows.widget).unwrap();
+            let mut client = Rect::default();
+            assert_ne!(unsafe { GetClientRect(windows.widget, &mut client) }, 0);
+            assert_eq!(
+                (client.right, client.bottom),
+                (outer.right - outer.left, outer.bottom - outer.top),
+                "resizing style must not add a visible frame"
+            );
+            let mut sizing = Rect {
+                left: 0,
+                top: 0,
+                right: 12,
+                bottom: 10,
+            };
+            unsafe {
+                SendMessageW(windows.widget, 0x0214, 8, &mut sizing as *mut Rect as isize);
+            }
+            let scale = f64::from(unsafe { GetDpiForWindow(windows.widget) }.max(96)) / 96.;
+            assert_eq!(sizing.right, (320. * scale).round() as i32);
+            assert_eq!(sizing.bottom, (220. * scale).round() as i32);
         }
     }
 }
