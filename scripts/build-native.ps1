@@ -1,17 +1,21 @@
-param([switch]$Run)
+param([switch]$Run, [switch]$Offline)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'toolchain.ps1')
+. (Join-Path $PSScriptRoot 'publish-native.ps1')
 Push-Location $projectRoot
 try {
-    cargo test -p timeschedule-native --locked
+    $cargoOptions = @('--locked')
+    if ($Offline) { $cargoOptions += '--offline' }
+    cargo test -p timeschedule-native @cargoOptions
     if ($LASTEXITCODE -ne 0) { throw 'Native application tests failed.' }
-    cargo build -p timeschedule-native --release --locked
+    cargo build -p timeschedule-native --release @cargoOptions
     if ($LASTEXITCODE -ne 0) { throw 'Native release build failed.' }
-    $output = Join-Path $projectRoot 'artifacts\TimeSchedule-native.exe'
-    New-Item -ItemType Directory -Force (Split-Path -Parent $output) | Out-Null
-    # If the exact artifact is already running, Copy-Item fails without touching it.
-    Copy-Item -LiteralPath 'target\release\timeschedule-native.exe' -Destination $output
-    [pscustomobject]@{path=$output;bytes=(Get-Item -LiteralPath $output).Length;sha256=(Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash} | ConvertTo-Json
-    if ($Run) { Start-Process -FilePath $output -WindowStyle Hidden }
+    $metadataJson = cargo metadata --no-deps --format-version 1 @cargoOptions
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read native package version.' }
+    $metadata = ($metadataJson -join "`n") | ConvertFrom-Json
+    $package = $metadata.packages | Where-Object name -eq 'timeschedule-native'
+    $release = Publish-NativeExecutable -SourcePath (Join-Path $metadata.target_directory 'release\timeschedule-native.exe') -ArtifactsDirectory (Join-Path $projectRoot 'artifacts') -ExpectedVersion $package.version
+    $release | ConvertTo-Json
+    if ($Run) { Start-Process -FilePath $release.path -WindowStyle Hidden }
 } finally { Pop-Location }

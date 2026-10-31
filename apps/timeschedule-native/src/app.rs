@@ -354,7 +354,8 @@ impl App {
             native_pending: None,
         };
         app.log(&format!(
-            "startup data={} storage={} errors={}",
+            "startup version={} data={} storage={} errors={}",
+            env!("CARGO_PKG_VERSION"),
             app.data_dir.display(),
             app.store.is_some(),
             app.error
@@ -365,7 +366,7 @@ impl App {
     }
     pub fn title(&self, id: window::Id) -> String {
         if Some(id) == self.widget {
-            "TimeSchedule Native · 바탕화면".into()
+            format!("TimeSchedule {} · 바탕화면", env!("CARGO_PKG_VERSION"))
         } else if Some(id) == self.quick_window {
             format!(
                 "{} · 빠른 일정",
@@ -375,7 +376,7 @@ impl App {
             if self.widget_ui.jump.as_ref().is_some_and(|j| j.window == id) {
                 "TimeSchedule · 연·월 이동".into()
             } else {
-                "TimeSchedule Native · 만년 다이어리".into()
+                format!("TimeSchedule {} · 만년 다이어리", env!("CARGO_PKG_VERSION"))
             }
         }
     }

@@ -1,6 +1,6 @@
 param(
     [string]$BaselineExecutable = (Join-Path $PSScriptRoot '..\artifacts\baseline\TimeSchedule.exe'),
-    [string]$NativeExecutable = (Join-Path $PSScriptRoot '..\artifacts\TimeSchedule-native.exe'),
+    [string]$NativeExecutable = (Join-Path $PSScriptRoot '..\artifacts\archive\legacy-20261031\TimeSchedule-native.exe'),
     [string]$FixtureRoot = (Join-Path $PSScriptRoot '..\.test-data\benchmark\fixtures'),
     [string]$OutputDirectory,
     [ValidateSet('small','large')][string[]]$Datasets = @('small','large'),
