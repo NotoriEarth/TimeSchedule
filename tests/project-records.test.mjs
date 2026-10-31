@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { prepare, sync, status } from '../scripts/project-records.mjs';
 import { verifyPageEvents, createdPageObservation } from '../scripts/project-records-codex.mjs';
 
@@ -120,4 +122,28 @@ test('a changed word is rejected but actual create receipts retain the page for 
   assert.equal(createdPageObservation(events, job).pageId, pageId);
   assert.equal(createdPageObservation(events, job).markdown, '확인함. 미검증 사항은 남아 있다.');
   assert.equal(createdPageObservation([changed], job), null);
+});
+
+test('a stale lock observer cannot enter while another process owns delivery', async t => {
+  const dir = stateDir(t); await prepare(source(), { stateDir: dir });
+  const moduleUrl = pathToFileURL(path.resolve('scripts/project-records.mjs')).href;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import {sync} from ${JSON.stringify(moduleUrl)};
+    try { await sync({stateDir:process.argv[1],publisher:async()=>{
+      process.send('entered'); await new Promise(r=>process.once('message',r)); throw Error('test finished');
+    }}); } catch {} finally { process.disconnect(); }
+  `, dir], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  t.after(() => child.kill());
+  await new Promise((resolve, reject) => { child.once('message', resolve); child.once('error', reject); child.once('exit', () => reject(Error('holder exited early'))); });
+  const originalRead = fs.readFileSync;
+  // Reproduce the TOCTOU interleaving: this caller observed a dead owner's
+  // marker just before the child acquired the live lock.
+  fs.readFileSync = function(file, ...args) {
+    if (String(file) === path.join(dir, '.sync.lock')) return JSON.stringify({pid:2147483647});
+    return originalRead.call(this, file, ...args);
+  };
+  try {
+    await assert.rejects(sync({stateDir:dir, publisher:async job=>publisherReceipt(job), importer:async r=>({outcome:'saved',workId:r.workId,revision:r.revision,entryId:'unexpected'})}), /다른 기록 작업/);
+  } finally { fs.readFileSync = originalRead; child.send('finish'); }
+  await new Promise(resolve => child.once('exit', resolve));
 });

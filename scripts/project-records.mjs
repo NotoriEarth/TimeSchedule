@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
+import { createServer } from 'node:net';
 import { publishCodex, validatePublication, runBounded } from './project-records-codex.mjs';
 
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -55,21 +56,20 @@ function loadJobs(stateDir, workId) {
 }
 async function locked(stateDir, action) {
   fs.mkdirSync(stateDir, { recursive: true });
-  const file = path.join(stateDir, '.sync.lock');
-  let fd;
-  try { fd = fs.openSync(file, 'wx'); } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    const owner = readJson(file);
-    if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error('기록 잠금 상태를 확인해야 합니다.');
-    try { process.kill(owner.pid, 0); throw new Error('다른 기록 작업이 실행 중입니다.'); } catch (probe) {
-      if (probe.code !== 'ESRCH') throw probe;
-    }
-    fs.unlinkSync(file); fd = fs.openSync(file, 'wx');
-  }
+  const identity = sha(fs.realpathSync(stateDir).toLowerCase());
+  // An OS-owned named pipe disappears on process exit: no stale PID marker or
+  // check/unlink race. The loopback fallback is only for non-Windows tests.
+  const address = process.platform === 'win32'
+    ? { path: `\\\\.\\pipe\\timeschedule-record-${identity}`, exclusive: true }
+    : { host: '127.0.0.1', port: 20000 + parseInt(identity.slice(0, 8), 16) % 40000, exclusive: true };
+  const server = createServer(socket => socket.destroy());
+  await new Promise((resolve, reject) => {
+    server.once('error', error => reject(new Error(`다른 기록 작업이 실행 중이거나 잠금을 열지 못했습니다: ${error.code}`)));
+    server.listen(address, resolve);
+  });
   try {
-    fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })); fs.fsyncSync(fd);
     return await action();
-  } finally { fs.closeSync(fd); fs.unlinkSync(file); }
+  } finally { await new Promise(resolve => server.close(resolve)); }
 }
 
 export async function prepare(input, { stateDir = DEFAULT_STATE } = {}) {

@@ -782,8 +782,18 @@ impl App {
                             ));
                             return self.refresh();
                         }
+                        if report.unchanged > 0 {
+                            // A previous delivery may have committed before its
+                            // acknowledgement failed. Drop old editable bodies.
+                            return self.refresh();
+                        }
                     }
-                    Err(error) => self.error = format!("자동 기록 수신 실패: {error}"),
+                    Err(error) => {
+                        self.error = format!("자동 기록 수신 실패: {error}");
+                        // Errors can happen after the SQLite transaction commits.
+                        // Refresh before allowing any edit of the cached snapshot.
+                        return self.refresh();
+                    }
                 }
             }
             Message::WidgetSetting(change) => return self.widget_setting(change),
@@ -1595,6 +1605,43 @@ mod tests {
         assert!(!app.busy);
         assert!(!app.records_processing);
         assert!(app.loading, "반영 후 새 목록을 조회한다");
+    }
+
+    #[test]
+    fn record_commit_receipt_failure_invalidates_cached_body_before_editing() {
+        let dir = crate::record_inbox::tests::TestDir::new();
+        let mut app = fixture();
+        let store = app.store.clone().unwrap();
+        let mut record = crate::record_inbox::tests::sample();
+        let id = store
+            .apply_project_record(&record)
+            .unwrap()
+            .entry_id
+            .unwrap();
+        let old = store.get_entry(&id).unwrap();
+        app.bodies.insert(id.clone(), old.clone());
+        app.expanded.insert(id.clone());
+        record.revision = 2;
+        record.summary = "새 검증 결과. 사용자 확인은 남아 있다.".into();
+        crate::record_inbox::enqueue(&dir.0, &record).unwrap();
+        std::fs::write(dir.0.join("record-receipts"), b"receipt path blocked").unwrap();
+        let result = crate::record_inbox::drain(&dir.0, &store);
+        assert!(result.is_err());
+        assert!(store.get_entry(&id).unwrap().body.contains("새 검증 결과"));
+        app.records_processing = true;
+        app.busy = true;
+        let _ = app.update(Message::RecordsDrained(result));
+        assert!(app.loading, "DB commit 이후 수신 결과 실패도 갱신해야 한다");
+        assert!(app.bodies.is_empty());
+        let _ = app.open_form(Form::entry(old));
+        assert!(app.editor.is_none());
+        std::fs::remove_file(dir.0.join("record-receipts")).unwrap();
+        let replay = crate::record_inbox::drain(&dir.0, &store).unwrap();
+        assert_eq!(replay.unchanged, 1);
+        app.loading = false;
+        app.records_processing = true;
+        let _ = app.update(Message::RecordsDrained(Ok(replay)));
+        assert!(app.loading, "재시도에서도 이미 커밋된 기록을 다시 읽는다");
     }
 
     #[test]
