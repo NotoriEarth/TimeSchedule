@@ -25,7 +25,7 @@
 
 - [x] Independent review of diff against `05be6bf`; resolve material findings.
 - [x] Run formatting, workspace tests and release build; smoke-test with isolated data and document actual vs pending checks.
-- [ ] Prepare `artifacts/TimeSchedule-desktopcal.exe` and screenshots; commit/push/create/attach PR to the manager theme branch. Hold merge.
+- [x] Prepare `artifacts/TimeSchedule-desktopcal.exe` and screenshots; commit/push/create/attach PR to the manager theme branch. Hold merge.
 
 ## Execution record
 
@@ -37,3 +37,4 @@
 - Verification: workspace 61 passed / 2 intentionally ignored fixtures, manual renderer preview separately passed. Default/dark/light/fitted/small previews inspected; scrollbar now reserves space when visible.
 - Final review: no actionable findings; ready for user testing, not merge. Actual DPI/drag/physical-position behavior and wallpaper readability were explicitly deferred to executable/user checks; native fitting regression tests and startup/attachment logs pass, actual visual/drag acceptance remains documented.
 - Final build: `TimeSchedule-desktopcal.exe`, 5,579,264 bytes. Isolated Windows smoke loaded 6 events/2 projects/1 entry and reported attached=true, visible=true at (30,40). Own test process stopped after checking; existing user app left running.
+- Delivery: implementation `44b23f5` pushed; PR #4 created against `codex/midnight-porcelain-ui` and attached to this chat. Unmerged: https://github.com/NotoriEarth/TimeSchedule/pull/4.
