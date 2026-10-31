@@ -1524,10 +1524,9 @@ mod tests {
             JumpField::Month,
         )));
         let jump = app.widget_ui.jump.as_ref().unwrap();
-        assert_eq!((jump.year.as_str(), jump.month.as_str()), ("2025", "9"));
-        assert_eq!(jump.focus, JumpField::Month);
-        let _ = app.update(Message::Jump(JumpMessage::Month("13".into())));
-        let _ = app.update(Message::Jump(JumpMessage::Apply));
+        assert_eq!((jump.year, jump.month), (2025, 9));
+        assert_eq!(jump.level, JumpField::Month);
+        let _ = app.update(Message::Jump(JumpMessage::PickMonth(13)));
         assert!(app.widget_ui.jump.as_ref().unwrap().error.len() > 0);
         assert_eq!(app.widget_month.month(), 9);
         let _ = app.update(Message::Jump(JumpMessage::Cancel));
@@ -1538,9 +1537,8 @@ mod tests {
             crate::month_jump::JumpTarget::Widget,
             JumpField::Year,
         )));
-        let _ = app.update(Message::Jump(JumpMessage::Year("2028".into())));
-        let _ = app.update(Message::Jump(JumpMessage::Month("2".into())));
-        let _ = app.update(Message::Jump(JumpMessage::Apply));
+        let _ = app.update(Message::Jump(JumpMessage::PickYear(2028)));
+        let _ = app.update(Message::Jump(JumpMessage::PickMonth(2)));
         assert_eq!(
             app.widget_month,
             NaiveDate::from_ymd_opt(2028, 2, 1).unwrap()
@@ -1565,7 +1563,7 @@ mod tests {
         )));
         let jump = app.widget_ui.jump.as_ref().unwrap();
         assert_ne!(jump.window, old_id);
-        assert_eq!((jump.year.as_str(), jump.month.as_str()), ("2025", "9"));
+        assert_eq!((jump.year, jump.month), (2025, 9));
         assert_eq!(jump.target.source(&app), app.manager);
         let _ = app.update(Message::New(Kind::Event, None));
         let _ = app.update(Message::Field(Field::Title("기존 초안".into())));
@@ -1632,15 +1630,67 @@ mod tests {
         let _ = app.jump_message(JumpMessage::Open(JumpTarget::Diary, JumpField::Year));
         let id = app.widget_ui.jump.as_ref().unwrap().window;
         app.placing_popups.clear(); // Placement of the first opening completed.
-        let _ = app.jump_message(JumpMessage::Year("2035".into()));
+        let _ = app.jump_message(JumpMessage::PickYear(2035));
         let _ = app.jump_message(JumpMessage::Open(JumpTarget::Diary, JumpField::Month));
         assert!(
             app.placing_popups.contains_key(&id),
             "reused popup must recapture the moved diary position"
         );
         let jump = app.widget_ui.jump.as_ref().unwrap();
-        assert_eq!(jump.year, "2035");
-        assert_eq!(jump.focus, JumpField::Month);
+        assert_eq!(jump.year, 2035);
+        assert_eq!(jump.level, JumpField::Month);
+    }
+    #[test]
+    fn picker_browsing_cancels_and_neighbor_years_are_selectable() {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        let mut app = fixture();
+        app.widget_month = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let original = app.widget_month;
+        let _ = app.jump_message(JumpMessage::Open(JumpTarget::Widget, JumpField::Year));
+        let _ = app.jump_message(JumpMessage::Page(1));
+        assert_eq!(app.widget_ui.jump.as_ref().unwrap().decade, 2030);
+        assert_eq!(app.widget_ui.jump.as_ref().unwrap().year, 2026);
+        assert_eq!(app.widget_month, original);
+        let _ = app.jump_message(JumpMessage::Page(-1));
+        let _ = app.jump_message(JumpMessage::PickYear(2019));
+        let jump = app.widget_ui.jump.as_ref().unwrap();
+        assert_eq!(jump.level, JumpField::Month);
+        assert_eq!((jump.year, jump.month), (2019, 10));
+        let _ = app.jump_message(JumpMessage::Page(1));
+        assert_eq!(app.widget_ui.jump.as_ref().unwrap().year, 2020);
+        let _ = app.jump_message(JumpMessage::ShowYears);
+        assert_eq!(app.widget_ui.jump.as_ref().unwrap().decade, 2020);
+        let id = app.widget_ui.jump.as_ref().unwrap().window;
+        let _ = app.update(Message::EscapeWindow(id));
+        assert!(app.widget_ui.jump.is_none());
+        assert_eq!(app.widget_month, original);
+    }
+    #[test]
+    fn picker_pages_respect_supported_years_and_direct_date_validation() {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        for (year, direction, invalid) in [(1900, -1, 1899), (9998, 1, 9999)] {
+            let mut app = fixture();
+            app.widget_month = NaiveDate::from_ymd_opt(year, 9, 1).unwrap();
+            let _ = app.jump_message(JumpMessage::Open(JumpTarget::Widget, JumpField::Year));
+            let decade = app.widget_ui.jump.as_ref().unwrap().decade;
+            let _ = app.jump_message(JumpMessage::Page(direction));
+            let _ = app.jump_message(JumpMessage::PickYear(invalid));
+            assert_eq!(app.widget_ui.jump.as_ref().unwrap().decade, decade);
+            assert_eq!(app.widget_ui.jump.as_ref().unwrap().level, JumpField::Year);
+            let _ = app.jump_message(JumpMessage::PickYear(year));
+            let _ = app.jump_message(JumpMessage::Page(direction));
+            assert_eq!(app.widget_ui.jump.as_ref().unwrap().year, year);
+            let _ = app.jump_message(JumpMessage::ToggleDate);
+            assert!(app.widget_ui.jump.as_ref().unwrap().direct);
+            let _ = app.jump_message(JumpMessage::Date("2027-02-29".into()));
+            let _ = app.jump_message(JumpMessage::ApplyDate);
+            assert!(!app.widget_ui.jump.as_ref().unwrap().error.is_empty());
+            assert_eq!(app.widget_month.year(), year);
+            let _ = app.jump_message(JumpMessage::Date("2028-02-29".into()));
+            let _ = app.jump_message(JumpMessage::ApplyDate);
+            assert!(app.widget_ui.jump.is_none());
+            assert_eq!(app.widget_ui.selected.unwrap().to_string(), "2028-02-29");
+        }
     }
     fn hit(title: &str) -> SearchHit {
         SearchHit {

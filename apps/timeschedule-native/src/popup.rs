@@ -61,11 +61,9 @@ impl App {
         let reveal = window::set_mode(id, window::Mode::Windowed)
             .chain(window::minimize(id, false))
             .chain(window::gain_focus(id));
-        if let Some(jump) = jump {
-            reveal
-                .chain(iced::widget::operation::focus(jump.focus.id()))
-                .chain(iced::widget::operation::select_all(jump.focus.id()))
-        } else if self.editor_in_quick {
+        if jump.is_some_and(|j| j.direct) {
+            reveal.chain(iced::widget::operation::focus("jump-date"))
+        } else if jump.is_none() && self.editor_in_quick {
             reveal.chain(iced::widget::operation::focus("editor-title"))
         } else {
             reveal

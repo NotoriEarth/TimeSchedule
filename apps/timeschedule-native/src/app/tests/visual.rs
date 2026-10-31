@@ -291,11 +291,35 @@ fn render_theme_previews() {
         .list_events(&app.selected.to_string(), &app.selected.to_string())
         .unwrap();
     for (name, mode, size) in [
-        ("jump-midnight", AppTheme::Midnight, Size::new(400.0, 300.0)),
+        (
+            "jump-midnight",
+            AppTheme::Midnight,
+            crate::month_jump::PICKER_SIZE,
+        ),
+        (
+            "jump-year-midnight",
+            AppTheme::Midnight,
+            crate::month_jump::PICKER_SIZE,
+        ),
+        (
+            "jump-year-porcelain",
+            AppTheme::Porcelain,
+            crate::month_jump::PICKER_SIZE,
+        ),
+        (
+            "jump-year-boundary",
+            AppTheme::Midnight,
+            crate::month_jump::PICKER_MIN_SIZE,
+        ),
+        (
+            "jump-direct-small",
+            AppTheme::Porcelain,
+            crate::month_jump::PICKER_MIN_SIZE,
+        ),
         (
             "jump-porcelain",
             AppTheme::Porcelain,
-            Size::new(400.0, 300.0),
+            crate::month_jump::PICKER_SIZE,
         ),
         (
             "settings-midnight",
@@ -382,18 +406,30 @@ fn render_theme_previews() {
             Page::Month
         };
         app.widget_ui.jump = if name.starts_with("jump-") {
-            Some(crate::month_jump::MonthJump {
-                window: jump_id,
-                target: crate::month_jump::JumpTarget::Widget,
-                focus: crate::month_jump::JumpField::Month,
-                year: "2025".into(),
-                month: "9".into(),
-                date: String::new(),
-                error: String::new(),
-            })
+            Some(crate::month_jump::MonthJump::new(
+                jump_id,
+                crate::month_jump::JumpTarget::Widget,
+                if name.contains("year") {
+                    crate::month_jump::JumpField::Year
+                } else {
+                    crate::month_jump::JumpField::Month
+                },
+                NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            ))
         } else {
             None
         };
+        if name == "jump-direct-small" {
+            let j = app.widget_ui.jump.as_mut().unwrap();
+            j.direct = true;
+            j.date = "2027-02-29".into();
+            j.error = "1900~9998년의 올바른 날짜를 입력하세요.".into();
+        }
+        if name == "jump-year-boundary" {
+            let j = app.widget_ui.jump.as_mut().unwrap();
+            j.year = 9998;
+            j.decade = 9990;
+        }
         if name == "desktopcal-rolling" {
             app.preferences.widget.rolling = true;
             app.preferences.widget.weeks = 4;
@@ -691,4 +727,139 @@ fn widget_and_diary_event_forms_share_panel_geometry() {
         inputs[0], inputs[1],
         "same form must have identical size and offsets inside its panel"
     );
+}
+
+#[test]
+fn windows_picker_tiles_choose_year_then_month_without_typing() {
+    use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+    use iced::advanced::widget::{Id, Operation};
+    struct Labels(Vec<(String, Rectangle)>);
+    impl Operation for Labels {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn text(&mut self, _: Option<&Id>, bounds: Rectangle, text: &str) {
+            self.0.push((text.into(), bounds));
+        }
+    }
+    fn choose(app: &App, label: &str, expected: &[String]) -> Vec<Message> {
+        let size = Size::new(360., 420.);
+        let bounds = Rectangle::new(Point::ORIGIN, size);
+        let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut element = app.view(app.widget_ui.jump.as_ref().unwrap().window);
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let mut labels = Labels(Vec::new());
+        element.as_widget_mut().operate(
+            &mut tree,
+            layout::Layout::new(&node),
+            &renderer,
+            &mut labels,
+        );
+        for text in expected {
+            assert!(
+                labels.0.iter().any(|(s, _)| s == text),
+                "missing tile {text}"
+            );
+        }
+        let target = labels
+            .0
+            .iter()
+            .find(|(s, _)| s == label)
+            .expect("tile exists")
+            .1;
+        let mut messages = Vec::new();
+        for event in [
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(event),
+                layout::Layout::new(&node),
+                mouse::Cursor::Available(target.center()),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &bounds,
+            );
+        }
+        messages
+    }
+    for target in [JumpTarget::Widget, JumpTarget::Diary] {
+        let mut app = fixture();
+        app.month = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        app.widget_month = app.month;
+        let _ = app.update(Message::New(Kind::Event, None));
+        let _ = app.update(Message::Field(Field::Title("작성 중인 일정".into())));
+        let _ = app.jump_message(JumpMessage::Open(target, JumpField::Year));
+        for m in choose(
+            &app,
+            "2028",
+            &(2018..=2033).map(|n| n.to_string()).collect::<Vec<_>>(),
+        ) {
+            let _ = app.update(m);
+        }
+        assert_eq!(app.month.year(), 2026, "year selection is still a draft");
+        assert_eq!(app.widget_month.year(), 2026);
+        for m in choose(
+            &app,
+            "2월",
+            &(1..=12).map(|n| format!("{n}월")).collect::<Vec<_>>(),
+        ) {
+            let _ = app.update(m);
+        }
+        assert!(app.widget_ui.jump.is_none());
+        let chosen = match target {
+            JumpTarget::Widget => app.widget_month,
+            JumpTarget::Diary => app.month,
+        };
+        let untouched = match target {
+            JumpTarget::Widget => app.month,
+            JumpTarget::Diary => app.widget_month,
+        };
+        assert_eq!(chosen.to_string(), "2028-02-01");
+        assert_eq!(untouched.to_string(), "2026-10-01");
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "작성 중인 일정");
+    }
+}
+
+#[test]
+fn picker_grid_and_expanded_date_entry_fit_minimum_window() {
+    use crate::month_jump::{JumpField, JumpMessage, JumpTarget, PICKER_MIN_SIZE};
+    for level in [JumpField::Year, JumpField::Month] {
+        for direct in [false, true] {
+            let mut app = fixture();
+            let _ = app.jump_message(JumpMessage::Open(JumpTarget::Widget, level));
+            if direct {
+                let _ = app.jump_message(JumpMessage::ToggleDate);
+                let _ = app.jump_message(JumpMessage::Date("2027-02-29".into()));
+                let _ = app.jump_message(JumpMessage::ApplyDate);
+            }
+            let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+            let mut element = app.view(app.widget_ui.jump.as_ref().unwrap().window);
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, PICKER_MIN_SIZE),
+            );
+            fn check(node: &layout::Node, origin: Point) {
+                let b = node.bounds();
+                let p = Point::new(origin.x + b.x, origin.y + b.y);
+                assert!(
+                    p.x >= -0.1 && p.y >= -0.1 && p.x + b.width <= 320.1 && p.y + b.height <= 400.1,
+                    "out of popup: {p:?} {b:?}"
+                );
+                for child in node.children() {
+                    check(child, p);
+                }
+            }
+            check(&node, Point::ORIGIN);
+        }
+    }
 }
