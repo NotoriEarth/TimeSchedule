@@ -136,6 +136,7 @@ pub enum Message {
     WidgetToday,
     WidgetDate(NaiveDate),
     QuickReady(window::Id),
+    PopupPositioned(window::Id, window::Id, Result<(), String>),
     QuickLoaded(u64, bool, Result<Vec<CalendarEvent>, String>),
     QuickEdit(Option<String>),
     CompleteWidgetEvent(String, bool),
@@ -191,6 +192,7 @@ pub struct App {
     pub manager_size: Size,
     pub widget: Option<window::Id>,
     pub quick_window: Option<window::Id>,
+    pub placing_popups: HashMap<window::Id, window::Id>,
     pub quick_date: Option<NaiveDate>,
     pub quick_events: Vec<CalendarEvent>,
     pub quick_generation: u64,
@@ -305,6 +307,7 @@ impl App {
             manager_size: Size::new(1160.0, 820.0),
             widget: None,
             quick_window: None,
+            placing_popups: HashMap::new(),
             quick_date: None,
             quick_events: Vec::new(),
             quick_generation: 0,
@@ -690,6 +693,8 @@ impl App {
                     | Message::EscapeWindow(_)
                     | Message::QuickLoaded(..)
                     | Message::QuickReady(_)
+                    | Message::PopupPositioned(..)
+                    | Message::Jump(crate::month_jump::JumpMessage::Ready(_))
                     | Message::Tick
                     | Message::NativeDone(..)
                     | Message::PrefsDone(_)
@@ -753,6 +758,7 @@ impl App {
                 return self.native(NativeAction::Attach);
             }
             Message::WindowClosed(id) => {
+                self.placing_popups.remove(&id);
                 if self.widget_ui.jump.as_ref().is_some_and(|j| j.window == id) {
                     self.widget_ui.jump = None;
                 }
@@ -885,8 +891,11 @@ impl App {
             Message::WidgetDate(date) => {
                 return self.open_quick(date);
             }
+            Message::PopupPositioned(id, token, result) => {
+                return self.popup_positioned(id, token, result)
+            }
             Message::QuickReady(id) if Some(id) == self.quick_window => {
-                return window::gain_focus(id);
+                return self.place_popup(self.widget.unwrap_or(self.manager), id);
             }
             Message::QuickLoaded(g, initial, result)
                 if g == self.quick_generation && self.quick_window.is_some() =>
@@ -1430,6 +1439,7 @@ mod tests {
             manager_size: Size::new(1160.0, 820.0),
             widget: None,
             quick_window: None,
+            placing_popups: HashMap::new(),
             quick_date: None,
             quick_events: Vec::new(),
             quick_generation: 0,
@@ -1509,7 +1519,10 @@ mod tests {
         use crate::month_jump::{JumpField, JumpMessage};
         let mut app = fixture();
         app.widget_month = NaiveDate::from_ymd_opt(2025, 9, 1).unwrap();
-        let _ = app.update(Message::Jump(JumpMessage::Open(JumpField::Month)));
+        let _ = app.update(Message::Jump(JumpMessage::Open(
+            crate::month_jump::JumpTarget::Widget,
+            JumpField::Month,
+        )));
         let jump = app.widget_ui.jump.as_ref().unwrap();
         assert_eq!((jump.year.as_str(), jump.month.as_str()), ("2025", "9"));
         assert_eq!(jump.focus, JumpField::Month);
@@ -1521,7 +1534,10 @@ mod tests {
         assert!(app.widget_ui.jump.is_none());
         let _ = app.update(Message::New(Kind::Event, None));
         let _ = app.update(Message::Field(Field::Title("미저장 원문".into())));
-        let _ = app.update(Message::Jump(JumpMessage::Open(JumpField::Year)));
+        let _ = app.update(Message::Jump(JumpMessage::Open(
+            crate::month_jump::JumpTarget::Widget,
+            JumpField::Year,
+        )));
         let _ = app.update(Message::Jump(JumpMessage::Year("2028".into())));
         let _ = app.update(Message::Jump(JumpMessage::Month("2".into())));
         let _ = app.update(Message::Jump(JumpMessage::Apply));
@@ -1531,6 +1547,83 @@ mod tests {
         );
         assert!(!app.widget_ui.follow_today);
         assert_eq!(app.editor.as_ref().unwrap().form.title, "미저장 원문");
+    }
+    #[test]
+    fn diary_jump_changes_only_diary_and_replaces_other_origin_popup() {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        let mut app = fixture();
+        app.month = NaiveDate::from_ymd_opt(2025, 9, 1).unwrap();
+        let widget_month = app.widget_month;
+        let _ = app.update(Message::Jump(JumpMessage::Open(
+            JumpTarget::Widget,
+            JumpField::Year,
+        )));
+        let old_id = app.widget_ui.jump.as_ref().unwrap().window;
+        let _ = app.update(Message::Jump(JumpMessage::Open(
+            JumpTarget::Diary,
+            JumpField::Month,
+        )));
+        let jump = app.widget_ui.jump.as_ref().unwrap();
+        assert_ne!(jump.window, old_id);
+        assert_eq!((jump.year.as_str(), jump.month.as_str()), ("2025", "9"));
+        assert_eq!(jump.target.source(&app), app.manager);
+        let _ = app.update(Message::New(Kind::Event, None));
+        let _ = app.update(Message::Field(Field::Title("기존 초안".into())));
+        let _ = app.update(Message::Jump(JumpMessage::Date("2028-02-29".into())));
+        let _ = app.update(Message::Jump(JumpMessage::ApplyDate));
+        assert_eq!(app.selected.to_string(), "2028-02-29");
+        assert_eq!(app.month.to_string(), "2028-02-01");
+        assert_eq!(app.widget_month, widget_month);
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "기존 초안");
+    }
+    #[test]
+    fn popup_placement_reveals_once_and_ignores_closed_or_stale_requests() {
+        let mut app = fixture();
+        let id = window::Id::unique();
+        app.quick_window = Some(id);
+        let _ = app.place_popup(app.manager, id);
+        let token = app.placing_popups[&id];
+        let _ = app.place_popup(app.manager, id);
+        let newer = app.placing_popups[&id];
+        assert_eq!(
+            app.update(Message::PopupPositioned(id, token, Ok(())))
+                .units(),
+            0
+        );
+        assert!(
+            app.update(Message::PopupPositioned(
+                id,
+                newer,
+                Err("source closed".into())
+            ))
+            .units()
+                > 0
+        );
+        assert_eq!(
+            app.update(Message::PopupPositioned(id, newer, Ok(())))
+                .units(),
+            0
+        );
+        let _ = app.place_popup(app.manager, id);
+        let token = app.placing_popups[&id];
+        app.quick_window = None;
+        assert_eq!(
+            app.update(Message::PopupPositioned(id, token, Ok(())))
+                .units(),
+            0
+        );
+    }
+    #[test]
+    fn quick_editor_does_not_show_before_native_placement() {
+        let mut app = fixture();
+        app.widget = Some(window::Id::unique());
+        let date = app.selected;
+        let _ = app.open_quick(date);
+        assert_eq!(
+            app.focus_quick().units(),
+            0,
+            "focus must not restore a hidden popup at the default screen position"
+        );
     }
     fn hit(title: &str) -> SearchHit {
         SearchHit {

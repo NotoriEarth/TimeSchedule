@@ -13,16 +13,29 @@ pub enum JumpField {
     Month,
 }
 impl JumpField {
-    fn id(self) -> &'static str {
+    pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Year => "jump-year",
             Self::Month => "jump-month",
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JumpTarget {
+    Widget,
+    Diary,
+}
+impl JumpTarget {
+    pub fn source(self, app: &App) -> window::Id {
+        match self {
+            Self::Widget => app.widget.unwrap_or(app.manager),
+            Self::Diary => app.manager,
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub enum JumpMessage {
-    Open(JumpField),
+    Open(JumpTarget, JumpField),
     Ready(window::Id),
     Year(String),
     Month(String),
@@ -33,6 +46,7 @@ pub enum JumpMessage {
 }
 pub struct MonthJump {
     pub window: window::Id,
+    pub target: JumpTarget,
     pub focus: JumpField,
     pub year: String,
     pub month: String,
@@ -42,9 +56,22 @@ pub struct MonthJump {
 impl App {
     pub fn jump_message(&mut self, message: JumpMessage) -> Task<Message> {
         match message {
-            JumpMessage::Open(focus) => {
+            JumpMessage::Open(target, focus) => {
+                let old = if self
+                    .widget_ui
+                    .jump
+                    .as_ref()
+                    .is_some_and(|j| j.target != target)
+                {
+                    self.jump_message(JumpMessage::Cancel)
+                } else {
+                    Task::none()
+                };
                 if let Some(jump) = &mut self.widget_ui.jump {
                     jump.focus = focus;
+                    if self.placing_popups.contains_key(&jump.window) {
+                        return Task::none();
+                    }
                     return window::minimize(jump.window, false)
                         .chain(window::gain_focus(jump.window))
                         .chain(operation::focus(focus.id()))
@@ -53,32 +80,41 @@ impl App {
                 let (id, open) = window::open(window::Settings {
                     size: Size::new(400.0, 300.0),
                     min_size: Some(Size::new(360.0, 300.0)),
-                    position: window::Position::Centered,
+                    visible: false,
                     exit_on_close_request: false,
                     ..Default::default()
                 });
+                self.placing_popups.insert(id, window::Id::unique());
                 self.widget_ui.jump = Some(MonthJump {
                     window: id,
+                    target,
                     focus,
-                    year: self.widget_month.year().to_string(),
-                    month: self.widget_month.month().to_string(),
+                    year: match target {
+                        JumpTarget::Widget => self.widget_month,
+                        JumpTarget::Diary => self.month,
+                    }
+                    .year()
+                    .to_string(),
+                    month: match target {
+                        JumpTarget::Widget => self.widget_month,
+                        JumpTarget::Diary => self.month,
+                    }
+                    .month()
+                    .to_string(),
                     date: String::new(),
                     error: String::new(),
                 });
-                open.map(|id| Message::Jump(JumpMessage::Ready(id)))
+                Task::batch([old, open.map(|id| Message::Jump(JumpMessage::Ready(id)))])
             }
-            JumpMessage::Cancel => self
-                .widget_ui
-                .jump
-                .take()
-                .map_or_else(Task::none, |j| window::close(j.window)),
+            JumpMessage::Cancel => self.widget_ui.jump.take().map_or_else(Task::none, |j| {
+                self.placing_popups.remove(&j.window);
+                window::close(j.window)
+            }),
             JumpMessage::Ready(id) => {
                 let Some(jump) = self.widget_ui.jump.as_ref().filter(|j| j.window == id) else {
                     return Task::none();
                 };
-                window::gain_focus(id)
-                    .chain(operation::focus(jump.focus.id()))
-                    .chain(operation::select_all(jump.focus.id()))
+                self.place_popup(jump.target.source(self), id)
             }
             other => {
                 let Some(jump) = &mut self.widget_ui.jump else {
@@ -101,8 +137,23 @@ impl App {
                         }
                         .filter(|d| (1900..=9998).contains(&d.year()));
                         if let Some(date) = date {
+                            let target = jump.target;
                             let close = self.jump_message(JumpMessage::Cancel);
-                            return Task::batch([close, self.jump_widget(date, false)]);
+                            let navigate = match target {
+                                JumpTarget::Widget => self.jump_widget(date, false),
+                                JumpTarget::Diary => {
+                                    self.month = date.with_day(1).unwrap();
+                                    self.selected = date;
+                                    self.week =
+                                        timeschedule_core::dates::week_containing(date).from;
+                                    self.hovered_week = None;
+                                    self.search.clear();
+                                    self.search_results.clear();
+                                    self.search_generation += 1;
+                                    self.refresh()
+                                }
+                            };
+                            return Task::batch([close, navigate]);
                         }
                         jump.error = "1900~9998년의 올바른 연·월 또는 날짜를 입력하세요.".into();
                     }

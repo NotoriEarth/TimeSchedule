@@ -136,7 +136,10 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
             )
             .padding([2, 4])
             .style(theme::text_button)
-            .on_press(Message::Jump(JumpMessage::Open(JumpField::Year))),
+            .on_press(Message::Jump(JumpMessage::Open(
+                crate::month_jump::JumpTarget::Widget,
+                JumpField::Year
+            ))),
             button(
                 text(format!("{}월", app.widget_month.month()))
                     .size(heading_size)
@@ -145,7 +148,10 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
             )
             .padding([2, 4])
             .style(theme::text_button)
-            .on_press(Message::Jump(JumpMessage::Open(JumpField::Month))),
+            .on_press(Message::Jump(JumpMessage::Open(
+                crate::month_jump::JumpTarget::Widget,
+                JumpField::Month
+            ))),
         ]
         .spacing(0)
     ]

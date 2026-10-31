@@ -4,61 +4,68 @@ use iced::advanced::{graphics::Viewport, layout, mouse, renderer, widget::Tree, 
 use iced::{Point, Rectangle};
 
 #[test]
-fn month_heading_has_separate_year_and_month_targets() {
-    use crate::month_jump::{JumpField, JumpMessage};
-    let mut app = fixture();
-    app.widget = Some(window::Id::unique());
-    app.widget_attached = true;
-    let size = Size::new(960., 640.);
-    let bounds = Rectangle::new(Point::ORIGIN, size);
-    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
-    let mut element = app.view(app.widget.unwrap());
-    let mut tree = Tree::new(element.as_widget());
-    let node = element.as_widget_mut().layout(
-        &mut tree,
-        &renderer,
-        &layout::Limits::new(Size::ZERO, size),
-    );
-    let mut targets = Vec::new();
-    fn collect(node: &layout::Node, parent: Point, points: &mut Vec<Point>) {
-        let b = node.bounds();
-        let origin = Point::new(parent.x + b.x, parent.y + b.y);
-        if origin.y < 100. && b.width > 8. && b.width < 200. && b.height > 8. && b.height < 60. {
-            points.push(Point::new(
-                origin.x + b.width / 2.,
-                origin.y + b.height / 2.,
-            ));
+fn diary_and_widget_headings_have_separate_year_and_month_targets() {
+    for diary in [false, true] {
+        use crate::month_jump::{JumpField, JumpMessage};
+        let mut app = fixture();
+        app.widget = Some(window::Id::unique());
+        app.widget_attached = true;
+        let size = Size::new(960., 640.);
+        let bounds = Rectangle::new(Point::ORIGIN, size);
+        let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut element = app.view(if diary {
+            app.manager
+        } else {
+            app.widget.unwrap()
+        });
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let mut targets = Vec::new();
+        fn collect(node: &layout::Node, parent: Point, points: &mut Vec<Point>) {
+            let b = node.bounds();
+            let origin = Point::new(parent.x + b.x, parent.y + b.y);
+            if origin.y < 100. && b.width > 8. && b.width < 200. && b.height > 8. && b.height < 60.
+            {
+                points.push(Point::new(
+                    origin.x + b.width / 2.,
+                    origin.y + b.height / 2.,
+                ));
+            }
+            for child in node.children() {
+                collect(child, origin, points);
+            }
         }
-        for child in node.children() {
-            collect(child, origin, points);
+        collect(&node, Point::ORIGIN, &mut targets);
+        let mut messages = Vec::new();
+        for point in targets {
+            for event in [
+                mouse::Event::ButtonPressed(mouse::Button::Left),
+                mouse::Event::ButtonReleased(mouse::Button::Left),
+            ] {
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &iced::Event::Mouse(event),
+                    layout::Layout::new(&node),
+                    mouse::Cursor::Available(point),
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut iced::advanced::Shell::new(&mut messages),
+                    &bounds,
+                );
+            }
         }
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, Message::Jump(JumpMessage::Open(target, JumpField::Year)) if *target == if diary { crate::month_jump::JumpTarget::Diary } else { crate::month_jump::JumpTarget::Widget })));
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, Message::Jump(JumpMessage::Open(target, JumpField::Month)) if *target == if diary { crate::month_jump::JumpTarget::Diary } else { crate::month_jump::JumpTarget::Widget })));
+        assert!(!messages.iter().any(|m| matches!(m, Message::DragWidget)));
     }
-    collect(&node, Point::ORIGIN, &mut targets);
-    let mut messages = Vec::new();
-    for point in targets {
-        for event in [
-            mouse::Event::ButtonPressed(mouse::Button::Left),
-            mouse::Event::ButtonReleased(mouse::Button::Left),
-        ] {
-            element.as_widget_mut().update(
-                &mut tree,
-                &iced::Event::Mouse(event),
-                layout::Layout::new(&node),
-                mouse::Cursor::Available(point),
-                &renderer,
-                &mut iced::advanced::clipboard::Null,
-                &mut iced::advanced::Shell::new(&mut messages),
-                &bounds,
-            );
-        }
-    }
-    assert!(messages
-        .iter()
-        .any(|m| matches!(m, Message::Jump(JumpMessage::Open(JumpField::Year)))));
-    assert!(messages
-        .iter()
-        .any(|m| matches!(m, Message::Jump(JumpMessage::Open(JumpField::Month)))));
-    assert!(!messages.iter().any(|m| matches!(m, Message::DragWidget)));
 }
 
 #[test]
@@ -376,6 +383,7 @@ fn render_theme_previews() {
         app.widget_ui.jump = if name.starts_with("jump-") {
             Some(crate::month_jump::MonthJump {
                 window: jump_id,
+                target: crate::month_jump::JumpTarget::Widget,
                 focus: crate::month_jump::JumpField::Month,
                 year: "2025".into(),
                 month: "9".into(),
@@ -493,4 +501,123 @@ fn render_theme_previews() {
             .write_image_data(&rgba)
             .unwrap();
     }
+}
+
+#[test]
+fn diary_dates_select_once_and_create_new_event_on_double_click() {
+    for weekly in [false, true] {
+        let mut app = fixture();
+        app.month = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        app.week = NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+        let expected = "2026-09-27";
+        let size = Size::new(960., 640.);
+        let bounds = Rectangle::new(Point::ORIGIN, size);
+        let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut element = if weekly {
+            crate::views::week(&app)
+        } else {
+            crate::shell::calendar(&app)
+        };
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let point = if weekly {
+            Point::new(275., 30.)
+        } else {
+            Point::new(60., 56.)
+        };
+        let mut messages = Vec::new();
+        for click in 0..2 {
+            for event in [
+                mouse::Event::ButtonPressed(mouse::Button::Left),
+                mouse::Event::ButtonReleased(mouse::Button::Left),
+            ] {
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &iced::Event::Mouse(event),
+                    layout::Layout::new(&node),
+                    mouse::Cursor::Available(point),
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut iced::advanced::Shell::new(&mut messages),
+                    &bounds,
+                );
+            }
+            if click == 0 {
+                assert!(
+                    messages.iter().any(
+                        |m| matches!(m, Message::SelectDay(date) if date.to_string() == expected)
+                    ),
+                    "single click must select, weekly={weekly}: {messages:?}"
+                );
+                assert!(!messages.iter().any(|m| matches!(m, Message::New(..))));
+                messages.clear();
+            }
+        }
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| matches!(m, Message::New(Kind::Event, Some(date)) if date == expected))
+                .count(),
+            1,
+            "double click must create once, weekly={weekly}: {messages:?}"
+        );
+        drop(element);
+        for message in messages {
+            let _ = app.update(message);
+        }
+        let form = &app.editor.as_ref().unwrap().form;
+        assert_eq!(form.date, expected);
+        assert!(form.id.is_none());
+        assert!(!app.editor_in_quick);
+    }
+}
+
+#[test]
+fn diary_week_event_controls_do_not_trigger_date_creation() {
+    let mut app = fixture();
+    app.week = NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+    let mut form = Form::new(Kind::Event, app.week.to_string(), None);
+    form.title = "기존 일정".into();
+    form.save(app.store.as_ref().unwrap()).unwrap();
+    app.page = Page::Week;
+    app.snapshot = worker::snapshot(app.store.as_ref().unwrap(), &app.scope()).unwrap();
+    let size = Size::new(960., 640.);
+    let bounds = Rectangle::new(Point::ORIGIN, size);
+    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+    let mut element = crate::views::week(&app);
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, size),
+    );
+    let mut messages = Vec::new();
+    for _ in 0..2 {
+        for event in [
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(event),
+                layout::Layout::new(&node),
+                mouse::Cursor::Available(Point::new(280., 120.)),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &bounds,
+            );
+        }
+    }
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::ToggleEvent(_))),
+        "{messages:?}"
+    );
+    assert!(!messages.iter().any(|m| matches!(m, Message::New(..))));
 }

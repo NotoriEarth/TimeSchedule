@@ -282,7 +282,7 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
         })
     ]
     .align_y(Alignment::Center);
-    graph_paper(
+    mouse_area(graph_paper(
         column![
             header,
             row![
@@ -301,7 +301,10 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
         .spacing(7)
         .height(Length::Fill)
         .into(),
-    )
+    ))
+    .on_press(Message::SelectDay(date))
+    .on_double_click(Message::New(Kind::Event, Some(key)))
+    .into()
 }
 pub(crate) fn event_card<'a>(app: &'a App, event: &'a CalendarEvent) -> Element<'a, Message> {
     let expanded = app.expanded_events.contains(&event.id);

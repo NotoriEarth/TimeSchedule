@@ -8,6 +8,7 @@ mod icons;
 mod month_jump;
 #[cfg(all(test, windows))]
 mod native_alpha_tests;
+mod popup;
 mod quick_editor;
 mod shell;
 mod text_layout;
