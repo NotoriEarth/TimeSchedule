@@ -1,10 +1,10 @@
 # TimeSchedule
 
-## 최신 앱: TimeSchedule 0.7.0
+## 최신 앱: TimeSchedule 0.8.0
 
 대표 실행 파일은 **`artifacts/TimeSchedule.exe`** 하나입니다. Rust/Iced로 화면을 만들며 실행에 WebView/JavaScript 런타임이 필요하지 않습니다. 앱 설정·창 제목과 Windows 파일 속성에서 버전을 확인할 수 있습니다. [버전 규칙과 업데이트 이력](CHANGELOG.md)을 참고하세요.
 
-[0.7.0 검증 결과와 사용자 확인 순서](docs/release-0.7.0-verification.md)에 실행 파일 해시, 보관 위치와 확인 범위를 기록했습니다.
+[0.8.0 자동 기록 안내](docs/project-records.md)와 [검증 결과·사용자 확인 순서](docs/project-records-verification.md)를 참고하세요. [0.7.0 검증 기록](docs/release-0.7.0-verification.md)도 보존합니다.
 
 ```powershell
 .\scripts\build-native.ps1
@@ -16,6 +16,8 @@
 PR #2–#6의 Rust 이식·테마·위젯·편집·설정·연월 선택 변경은 사용자 승인 후 main에 병합했습니다. 기존 Tauri/Svelte 소스와 빌드 경로도 보존합니다. 두 앱은 공통 SQLite/Git 코어를 사용합니다.
 
 최신 앱에는 날짜 더블클릭 편집, 완료 체크, 배경 전용 투명도, 크기·표시 주 수·글꼴·색상 설정, Windows식 연도→월 선택, 위젯과 다이어리 공통 일정 폼이 포함됩니다.
+
+0.8.0은 Codex 작업 종료 시 Space에 개발 기록을 저장하고 다이어리에 원문 요약·링크를 전달하는 기능을 추가합니다. Space 내용은 PR 작성에 유용할 때만 재사용합니다. 기록용 CLI는 GPT-6 Luna medium을 사용하며 실제 저장 본문을 검증합니다. 중복·재시도 상태와 사용자 편집을 보존하고, 앱 편집 중에는 외부 기록 수신을 미룹니다. 자동 기록 실행에는 Node.js와 로그인된 Codex CLI·Pages 연결이 필요합니다.
 
 기존 수동 테스트 EXE는 `artifacts/archive/`에 보관합니다. 앞으로 빌드할 때도 `TimeSchedule.exe`를 교체하고 이전 파일은 보관하므로 실행할 파일 이름은 늘어나지 않습니다. 실행 중이면 저장 후 트레이에서 완전히 종료하고 빌드하세요. 빌드나 버전 검증 실패 시 기존 EXE를 교체하지 않습니다. 의존성이 준비된 환경에서는 `scripts/build-native.ps1 -Offline`을 사용할 수 있습니다.
 
