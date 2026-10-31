@@ -1,8 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
+mod calendar_viewport;
+mod desktop_widget;
 mod editor;
 mod frozen;
+mod icons;
+mod month_jump;
+#[cfg(all(test, windows))]
+mod native_alpha_tests;
+mod popup;
+mod quick_editor;
+mod shell;
+mod text_layout;
+mod theme;
 mod views;
+mod widget_appearance;
+mod widget_settings;
 mod worker;
 
 use app::App;
@@ -16,7 +29,11 @@ fn main() {
     if let Err(error) = iced::daemon(App::boot, App::update, App::view)
         .title(App::title)
         .default_font(Font::with_name("Malgun Gothic"))
-        .theme(|_: &App, _| iced::Theme::Light)
+        .theme(App::theme)
+        .style(|_, theme| iced::theme::Style {
+            background_color: iced::Color::TRANSPARENT,
+            text_color: theme.palette().text,
+        })
         .subscription(App::subscription)
         .run()
     {
