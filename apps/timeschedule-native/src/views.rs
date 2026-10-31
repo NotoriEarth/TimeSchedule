@@ -744,7 +744,7 @@ fn editor_view(app: &App) -> Element<'_, Message> {
     if form.kind != Kind::Task {
         let editor = text_editor(&e.content)
             .id("editor-body")
-            .height(if app.editor_in_quick { 100 } else { 220 })
+            .height(220)
             .placeholder("생각과 기록을 자유롭게 적어 보세요.")
             .on_action(Message::Body)
             .key_binding(editor_binding);

@@ -625,11 +625,19 @@ fn diary_week_event_controls_do_not_trigger_date_creation() {
 
 #[test]
 fn widget_and_diary_event_forms_share_panel_geometry() {
-    use iced::advanced::widget::{operation::TextInput, Id, Operation};
-    struct InputBounds(Option<Rectangle>);
+    use iced::advanced::widget::{
+        operation::{Focusable, TextInput},
+        Id, Operation,
+    };
+    struct InputBounds(Option<Rectangle>, Option<Rectangle>);
     impl Operation for InputBounds {
         fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
             operate(self);
+        }
+        fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn Focusable) {
+            if id == Some(&Id::new("editor-body")) {
+                self.1 = Some(bounds);
+            }
         }
         fn text_input(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn TextInput) {
             if id == Some(&Id::new("editor-title")) {
@@ -660,19 +668,24 @@ fn widget_and_diary_event_forms_share_panel_geometry() {
             &renderer,
             &layout::Limits::new(Size::ZERO, size),
         );
-        let mut probe = InputBounds(None);
+        let mut probe = InputBounds(None, None);
         element.as_widget_mut().operate(
             &mut tree,
             layout::Layout::new(&node),
             &renderer,
             &mut probe,
         );
-        let mut b = probe.0.expect("real title input exists");
-        if !quick {
-            b.x -= 255.;
-            b.y -= 130.;
+        let mut fields = [
+            probe.0.expect("real title input exists"),
+            probe.1.expect("real body editor exists"),
+        ];
+        for field in &mut fields {
+            if !quick {
+                field.x -= 255.;
+                field.y -= 130.;
+            }
         }
-        inputs.push(b);
+        inputs.push(fields);
     }
     assert_eq!(
         inputs[0], inputs[1],

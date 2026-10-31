@@ -17,6 +17,8 @@
 
 `codex/widget-customization`에서는 위젯 크기·표시 주 수·글꼴·간격·테마별 색상을 설정할 수 있습니다. 상단 년/월을 누르면 두 값을 함께 바꾸는 이동창이 열립니다. 테스트 파일은 `artifacts/TimeSchedule-widget-customization.exe`이며, [사용 방법과 검증 범위](docs/widget-customization-verification.md)를 참고하세요.
 
+다이어리 연월 이동·날짜 더블클릭·원본 창 중앙 배치·공통 일정 폼의 최신 테스트 파일은 `artifacts/TimeSchedule-diary-navigation.exe`입니다. [검증 및 테스트 방법](docs/diary-navigation-verification.md)을 참고하세요.
+
 ## 기존 Tauri 앱
 
 

@@ -1,5 +1,7 @@
 # 바탕화면 위젯 크기·표시 기간·디자인·연월 이동
 
+후속 수정과 최신 실행 파일은 [다이어리·팝업·공통 폼 검증](diary-navigation-verification.md)을 참고한다.
+
 2026-10-31, `codex/widget-customization`. 기반은 우선 기능 PR #5의 `3307e0c`이며, 이 PR 위에 쌓는 변경이다. Rust/Iced 네이티브 앱에 적용한다.
 
 ## 적용 내용
