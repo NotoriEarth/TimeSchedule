@@ -44,6 +44,8 @@ node scripts/project-records.mjs status
 
 기록용 `codex exec`는 GPT-6 Luna medium을 명시하고 주어진 원문을 저장한다. 모델의 완료 선언만 믿지 않고 실제 Pages `read_page` 실행 결과의 제목·전체 본문·부모 위치·URL과 부모 페이지의 링크를 검사한다. 한 실행은 최대 3분, 출력은 8MiB로 제한한다. 변경 없는 기록이나 다이어리만 재시도할 때는 모델을 호출하지 않는다.
 
+Windows에서는 전달 상태 폴더별 OS named pipe 잠금으로 동시 실행을 막는다. 프로세스가 종료되면 잠금도 해제되며 오래된 PID 파일을 삭제하는 복구 절차는 사용하지 않는다.
+
 | 상태 | 의미와 후속 조치 |
 |---|---|
 | prepared | 원문 준비 완료. sync가 Space 저장을 시작한다. |
