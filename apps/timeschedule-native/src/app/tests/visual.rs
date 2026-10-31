@@ -360,6 +360,11 @@ fn render_theme_previews() {
             Size::new(800.0, 620.0),
         ),
     ] {
+        if std::env::var("TIMESCHEDULE_PREVIEW_FILTER")
+            .is_ok_and(|filter| !filter.split(',').any(|part| name == part))
+        {
+            continue;
+        }
         app.preferences.theme = mode;
         app.preferences.widget = Default::default();
         app.preferences.widget_locked = !name.starts_with("desktopcal-");

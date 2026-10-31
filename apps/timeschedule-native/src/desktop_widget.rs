@@ -27,6 +27,37 @@ const WEEKDAYS: [&str; 7] = [
     "토요일",
 ];
 
+fn date_label(
+    date: chrono::NaiveDate,
+    outside: bool,
+    width: f32,
+    size: f32,
+    font: iced::Font,
+) -> String {
+    let long = format!("{}/1", date.month());
+    if outside
+        && date.day() == 1
+        && crate::text_layout::text_width_with_font(&long, size, font) + 8.0 <= width
+    {
+        long
+    } else {
+        date.day().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn enlarged_month_boundary_label_uses_measured_width() {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let font = crate::widget_appearance::font("Arial");
+        let label = super::date_label(date, true, 54., 32., font);
+        assert_eq!(label, "1");
+        assert!(crate::text_layout::text_width_with_font(&label, 32., font) + 8. <= 54.);
+        assert_eq!(super::date_label(date, true, 100., 32., font), "10/1");
+    }
+}
+
 fn control<'a>(label: &'a str, message: Message) -> iced::widget::Button<'a, Message> {
     button(text(label).size(12))
         .padding([5, 8])
@@ -88,10 +119,14 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
     let today = Local::now().date_naive();
     let heading_size = if width < 420.0 { 20 } else { 24 };
     let heading = column![
-        text(today.format("%Y년 %m월 %d일").to_string())
-            .size(11)
-            .font(font)
-            .color(p.muted),
+        text(format!(
+            "{} · 일정 {}개",
+            today.format("%Y년 %m월 %d일"),
+            app.snapshot.today_events.len()
+        ))
+        .size(11)
+        .font(font)
+        .color(p.muted),
         row![
             button(
                 text(format!("{}년", app.widget_month.year()))
@@ -176,13 +211,9 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
             let content = responsive(move |size| {
                 let mut date_row = row![
                     container(
-                        text(if outside && date.day() == 1 && size.width >= 45.0 {
-                            format!("{}/1", date.month())
-                        } else {
-                            date.day().to_string()
-                        })
-                        .size(a.date_size)
-                        .font(font)
+                        text(date_label(date, outside, size.width, a.date_size, font))
+                            .size(a.date_size)
+                            .font(font)
                     )
                     .padding([0, 4])
                     .height(a.date_height)
@@ -236,7 +267,7 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
                             time,
                             event.title
                         );
-                        let ink = theme::event_color(p, &event.color);
+                        let ink = a.event_color(&event.color);
                         let completion_enabled = !app.busy && !app.loading && app.editor.is_none();
                         let completion_id = event.id.clone();
                         let completed = event.completed;

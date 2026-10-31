@@ -15,25 +15,27 @@ Preserve previous PR behavior, user data, drafts, themes and Tauri compatibility
 
 Files: core `dates.rs`, desktop `preferences.rs` and new `widget_preferences.rs`, native `calendar_viewport.rs`.
 Interface: `calendar_range(anchor, weeks: Option<(u8,u8)>) -> Result<WeekRange,String>`; serializable `WidgetPreferences` defaulting monthly, 960×640, 4 rolling weeks/0 past, original typography; per-theme RGB overrides. Runtime anchor/follow state belongs to native module.
-- [ ] Add failing date-range and JSON compatibility/validation tests; run core/desktop tests, observe missing behavior.
-- [ ] Implement bounded date range and validated preferences. Run the same tests green.
+- [x] Add failing date-range and JSON compatibility/validation tests; run core/desktop tests, observe missing behavior.
+- [x] Implement bounded date range and validated preferences. Run the same tests green.
 
 ## Task 2: Native behavior and controls
 
 Files: native `widget_settings.rs`, `month_jump.rs`, `app.rs`, `views.rs`, `main.rs`; desktop `windows.rs`.
 Interface: nested widget-settings messages; popup fields/selection/draft local to `MonthJump`; `windows::resize_logical` and `logical_size`; app computes widget scope from the shared viewport.
-- [ ] Add failing app regressions for range/scope, appearance without reload, year/month initialization/apply/cancel, locked sizing; run native tests.
-- [ ] Implement range selection, settings controls, year/month popup and safe numeric resizing/grip. Reuse serialized preference writes and stale-generation protection.
-- [ ] Exercise native logical resizing/lock through the existing real child-window fixture. Run workspace and Windows fixtures green.
+- [x] Add failing app regressions for range/scope, appearance without reload, year/month initialization/apply/cancel, locked sizing; run native tests.
+- [x] Implement range selection, settings controls, year/month popup and safe numeric resizing/grip. Reuse serialized preference writes and stale-generation protection.
+- [x] Exercise native logical resizing/lock through the existing real child-window fixture. Run workspace and Windows fixtures green.
 
 ## Task 3: Rendering and delivery
 
 Files: native `desktop_widget.rs`, `widget_appearance.rs`, `text_layout.rs`, `app/tests/visual.rs`; delivery docs.
-- [ ] Extend real renderer tests for custom font metrics, variable rows/dense settings, selected date and separate heading buttons. Run red then implement shared appearance and dynamic grid.
-- [ ] Generate/inspect preview PNGs (dark/light, popup, small/dense/week modes); format/check, full tests, final release and isolated smoke test.
-- [ ] Fresh whole-branch review; reproduce/fix material findings, rerun relevant checks.
+- [x] Extend real renderer tests for custom font metrics, variable rows/dense settings, selected date and separate heading buttons. Run red then implement shared appearance and dynamic grid.
+- [x] Generate/inspect preview PNGs (dark/light, popup, small/dense/week modes); format/check, full tests, final release and isolated smoke test.
+- [x] Fresh whole-branch review; reproduce/fix material findings, rerun relevant checks.
 - [ ] Commit/push, create PR stacked on `codex/desktopcal-priority-features`, attach to chat, provide EXE/test steps. No merge.
 
 ## Execution record
 
 User has approved implementation of the discussed design and supplied the popup interaction. Use the existing clean checkout/task branch to retain local build caches. Logs and execution ledger live under ignored `artifacts/widget-customization/` on this Windows workspace.
+
+Completed implementation and one independent review/fix pass. All four review findings are covered by regressions. Workspace: 80 passed, 2 explicitly ignored; Windows fixture: 1 passed. All 19 previews passed in six filtered batches after the monolithic preview process was observed with all threads Suspended. Live pointer, OS focus/IME and multi-monitor behavior remain manual checks in docs/widget-customization-verification.md.

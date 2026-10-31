@@ -46,8 +46,10 @@ pub fn hex(color: Color) -> String {
         (color.b * 255.).round() as u8
     )
 }
+#[derive(Clone, Copy)]
 pub struct Appearance {
     pub colors: Colors,
+    event_colors: Colors,
     pub font: Font,
     pub date_size: f32,
     pub event_size: f32,
@@ -57,6 +59,9 @@ pub struct Appearance {
     pub padding: f32,
 }
 impl Appearance {
+    pub fn event_color(&self, key: &str) -> Color {
+        theme::event_color(self.event_colors, key)
+    }
     pub fn resolve(prefs: &Preferences) -> Self {
         let w = &prefs.widget;
         let mut p = theme::palette(prefs.theme);
@@ -93,6 +98,7 @@ impl Appearance {
         }
         Self {
             colors: p,
+            event_colors: theme::palette(prefs.theme),
             font: font(&w.font),
             date_size: w.date_size.into(),
             event_size: w.event_size.into(),
@@ -101,5 +107,21 @@ impl Appearance {
             gap: w.cell_gap.into(),
             padding: w.cell_padding.into(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn weekend_overrides_do_not_recolor_events() {
+        let mut prefs = Preferences::default();
+        let before = Appearance::resolve(&prefs);
+        prefs.widget.dark.saturday = Some("#00FF00".into());
+        prefs.widget.dark.sunday = Some("#FFFF00".into());
+        let after = Appearance::resolve(&prefs);
+        assert_ne!(after.colors.blue, before.colors.blue);
+        assert_eq!(after.event_color("blue"), before.event_color("blue"));
+        assert_eq!(after.event_color("rose"), before.event_color("rose"));
     }
 }

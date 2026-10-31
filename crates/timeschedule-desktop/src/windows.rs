@@ -589,7 +589,7 @@ mod native {
         }
         let property = wide(super::PER_PIXEL_ALPHA_PROPERTY);
         if unsafe { GetPropW(handle, property.as_ptr()) } != 0 {
-            return Ok(());
+            return configure_native_sizing(handle);
         }
         let previous = unsafe { GetWindowLongW(handle, GWL_EXSTYLE) } as u32;
         // Clear any constant-alpha redirection, then opt into the presenter.
@@ -599,6 +599,35 @@ mod native {
             let failure = error("SetPropW(per-pixel alpha)");
             set_style(handle, GWL_EXSTYLE, previous)?;
             return Err(failure);
+        }
+        configure_native_sizing(handle)
+    }
+
+    fn configure_native_sizing(hwnd: Hwnd) -> Result<(), String> {
+        require_ui_thread(hwnd)?;
+        let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+        if style & WS_CHILD == 0
+            || unsafe { GetPropW(hwnd, wide(super::PER_PIXEL_ALPHA_PROPERTY).as_ptr()) } == 0
+        {
+            return Err("네이티브 바탕화면 위젯만 크기 조정 프레임을 사용할 수 있습니다.".into());
+        }
+        // WM_NCCALCSIZE below keeps the entire window as client area. Retain
+        // WS_THICKFRAME so DefWindowProc can actually enter the OS size loop.
+        // Never use winit's style setters: they still cache a top-level window.
+        set_style(hwnd, GWL_STYLE, style | WS_THICKFRAME)?;
+        if unsafe {
+            SetWindowPos(
+                hwnd,
+                0,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            )
+        } == 0
+        {
+            return Err(error("SetWindowPos(native sizing frame)"));
         }
         Ok(())
     }
@@ -1426,6 +1455,12 @@ mod native {
         _: usize,
         _: usize,
     ) -> isize {
+        if message == 0x0083 && GetPropW(hwnd, wide(super::PER_PIXEL_ALPHA_PROPERTY).as_ptr()) != 0
+        {
+            // Preserve a borderless client while retaining the native sizing style.
+            // https://learn.microsoft.com/en-us/windows/win32/winmsg/wm-nccalcsize
+            return 0;
+        }
         if message == 0x0082 {
             // WM_NCDESTROY; Explorer can destroy its children.
             KillTimer(hwnd, RECOVERY_TIMER_ID);
@@ -1891,6 +1926,23 @@ mod native {
                 .moving = false;
             let marker = wide(super::super::PER_PIXEL_ALPHA_PROPERTY);
             assert_ne!(unsafe { SetPropW(windows.widget, marker.as_ptr(), 1) }, 0);
+            configure_native_sizing(windows.widget).unwrap();
+            let sizing_style = unsafe { GetWindowLongW(windows.widget, GWL_STYLE) } as u32;
+            assert_ne!(
+                sizing_style & WS_THICKFRAME,
+                0,
+                "custom grip must be able to start the OS sizing loop"
+            );
+            assert_ne!(sizing_style & WS_CHILD, 0);
+            assert_eq!(sizing_style & (WS_POPUP | WS_CAPTION), 0);
+            let outer = rect(windows.widget).unwrap();
+            let mut client = Rect::default();
+            assert_ne!(unsafe { GetClientRect(windows.widget, &mut client) }, 0);
+            assert_eq!(
+                (client.right, client.bottom),
+                (outer.right - outer.left, outer.bottom - outer.top),
+                "resizing style must not add a visible frame"
+            );
             let mut sizing = Rect {
                 left: 0,
                 top: 0,

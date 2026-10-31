@@ -569,7 +569,9 @@ impl App {
                 opacity: info.opacity_percent,
                 visible,
                 position,
-                size: if info.attached && !info.locked {
+                size: if info.attached
+                    && matches!(action, NativeAction::Resize(..) | NativeAction::Lock(true))
+                {
                     windows::logical_size(&owned).ok().flatten()
                 } else {
                     None
@@ -724,7 +726,26 @@ impl App {
             }
             Message::Resized(id, size) if id == self.manager => self.manager_size = size,
             Message::Resized(id, size) if Some(id) == self.widget => {
-                self.widget_ui.actual_size = size
+                self.widget_ui.actual_size = size;
+                // Iced reports logical client dimensions. Capture the last
+                // user resize immediately; debounce disk writes, not the data.
+                // Locked monitor recovery must not replace the preferred size.
+                let (width, height) = (size.width.round() as u32, size.height.round() as u32);
+                if self.widget_attached
+                    && !self.preferences.widget_locked
+                    && (320..=3840).contains(&width)
+                    && (220..=2160).contains(&height)
+                    && (width, height)
+                        != (
+                            self.preferences.widget.width,
+                            self.preferences.widget.height,
+                        )
+                {
+                    self.preferences.widget.width = width;
+                    self.preferences.widget.height = height;
+                    self.widget_ui.save_due =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
+                }
             }
             Message::Ready(id) => self.log(&format!("manager ready {id:?}")),
             Message::WidgetReady(id) => {
@@ -1689,6 +1710,49 @@ mod tests {
         assert!(app.update(Message::ResizeWidget).units() > 0);
     }
     #[test]
+    fn final_resize_is_saved_before_immediate_lock_or_quit() {
+        let mut app = fixture();
+        let id = window::Id::unique();
+        app.widget = Some(id);
+        app.widget_attached = true;
+        app.preferences.widget_locked = false;
+        let _ = app.update(Message::Resized(id, Size::new(740., 480.)));
+        assert_eq!(
+            (app.preferences.widget.width, app.preferences.widget.height),
+            (740, 480)
+        );
+        assert!(app.widget_ui.save_due.is_some());
+        // There has been no polling message between the resize and the lock.
+        let _ = app.update(Message::NativeDone(
+            NativeAction::Lock(true),
+            Ok(NativeReport {
+                attached: true,
+                message: String::new(),
+                locked: true,
+                opacity: None,
+                visible: None,
+                position: None,
+                size: None,
+            }),
+        ));
+        assert_eq!(
+            (app.preferences.widget.width, app.preferences.widget.height),
+            (740, 480)
+        );
+        app.preferences.widget_locked = false;
+        let _ = app.update(Message::Resized(id, Size::new(760., 490.)));
+        let _ = app.update(Message::Quit);
+        assert!(
+            app.quit_when_idle,
+            "quit waits for the last geometry preference save"
+        );
+        assert!(app.widget_ui.save_due.is_none());
+        assert_eq!(
+            (app.preferences.widget.width, app.preferences.widget.height),
+            (760, 490)
+        );
+    }
+    #[test]
     fn appearance_overrides_are_per_theme_and_invalid_inputs_do_not_replace_settings() {
         use crate::widget_settings::{Change, ColorRole};
         let mut app = fixture();
@@ -1764,6 +1828,21 @@ mod tests {
                 check(&node, 0.0, size.width);
             }
         }
+        // Outside-month 10/1 must fit the selected large font, not a fixed threshold.
+        app.widget_month = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        app.preferences.widget.font = "Arial".into();
+        app.preferences.widget.date_size = 32;
+        app.preferences.widget.cell_gap = 0;
+        app.preferences.widget.cell_padding = 0;
+        let size = Size::new(400., 500.);
+        let mut element = app.view(widget);
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        check(&node, 0., size.width);
     }
     #[test]
     fn dense_calendar_keeps_chips_within_short_rows() {

@@ -15,7 +15,10 @@
 
 `codex/desktopcal-priority-features`에서는 바탕화면 날짜 더블클릭 빠른 편집, 위젯 완료 체크, 글자 선명도를 유지하는 배경 투명도를 추가합니다. 테스트 실행 파일은 `artifacts/TimeSchedule-desktopcal-priority.exe`이며, [검증 결과와 직접 확인할 순서](docs/desktopcal-priority-verification.md)를 참고하세요. 실제 바탕화면 조작은 사용자 테스트 후 머지합니다.
 
+`codex/widget-customization`에서는 위젯 크기·표시 주 수·글꼴·간격·테마별 색상을 설정할 수 있습니다. 상단 년/월을 누르면 두 값을 함께 바꾸는 이동창이 열립니다. 테스트 파일은 `artifacts/TimeSchedule-widget-customization.exe`이며, [사용 방법과 검증 범위](docs/widget-customization-verification.md)를 참고하세요.
+
 ## 기존 Tauri 앱
+
 
 오늘의 일정과 작은 할 일을 정리하는 Windows용 개인 달력 프로토타입입니다. Tauri 2, Svelte 5, TypeScript, Rust, SQLite로 구성하며, 계정이나 서버 없이 내 컴퓨터에 데이터를 저장합니다.
 
