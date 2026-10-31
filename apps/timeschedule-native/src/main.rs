@@ -1,9 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
+mod calendar_viewport;
 mod desktop_widget;
 mod editor;
 mod frozen;
 mod icons;
+mod month_jump;
 #[cfg(all(test, windows))]
 mod native_alpha_tests;
 mod quick_editor;
@@ -11,6 +13,8 @@ mod shell;
 mod text_layout;
 mod theme;
 mod views;
+mod widget_appearance;
+mod widget_settings;
 mod worker;
 
 use app::App;

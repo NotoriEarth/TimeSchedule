@@ -101,6 +101,7 @@ pub enum NativeAction {
     Lock(bool),
     Opacity(u8),
     Position,
+    Resize(u32, u32),
 }
 #[derive(Clone, Debug)]
 pub struct NativeReport {
@@ -110,9 +111,13 @@ pub struct NativeReport {
     pub opacity: Option<u8>,
     pub visible: Option<bool>,
     pub position: Option<(i32, i32)>,
+    pub size: Option<(u32, u32)>,
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    WidgetSetting(crate::widget_settings::Change),
+    Jump(crate::month_jump::JumpMessage),
+    ResizeWidget,
     ToggleTheme,
     Resized(window::Id, Size),
     Ready(window::Id),
@@ -181,6 +186,7 @@ pub enum Message {
 }
 
 pub struct App {
+    pub widget_ui: crate::widget_settings::State,
     pub manager: window::Id,
     pub manager_size: Size,
     pub widget: Option<window::Id>,
@@ -294,6 +300,7 @@ impl App {
             errors.push(error.clone());
         }
         let mut app = Self {
+            widget_ui: crate::widget_settings::State::new(&prefs, today),
             manager,
             manager_size: Size::new(1160.0, 820.0),
             widget: None,
@@ -362,7 +369,11 @@ impl App {
                 self.quick_date.map(|d| d.to_string()).unwrap_or_default()
             )
         } else {
-            "TimeSchedule Native · 만년 다이어리".into()
+            if self.widget_ui.jump.as_ref().is_some_and(|j| j.window == id) {
+                "TimeSchedule · 연·월 이동".into()
+            } else {
+                "TimeSchedule Native · 만년 다이어리".into()
+            }
         }
     }
     pub fn log(&self, value: &str) {
@@ -416,7 +427,7 @@ impl App {
     }
     pub fn scope(&self) -> Scope {
         let days = calendar_days(self.month);
-        let widget_days = calendar_days(self.widget_month);
+        let widget_range = self.widget_range();
         let (event_from, event_to) = if self.page == Page::Week {
             (self.week, self.week + Duration::days(6))
         } else {
@@ -432,8 +443,8 @@ impl App {
             to,
             event_from: event_from.to_string(),
             event_to: event_to.to_string(),
-            widget_from: widget_days[0].to_string(),
-            widget_to: widget_days[41].to_string(),
+            widget_from: widget_range.from.to_string(),
+            widget_to: widget_range.to.to_string(),
             today: Local::now().date_naive().to_string(),
             project: if self.page == Page::Projects {
                 self.project.clone()
@@ -468,11 +479,16 @@ impl App {
         if self.widget.is_some() {
             return Task::none();
         }
-        let (id, open) = window::open(widget_window_settings());
+        let mut settings = widget_window_settings();
+        settings.size = Size::new(
+            self.preferences.widget.width as f32,
+            self.preferences.widget.height as f32,
+        );
+        let (id, open) = window::open(settings);
         self.widget = Some(id);
         open.map(Message::WidgetReady)
     }
-    fn native(&mut self, action: NativeAction) -> Task<Message> {
+    pub(crate) fn native(&mut self, action: NativeAction) -> Task<Message> {
         if let NativeAction::Opacity(value) = action {
             if (40..=100).contains(&value) {
                 self.preferences.widget_opacity = value;
@@ -536,6 +552,9 @@ impl App {
                 NativeAction::Lock(value) => windows::set_locked(&owned, value)?,
                 NativeAction::Opacity(_) => unreachable!("background opacity is a UI preference"),
                 NativeAction::Position => {}
+                NativeAction::Resize(width, height) => {
+                    windows::resize_logical(&owned, width, height)?
+                }
             }
             let info = windows::status(&owned)?;
             let position = if info.attached {
@@ -550,11 +569,17 @@ impl App {
                 opacity: info.opacity_percent,
                 visible,
                 position,
+                size: if info.attached && !info.locked {
+                    windows::logical_size(&owned).ok().flatten()
+                } else {
+                    None
+                },
             })
         })
         .map(move |result| Message::NativeDone(action, result))
     }
-    fn save_preferences(&mut self) -> Task<Message> {
+    pub(crate) fn save_preferences(&mut self) -> Task<Message> {
+        self.widget_ui.save_due = None;
         if self._instance.is_none() {
             return Task::none();
         }
@@ -618,6 +643,10 @@ impl App {
         }
     }
     fn exit_when_idle(&mut self) -> Task<Message> {
+        if self.widget_ui.save_due.is_some() {
+            self.quit_when_idle = true;
+            return self.save_preferences();
+        }
         if self.busy || self.prefs_saving || self.native_busy {
             self.quit_when_idle = true;
             self.notice = "진행 중인 저장·Git·설정 작업을 마친 뒤 종료합니다.".into();
@@ -635,6 +664,16 @@ impl App {
         .chain(window::gain_focus(self.manager))
     }
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if let Message::CloseWindow(id) | Message::EscapeWindow(id) = &message {
+            if self
+                .widget_ui
+                .jump
+                .as_ref()
+                .is_some_and(|j| j.window == *id)
+            {
+                return self.jump_message(crate::month_jump::JumpMessage::Cancel);
+            }
+        }
         // Background completions are allowed during modals; all unrelated user edits are blocked.
         if self
             .editor
@@ -668,20 +707,34 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::WidgetSetting(change) => return self.widget_setting(change),
+            Message::Jump(change) => return self.jump_message(change),
+            Message::ResizeWidget if !self.preferences.widget_locked && !self.native_busy => {
+                if let Some(id) = self.widget {
+                    return window::drag_resize(id, window::Direction::SouthEast);
+                }
+            }
             Message::ToggleTheme => {
                 self.preferences.theme = match self.preferences.theme {
                     AppTheme::Midnight => AppTheme::Porcelain,
                     AppTheme::Porcelain => AppTheme::Midnight,
                 };
+                self.sync_color_draft();
                 return self.save_preferences();
             }
             Message::Resized(id, size) if id == self.manager => self.manager_size = size,
+            Message::Resized(id, size) if Some(id) == self.widget => {
+                self.widget_ui.actual_size = size
+            }
             Message::Ready(id) => self.log(&format!("manager ready {id:?}")),
             Message::WidgetReady(id) => {
                 self.log(&format!("widget ready {id:?}"));
                 return self.native(NativeAction::Attach);
             }
             Message::WindowClosed(id) => {
+                if self.widget_ui.jump.as_ref().is_some_and(|j| j.window == id) {
+                    self.widget_ui.jump = None;
+                }
                 if Some(id) == self.quick_window {
                     // Preserve an unexpected-close draft in the manager.
                     self.quick_window = None;
@@ -737,9 +790,18 @@ impl App {
                         }
                     };
                 }
-                if self.ticks % 10 == 0 && !self.native_busy && self.widget.is_some() {
-                    return self.native(NativeAction::Position);
+                let mut tasks = vec![self.widget_today_changed()];
+                if self
+                    .widget_ui
+                    .save_due
+                    .is_some_and(|due| due <= std::time::Instant::now())
+                {
+                    tasks.push(self.save_preferences());
                 }
+                if self.ticks % 2 == 0 && !self.native_busy && self.widget.is_some() {
+                    tasks.push(self.native(NativeAction::Position));
+                }
+                return Task::batch(tasks);
             }
             Message::Navigate(page) if self.editor.is_none() => {
                 self.page = page;
@@ -767,6 +829,8 @@ impl App {
                 self.month = self.selected.with_day(1).unwrap();
                 self.week = week_containing(self.selected).from;
                 self.widget_month = self.month;
+                self.widget_ui.anchor = self.selected;
+                self.widget_ui.follow_today = true;
                 return self.refresh();
             }
             Message::OpenWeek(sunday) if self.editor.is_none() => match week_after_sunday(sunday) {
@@ -784,12 +848,18 @@ impl App {
                 self.selected = date;
             }
             Message::WidgetMonth(delta) => {
-                self.widget_month = shift_month(self.widget_month, delta);
-                return self.refresh();
+                let date = if self.preferences.widget.rolling {
+                    self.widget_ui
+                        .anchor
+                        .checked_add_signed(Duration::weeks(i64::from(delta)))
+                        .unwrap_or(self.widget_ui.anchor)
+                } else {
+                    shift_month(self.widget_month, delta)
+                };
+                return self.jump_widget(date, false);
             }
             Message::WidgetToday => {
-                self.widget_month = Local::now().date_naive().with_day(1).unwrap();
-                return self.refresh();
+                return self.jump_widget(Local::now().date_naive(), true);
             }
             Message::WidgetDate(date) => {
                 return self.open_quick(date);
@@ -1220,6 +1290,8 @@ impl App {
                             self.preferences.widget_locked,
                             self.preferences.widget_visible,
                             self.preferences.widget_opacity,
+                            self.preferences.widget.width,
+                            self.preferences.widget.height,
                         );
                         self.desktop_message = report.message;
                         self.widget_attached = report.attached;
@@ -1236,12 +1308,22 @@ impl App {
                             self.preferences.widget_x = Some(x);
                             self.preferences.widget_y = Some(y);
                         }
+                        if let Some((width, height)) = report.size {
+                            self.preferences.widget.width = width.clamp(320, 3840);
+                            self.preferences.widget.height = height.clamp(220, 2160);
+                            if matches!(action, NativeAction::Resize(..)) {
+                                self.widget_ui.width = self.preferences.widget.width.to_string();
+                                self.widget_ui.height = self.preferences.widget.height.to_string();
+                            }
+                        }
                         let after = (
                             self.preferences.widget_x,
                             self.preferences.widget_y,
                             self.preferences.widget_locked,
                             self.preferences.widget_visible,
                             self.preferences.widget_opacity,
+                            self.preferences.widget.width,
+                            self.preferences.widget.height,
                         );
                         if before != after {
                             save = self.save_preferences();
@@ -1322,6 +1404,7 @@ mod tests {
     fn fixture() -> App {
         let date = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
         App {
+            widget_ui: crate::widget_settings::State::new(&Preferences::default(), date),
             manager: window::Id::unique(),
             manager_size: Size::new(1160.0, 820.0),
             widget: None,
@@ -1371,6 +1454,62 @@ mod tests {
             quit_when_idle: false,
             native_pending: None,
         }
+    }
+
+    #[test]
+    fn customization_range_matches_queries_and_appearance_does_not_reload() {
+        let mut app = fixture();
+        app.widget_month = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+        assert_eq!(app.scope().widget_to, "2026-02-28");
+        let generation = app.view_generation;
+        let _ = app.update(Message::WidgetSetting(
+            crate::widget_settings::Change::EventSize(18),
+        ));
+        assert_eq!(app.preferences.widget.event_size, 18);
+        assert_eq!(app.view_generation, generation);
+        let _ = app.update(Message::WidgetSetting(
+            crate::widget_settings::Change::Rolling(true),
+        ));
+        let _ = app.update(Message::WidgetSetting(
+            crate::widget_settings::Change::Weeks(2),
+        ));
+        let _ = app.update(Message::WidgetSetting(
+            crate::widget_settings::Change::Past(2),
+        ));
+        assert_eq!(app.preferences.widget.past_weeks, 1);
+        let days = app.widget_days();
+        assert_eq!(days.len(), 14);
+        assert_eq!(app.scope().widget_from, days[0].to_string());
+        assert_eq!(app.scope().widget_to, days.last().unwrap().to_string());
+    }
+
+    #[test]
+    fn month_jump_focus_cancel_validation_and_draft_preservation() {
+        use crate::month_jump::{JumpField, JumpMessage};
+        let mut app = fixture();
+        app.widget_month = NaiveDate::from_ymd_opt(2025, 9, 1).unwrap();
+        let _ = app.update(Message::Jump(JumpMessage::Open(JumpField::Month)));
+        let jump = app.widget_ui.jump.as_ref().unwrap();
+        assert_eq!((jump.year.as_str(), jump.month.as_str()), ("2025", "9"));
+        assert_eq!(jump.focus, JumpField::Month);
+        let _ = app.update(Message::Jump(JumpMessage::Month("13".into())));
+        let _ = app.update(Message::Jump(JumpMessage::Apply));
+        assert!(app.widget_ui.jump.as_ref().unwrap().error.len() > 0);
+        assert_eq!(app.widget_month.month(), 9);
+        let _ = app.update(Message::Jump(JumpMessage::Cancel));
+        assert!(app.widget_ui.jump.is_none());
+        let _ = app.update(Message::New(Kind::Event, None));
+        let _ = app.update(Message::Field(Field::Title("미저장 원문".into())));
+        let _ = app.update(Message::Jump(JumpMessage::Open(JumpField::Year)));
+        let _ = app.update(Message::Jump(JumpMessage::Year("2028".into())));
+        let _ = app.update(Message::Jump(JumpMessage::Month("2".into())));
+        let _ = app.update(Message::Jump(JumpMessage::Apply));
+        assert_eq!(
+            app.widget_month,
+            NaiveDate::from_ymd_opt(2028, 2, 1).unwrap()
+        );
+        assert!(!app.widget_ui.follow_today);
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "미저장 원문");
     }
     fn hit(title: &str) -> SearchHit {
         SearchHit {
@@ -1544,8 +1683,32 @@ mod tests {
         app.widget = Some(window::Id::unique());
         assert!(app.preferences.widget_locked);
         assert_eq!(app.update(Message::DragWidget).units(), 0);
+        assert_eq!(app.update(Message::ResizeWidget).units(), 0);
         app.preferences.widget_locked = false;
         assert!(app.update(Message::DragWidget).units() > 0);
+        assert!(app.update(Message::ResizeWidget).units() > 0);
+    }
+    #[test]
+    fn appearance_overrides_are_per_theme_and_invalid_inputs_do_not_replace_settings() {
+        use crate::widget_settings::{Change, ColorRole};
+        let mut app = fixture();
+        let _ = app.update(Message::WidgetSetting(Change::ColorRole(ColorRole::Text)));
+        let _ = app.update(Message::WidgetSetting(Change::ColorText("#ABCDEF".into())));
+        let _ = app.update(Message::WidgetSetting(Change::ApplyColor));
+        assert_eq!(app.preferences.widget.dark.text.as_deref(), Some("#ABCDEF"));
+        let _ = app.update(Message::ToggleTheme);
+        assert!(app.preferences.widget.light.text.is_none());
+        let _ = app.update(Message::WidgetSetting(Change::ColorText("#12zz00".into())));
+        let _ = app.update(Message::WidgetSetting(Change::ApplyColor));
+        assert!(app.preferences.widget.light.text.is_none());
+        assert!(!app.widget_ui.error.is_empty());
+        app.preferences.widget_locked = false;
+        let _ = app.update(Message::WidgetSetting(Change::Width("9999".into())));
+        assert_eq!(
+            app.update(Message::WidgetSetting(Change::Resize)).units(),
+            0
+        );
+        assert_eq!(app.preferences.widget.width, 960);
     }
     #[test]
     fn fitted_widget_keeps_dense_day_content_inside_cells() {

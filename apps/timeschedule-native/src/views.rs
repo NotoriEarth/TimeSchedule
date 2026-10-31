@@ -82,6 +82,9 @@ fn graph_paper<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
 }
 
 pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
+    if app.widget_ui.jump.as_ref().is_some_and(|j| j.window == id) {
+        return crate::month_jump::view(app);
+    }
     if Some(id) == app.widget {
         return crate::desktop_widget::view(app);
     }
@@ -620,6 +623,7 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
                 |v| Message::Native(NativeAction::Opacity(v)),
             ));
     }
+    c = c.push(crate::widget_settings::view(app));
     c=c.push(title("근거 초안과 외부 연결")).push(text("요약과 포트폴리오는 저장된 원문을 정리한 편집 가능한 초안입니다. AI 분석 결과가 아닙니다. ChatGPT/Space·모바일·여러 기기 동기화는 아직 연결되지 않았습니다.").size(14)).push(quiet("상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."));
     scrollable(paper(c)).height(Length::Fill).into()
 }

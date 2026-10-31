@@ -4,6 +4,64 @@ use iced::advanced::{graphics::Viewport, layout, mouse, renderer, widget::Tree, 
 use iced::{Point, Rectangle};
 
 #[test]
+fn month_heading_has_separate_year_and_month_targets() {
+    use crate::month_jump::{JumpField, JumpMessage};
+    let mut app = fixture();
+    app.widget = Some(window::Id::unique());
+    app.widget_attached = true;
+    let size = Size::new(960., 640.);
+    let bounds = Rectangle::new(Point::ORIGIN, size);
+    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+    let mut element = app.view(app.widget.unwrap());
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, size),
+    );
+    let mut targets = Vec::new();
+    fn collect(node: &layout::Node, parent: Point, points: &mut Vec<Point>) {
+        let b = node.bounds();
+        let origin = Point::new(parent.x + b.x, parent.y + b.y);
+        if origin.y < 100. && b.width > 8. && b.width < 200. && b.height > 8. && b.height < 60. {
+            points.push(Point::new(
+                origin.x + b.width / 2.,
+                origin.y + b.height / 2.,
+            ));
+        }
+        for child in node.children() {
+            collect(child, origin, points);
+        }
+    }
+    collect(&node, Point::ORIGIN, &mut targets);
+    let mut messages = Vec::new();
+    for point in targets {
+        for event in [
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(event),
+                layout::Layout::new(&node),
+                mouse::Cursor::Available(point),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &bounds,
+            );
+        }
+    }
+    assert!(messages
+        .iter()
+        .any(|m| matches!(m, Message::Jump(JumpMessage::Open(JumpField::Year)))));
+    assert!(messages
+        .iter()
+        .any(|m| matches!(m, Message::Jump(JumpMessage::Open(JumpField::Month)))));
+    assert!(!messages.iter().any(|m| matches!(m, Message::DragWidget)));
+}
+
+#[test]
 fn widget_checkbox_clicks_do_not_open_a_day_but_double_click_does() {
     for busy in [false, true] {
         let mut app = fixture();
@@ -219,12 +277,39 @@ fn render_theme_previews() {
     app.widget = Some(desktop);
     app.widget_attached = true;
     let quick = window::Id::unique();
+    let jump_id = window::Id::unique();
     app.quick_window = Some(quick);
     app.quick_date = Some(app.selected);
     app.quick_events = store
         .list_events(&app.selected.to_string(), &app.selected.to_string())
         .unwrap();
     for (name, mode, size) in [
+        ("jump-midnight", AppTheme::Midnight, Size::new(400.0, 300.0)),
+        (
+            "jump-porcelain",
+            AppTheme::Porcelain,
+            Size::new(400.0, 300.0),
+        ),
+        (
+            "settings-midnight",
+            AppTheme::Midnight,
+            Size::new(1160.0, 1100.0),
+        ),
+        (
+            "settings-porcelain",
+            AppTheme::Porcelain,
+            Size::new(1160.0, 1100.0),
+        ),
+        (
+            "desktopcal-rolling",
+            AppTheme::Midnight,
+            Size::new(800.0, 600.0),
+        ),
+        (
+            "desktopcal-custom-small",
+            AppTheme::Porcelain,
+            Size::new(400.0, 350.0),
+        ),
         ("quick-list", AppTheme::Midnight, Size::new(440.0, 480.0)),
         ("quick-editor", AppTheme::Midnight, Size::new(440.0, 480.0)),
         (
@@ -276,6 +361,43 @@ fn render_theme_previews() {
         ),
     ] {
         app.preferences.theme = mode;
+        app.preferences.widget = Default::default();
+        app.preferences.widget_locked = !name.starts_with("desktopcal-");
+        app.page = if name.starts_with("settings-") {
+            Page::Settings
+        } else {
+            Page::Month
+        };
+        app.widget_ui.jump = if name.starts_with("jump-") {
+            Some(crate::month_jump::MonthJump {
+                window: jump_id,
+                focus: crate::month_jump::JumpField::Month,
+                year: "2025".into(),
+                month: "9".into(),
+                date: String::new(),
+                error: String::new(),
+            })
+        } else {
+            None
+        };
+        if name == "desktopcal-rolling" {
+            app.preferences.widget.rolling = true;
+            app.preferences.widget.weeks = 4;
+            app.preferences.widget.past_weeks = 1;
+            app.preferences.widget.event_size = 14;
+            app.preferences.widget.cell_gap = 3;
+            app.preferences.widget.dark.background = Some("#152D32".into());
+            app.preferences.widget.dark.today = Some("#74D3B7".into());
+        }
+        if name == "desktopcal-custom-small" {
+            app.preferences.widget.rolling = true;
+            app.preferences.widget.weeks = 2;
+            app.preferences.widget.font = "Arial".into();
+            app.preferences.widget.date_size = 32;
+            app.preferences.widget.event_size = 24;
+            app.preferences.widget.cell_gap = 16;
+            app.preferences.widget.cell_padding = 20;
+        }
         app.manager_size = size;
         app.editor = None;
         app.editor_in_quick = false;
@@ -292,7 +414,9 @@ fn render_theme_previews() {
         let mut renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
         let bounds = Rectangle::new(Point::ORIGIN, size);
         renderer.reset(bounds);
-        let mut element = app.view(if name.starts_with("desktopcal-") {
+        let mut element = app.view(if name.starts_with("jump-") {
+            jump_id
+        } else if name.starts_with("desktopcal-") {
             desktop
         } else if name.starts_with("quick-") {
             quick
