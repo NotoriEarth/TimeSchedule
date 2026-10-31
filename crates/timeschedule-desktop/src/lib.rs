@@ -1,6 +1,8 @@
 pub mod paths;
+pub mod popup;
 pub mod preferences;
 pub mod tray;
+pub mod widget_preferences;
 pub mod windows;
 
 /// Borrowed HWND valid only during its framework's UI-thread callback.

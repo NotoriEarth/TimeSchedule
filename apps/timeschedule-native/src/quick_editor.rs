@@ -21,17 +21,18 @@ impl App {
         self.quick_date = Some(date);
         self.quick_events.clear();
         self.error.clear();
-        let open = if self.quick_window.is_some() {
-            self.focus_quick()
+        let open = if let Some(id) = self.quick_window {
+            self.place_popup(self.widget.unwrap_or(self.manager), id)
         } else {
             let (id, open) = window::open(window::Settings {
-                size: Size::new(440.0, 480.0),
+                size: crate::views::EDITOR_SIZE,
                 min_size: Some(Size::new(350.0, 330.0)),
-                position: window::Position::Centered,
+                visible: false,
                 exit_on_close_request: false,
                 ..Default::default()
             });
             self.quick_window = Some(id);
+            self.placing_popups.insert(id, window::Id::unique());
             open.map(Message::QuickReady)
         };
         Task::batch([open, self.load_quick(true)])
@@ -39,6 +40,9 @@ impl App {
 
     pub(crate) fn focus_quick(&self) -> Task<Message> {
         self.quick_window.map_or_else(Task::none, |id| {
+            if self.placing_popups.contains_key(&id) {
+                return Task::none();
+            }
             window::minimize(id, false).chain(window::gain_focus(id))
         })
     }
@@ -84,9 +88,10 @@ impl App {
         self.quick_events.clear();
         self.quick_loading = false;
         self.quick_generation += 1;
-        self.quick_window
-            .take()
-            .map_or_else(Task::none, window::close)
+        self.quick_window.take().map_or_else(Task::none, |id| {
+            self.placing_popups.remove(&id);
+            window::close(id)
+        })
     }
 }
 
