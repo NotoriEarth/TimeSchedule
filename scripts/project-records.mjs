@@ -52,7 +52,20 @@ function loadJobs(stateDir, workId) {
   if (workId && !UUID.test(workId)) throw new Error('work-id 형식을 확인해 주세요.');
   if (!fs.existsSync(stateDir)) return [];
   return fs.readdirSync(stateDir, { withFileTypes: true }).filter(e => e.isDirectory() && UUID.test(e.name) && (!workId || e.name === workId))
-    .map(e => ({ file: path.join(stateDir, e.name, 'state.json'), job: readJson(path.join(stateDir, e.name, 'state.json')) }));
+    .flatMap(e => fs.readdirSync(path.join(stateDir, e.name)).filter(f => f === 'state.json' || /^pending-\d+\.json$/.test(f))
+      .map(f => ({ file: path.join(stateDir, e.name, f), job: readJson(path.join(stateDir, e.name, f)) })))
+    .sort((a,b) => a.job.source.workId === b.job.source.workId ? a.job.revision-b.job.revision : (a.job.createdAt ?? a.job.updatedAt).localeCompare(b.job.createdAt ?? b.job.updatedAt));
+}
+const finished = job => ['complete', 'conflict'].includes(job.phase);
+function writeWake(stateDir) {
+  const pending = loadJobs(stateDir).map(x=>x.job).filter(j=>!finished(j));
+  atomicJson(path.join(stateDir,'wake.json'), {pending:pending.length,nextAttemptAt:pending.length ? Math.min(...pending.map(j=>j.nextAttemptAt ?? 0)) : null});
+}
+function upgradeJob(job) {
+  if(job.schemaVersion===2 || finished(job)) return;
+  job.schemaVersion=2; job.localRevision=job.revision+1; job.finalRevision=job.revision+2;
+  job.localSaved=false; job.spaceVerified=['space_saved','diary_queued'].includes(job.phase);
+  job.publicationUncertain=job.phase==='publishing';
 }
 async function locked(stateDir, action) {
   fs.mkdirSync(stateDir, { recursive: true });
@@ -79,21 +92,36 @@ export async function prepare(input, { stateDir = DEFAULT_STATE } = {}) {
     const previous = fs.existsSync(file) ? readJson(file) : null;
     const contentHash = sha(JSON.stringify(source));
     if (previous?.contentHash === contentHash) return { workId: source.workId, revision: previous.revision, unchanged: true, phase: previous.phase };
-    if (previous?.phase === 'publishing') throw new Error('Space 저장 결과가 불확실합니다. 기존 전달을 확인한 뒤 내용을 갱신해 주세요.');
+    if (previous && !finished(previous)) {
+      upgradeJob(previous);
+      atomicJson(path.join(stateDir, source.workId, `pending-${previous.revision}.json`), previous);
+    }
     const revision = (previous?.revision ?? 0) + 1;
     const pageMarkdown = `**프로젝트:** ${source.projectTitle}\n\n**작업일:** ${source.date}\n\n**상태:** ${LABELS[source.status]}\n\n${source.detailedMarkdown}`;
-    const job = { schemaVersion: 1, source, revision, contentHash, pageMarkdown, phase: 'prepared', space: previous?.space ?? null,
-      modelCalls: previous?.modelCalls ?? 0, lastError: null, updatedAt: new Date().toISOString() };
+    const localRevision = (previous?.finalRevision ?? previous?.diaryReceipt?.revision ?? previous?.revision ?? 0)+1;
+    const job = { schemaVersion: 2, source, revision, contentHash, pageMarkdown, phase: 'prepared', space: previous?.space ?? null,
+      localRevision, finalRevision:localRevision+1, localSaved:false, spaceVerified:false, publicationUncertain:false,
+      attempts:0,nextAttemptAt:0,modelCalls: previous?.modelCalls ?? 0, lastError: null, createdAt:new Date().toISOString(), updatedAt: new Date().toISOString() };
     atomicJson(path.join(stateDir, source.workId, `${revision}.json`), { source, revision, contentHash, pageMarkdown });
     atomicJson(file, job);
+    writeWake(stateDir);
     return { workId: source.workId, revision, unchanged: false, phase: job.phase };
   });
 }
 
-function diaryPayload(job) {
-  const { source, revision, space } = job;
-  return { schemaVersion: 1, workId: source.workId, revision, projectTitle: source.projectTitle, repoPath: source.repoPath, date: source.date,
-    kind: source.kind, title: source.title, summary: source.diarySummary, spaceUrl: space.pageUrl, status: source.status };
+function diaryPayload(job, linked) {
+  const { source, space } = job;
+  return { schemaVersion: 2, workId: source.workId, revision:linked?job.finalRevision:job.localRevision, projectTitle: source.projectTitle, repoPath: source.repoPath, date: source.date,
+    kind: source.kind, title: source.title, summary: source.diarySummary, detail:source.detailedMarkdown,
+    deliveryState:linked?'synced':'pending', spaceUrl:linked?space.pageUrl:'', status: source.status };
+}
+async function registerNative(options) {
+  const resultFile=path.join(options.stateDir,`registration-${randomUUID()}.json`);
+  const args=['record','configure-sync','--node',process.execPath,'--script',fileURLToPath(import.meta.url),'--state-dir',options.stateDir,'--result',resultFile];
+  if(options.dataDir) args.push('--data-dir',path.resolve(options.dataDir));
+  const result=await runBounded(path.resolve(options.exe ?? path.join(PROJECT_ROOT,'artifacts','TimeSchedule.exe')),args,{cwd:PROJECT_ROOT,timeoutMs:10000});
+  if(result.exitCode!==0 || !fs.existsSync(resultFile) || readJson(resultFile).outcome!=='configured') throw new Error('앱의 기록 재시도 경로를 등록하지 못했습니다. 최신 EXE를 확인해 주세요.');
+  fs.unlinkSync(resultFile);
 }
 async function importNative(record, options) {
   const directory = path.join(options.stateDir, record.workId);
@@ -112,51 +140,78 @@ async function importNative(record, options) {
 export async function sync(options = {}) {
   const stateDir = path.resolve(options.stateDir ?? DEFAULT_STATE);
   return locked(stateDir, async () => {
-    const results = [];
-    for (const { file, job } of loadJobs(stateDir, options.workId)) {
-      if (['complete', 'conflict'].includes(job.phase)) { results.push({ workId: job.source.workId, phase: job.phase, skipped: true }); continue; }
+    const results = []; const jobs=loadJobs(stateDir); let processed=0;
+    const now=Date.now();
+    if(!options.importer && jobs.some(x=>!finished(x.job))) await registerNative({...options,stateDir});
+    for (const { file, job } of jobs) {
+      if(options.workId && job.source.workId!==options.workId) continue;
+      if (finished(job) || (!options.retryNow && (job.nextAttemptAt ?? 0)>now) || processed >= Number(options.maxJobs ?? Infinity)) {
+        results.push({ workId: job.source.workId,revision:job.revision, phase: job.phase, skipped: true }); continue;
+      }
+      processed++; upgradeJob(job);
       const save = () => { job.updatedAt = new Date().toISOString(); atomicJson(file, job); };
+      const importRecord=async linked=>{
+        const record=diaryPayload(job,linked);
+        const receipt=await (options.importer ?? importNative)(record,{...options,stateDir});
+        if(receipt?.workId!==record.workId || receipt?.revision!==record.revision) throw new Error('다이어리 수신 결과의 작업 ID 또는 revision이 다릅니다.');
+        job.diaryReceipt=receipt;
+        if(receipt.outcome==='conflict') {job.phase='conflict';throw new Error(receipt.message ?? '사용자 편집 충돌');}
+        if(receipt.outcome==='queued'){job.phase='diary_queued';job.nextAttemptAt=now+60000;save();return false;}
+        if(receipt.outcome==='stale' && receipt.entryId && jobs.some(x=>x.job.source.workId===job.source.workId && x.job.revision>job.revision && x.job.localSaved))return true;
+        if(!(['saved','unchanged'].includes(receipt.outcome)&&receipt.entryId)) throw new Error(`다이어리 저장을 확인하지 못했습니다: ${receipt.outcome}`);
+        return true;
+      };
       try {
-        if (['prepared', 'publishing'].includes(job.phase)) {
-          const recoverOnly = job.phase === 'publishing';
+        if(!job.localSaved){if(!await importRecord(false))continue;job.localSaved=true;job.phase='waiting_space';save();}
+        // Keep revisions of one work item ordered, but let other work proceed.
+        const earlier=jobs.find(x=>x.job.source.workId===job.source.workId && x.job.revision<job.revision && x.job.phase!=='complete');
+        if(earlier){job.phase=earlier.job.phase==='conflict'?'conflict':'waiting_prior';job.nextAttemptAt=Math.max(now+60000,earlier.job.nextAttemptAt??0);save();continue;}
+        const mappingFile=path.join(stateDir,job.source.workId,'space-state.json');
+        if(!job.spaceVerified && fs.existsSync(mappingFile)){
+          const mapping=readJson(mappingFile);if(mapping.revision<=job.revision)job.space=mapping.space;
+        }
+        if (!job.spaceVerified) {
+          const recoverOnly = job.publicationUncertain;
           job.phase = 'publishing'; job.modelCalls++; save();
+          job.publicationUncertain=true; save();
           const published = await (options.publisher ?? publishCodex)(job, { ...options, stateDir, recoverOnly, cwd: PROJECT_ROOT });
           validatePublication(published, job);
-          job.space = published; job.phase = 'space_saved'; job.lastError = null; save();
+          job.space = published; job.spaceVerified=true;job.publicationUncertain=false;job.phase = 'space_saved'; job.lastError = null;
+          atomicJson(mappingFile,{revision:job.revision,space:published});save();
         }
-        const record = diaryPayload(job);
-        const receipt = await (options.importer ?? importNative)(record, { ...options, stateDir });
-        if (receipt?.workId !== record.workId || receipt?.revision !== record.revision) throw new Error('다이어리 수신 결과의 작업 ID 또는 revision이 다릅니다.');
-        job.diaryReceipt = receipt;
-        if (['saved', 'unchanged'].includes(receipt.outcome) && receipt.entryId) job.phase = 'complete';
-        else if (receipt.outcome === 'queued') job.phase = 'diary_queued';
-        else if (['conflict', 'stale'].includes(receipt.outcome)) job.phase = 'conflict';
-        else throw new Error(`다이어리 저장을 확인하지 못했습니다: ${receipt?.outcome}`);
-        job.lastError = job.phase === 'conflict' ? (receipt.message ?? '기록 상태 충돌') : null; save();
+        if(!await importRecord(true))continue;
+        job.phase='complete';job.lastError=null;job.nextAttemptAt=null;save();
       } catch (error) {
         if (error.space) job.space = error.space;
         if (error.conflict) job.phase = 'conflict';
+        if(error.publicationNotStarted){job.publicationUncertain=false;job.phase='waiting_space';}
+        job.attempts=(job.attempts??0)+1;
+        job.nextAttemptAt=now+[60000,300000,900000,3600000][Math.min(job.attempts-1,3)];
         job.lastError = String(error.message ?? error).slice(0, 2000); save();
+      } finally {
+        results.push({ workId: job.source.workId, revision: job.revision, phase: job.phase, pageUrl: job.spaceVerified ? job.space?.pageUrl ?? null : null, error: job.lastError });
       }
-      results.push({ workId: job.source.workId, revision: job.revision, phase: job.phase, pageUrl: job.space?.pageUrl ?? null, error: job.lastError });
     }
+    writeWake(stateDir);
     return results;
   });
 }
 
 export function status({ stateDir = DEFAULT_STATE, workId } = {}) {
   return loadJobs(stateDir, workId).map(({ job }) => ({ workId: job.source.workId, title: job.source.title, revision: job.revision, phase: job.phase,
-    pageUrl: job.space?.pageUrl ?? null, modelCalls: job.modelCalls, lastError: job.lastError, updatedAt: job.updatedAt }));
+    pageUrl: job.spaceVerified || job.phase==='complete' ? job.space?.pageUrl ?? null : null, modelCalls: job.modelCalls, localSaved:job.localSaved,
+    nextAttemptAt:job.nextAttemptAt,lastError: job.lastError, updatedAt: job.updatedAt }));
 }
 
 async function main(args) {
   const command = args.shift(); const options = {};
-  const names = { '--state-dir': 'stateDir', '--work-id': 'workId', '--exe': 'exe', '--data-dir': 'dataDir', '--codex-exe': 'codexExe', '--input': 'input' };
+  const names = { '--state-dir': 'stateDir', '--work-id': 'workId', '--exe': 'exe', '--data-dir': 'dataDir', '--codex-exe': 'codexExe', '--input': 'input', '--max-jobs':'maxJobs' };
   while (args.length) {
-    const key = args.shift(); const value = args.shift();
+    const key = args.shift(); if(key==='--retry-now'){options.retryNow=true;continue;} const value = args.shift();
     if (!names[key] || !value || value.startsWith('--') || Object.hasOwn(options, names[key])) throw new Error('명령 인자를 확인해 주세요.');
     options[names[key]] = value;
   }
+  if(options.maxJobs && (!/^\d+$/.test(options.maxJobs) || Number(options.maxJobs)<1 || Number(options.maxJobs)>32))throw new Error('max-jobs는 1~32여야 합니다.');
   let result;
   if (command === 'prepare' && options.input) result = await prepare(readJson(options.input), options);
   else if (command === 'sync') result = await sync(options);

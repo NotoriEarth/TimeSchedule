@@ -9,7 +9,7 @@ use timeschedule_core::{
     storage::Storage,
 };
 
-pub const MAX_INPUT_BYTES: u64 = 64 * 1024;
+pub const MAX_INPUT_BYTES: u64 = 128 * 1024;
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -238,6 +238,8 @@ pub(crate) mod tests {
             summary: "자동 검증 통과. 실제 입력은 미확인.".into(),
             space_url: "https://chatgpt.com/space/page_6ae1b18a44f08191ad2a86276972476c".into(),
             status: "verification_pending".into(),
+            delivery_state: String::new(),
+            detail: String::new(),
         }
     }
 

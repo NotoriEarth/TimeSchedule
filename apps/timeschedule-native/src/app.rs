@@ -213,6 +213,7 @@ pub struct App {
     pub project: Option<String>,
     pub expanded: HashSet<String>,
     pub expanded_events: HashSet<String>,
+    record_sync: crate::record_sync::Runner,
     pub bodies: HashMap<String, Entry>,
     pub entry_errors: HashMap<String, String>,
     pub editor: Option<Editor>,
@@ -330,6 +331,7 @@ impl App {
             project: None,
             expanded: HashSet::new(),
             expanded_events: HashSet::new(),
+            record_sync: crate::record_sync::Runner::default(),
             bodies: HashMap::new(),
             entry_errors: HashMap::new(),
             editor: None,
@@ -885,6 +887,9 @@ impl App {
                     return self.request_close(CloseIntent::Application);
                 }
                 self.ticks += 1;
+                if let Some(message) = self.record_sync.poll(&self.data_dir) {
+                    self.log(&message);
+                }
                 let action = self.tray.as_ref().and_then(|tray| tray.try_recv());
                 if let Some(action) = action {
                     return match action {
@@ -1546,6 +1551,7 @@ mod tests {
             project: None,
             expanded: HashSet::new(),
             expanded_events: HashSet::new(),
+            record_sync: crate::record_sync::Runner::default(),
             bodies: HashMap::new(),
             entry_errors: HashMap::new(),
             editor: None,

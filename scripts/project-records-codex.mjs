@@ -44,6 +44,10 @@ export function createdPageObservation(events, job) {
   const observed = pageReads(events).filter(p => p.pageId === ids[0]).at(-1);
   return observed && { ...observed, indexVerified: false };
 }
+export function publicationMayHaveStarted(events) {
+  return events.some(event => event.item?.type === 'mcp_tool_call' && event.item.server === 'codex_apps'
+    && /^chatgpt_space(?:\.|__)(create_page|edit_page)$/.test(event.item.tool ?? ''));
+}
 export function verifyPageEvents(events, job) {
   const child = childObservation(events, job);
   const root = pageReads(events).filter(p => p.pageId === job.source.parentPageId).at(-1);
@@ -116,15 +120,19 @@ export async function publishCodex(job, options) {
   const runId = randomUUID();
   const schemaFile = path.join(directory, 'publisher-schema.json');
   fs.writeFileSync(schemaFile, JSON.stringify({ type: 'object', properties: { outcome: { type: 'string', enum: ['saved', 'conflict', 'not_found', 'error'] }, message: { type: 'string' } }, required: ['outcome', 'message'], additionalProperties: false }));
-  let events = [];
+  let events = []; let traceComplete = false;
   try {
     const result = await runBounded(codexExecutable(options.codexExe), ['exec', '-m', 'gpt-6-luna', '-c', 'model_reasoning_effort="medium"', '--ephemeral', '--json', '--sandbox', 'read-only', '--output-schema', schemaFile, '-'],
       { cwd: options.cwd, input: promptFor(job, options.recoverOnly), timeoutMs: 180000, logFile: path.join(directory, `publisher-${runId}.jsonl`) });
-    events = result.events;
+    events = result.events; traceComplete = true;
     if (result.exitCode !== 0) throw new Error(`Codex 기록 실행 실패 (exit ${result.exitCode}): ${result.stderr.slice(-1000)}`);
     return verifyPageEvents(events, job);
   } catch (error) {
     events = error.events ?? events;
+    // A process that never started or an explicit read-only tool trace proves
+    // no publication was attempted. After a timeout/unknown trace, stay cautious.
+    error.publicationNotStarted = !publicationMayHaveStarted(events)
+      && (['ENOENT','EACCES'].includes(error.code) || traceComplete);
     const observed = childObservation(events, job) ?? createdPageObservation(events, job);
     if (observed) error.space = { ...observed, indexVerified: false };
     const existing = job.space && pageReads(events).find(p => p.pageId === job.space.pageId);

@@ -32,30 +32,31 @@ function publisherReceipt(job) {
   return { pageId, pageUrl, parentPageId, title: job.source.title, markdown: job.pageMarkdown, indexVerified: true };
 }
 
-test('no-PR record publishes Space then imports diary and unchanged work makes no new calls', async t => {
+const saved = r => ({ outcome: 'saved', workId: r.workId, revision: r.revision, entryId: 'entry-1' });
+test('no-PR record saves full diary text before Space and later links the same record', async t => {
   const dir = stateDir(t); const input = source();
   const a = await prepare(input, { stateDir: dir });
   assert.equal(a.revision, 1);
   const order = [];
   const options = { stateDir: dir,
     publisher: async job => { order.push('space'); return publisherReceipt(job); },
-    importer: async record => { order.push('diary'); assert.equal(record.spaceUrl, pageUrl); assert.equal(record.summary, input.diarySummary); return { outcome: 'saved', workId: record.workId, revision: record.revision, entryId: 'entry-1' }; },
+    importer: async record => { order.push(record.deliveryState); assert.equal(record.spaceUrl, record.deliveryState === 'pending' ? '' : pageUrl); assert.equal(record.detail, input.detailedMarkdown); return saved(record); },
   };
   await sync(options);
-  assert.deepEqual(order, ['space', 'diary']);
+  assert.deepEqual(order, ['pending', 'space', 'synced']);
   assert.equal(status({ stateDir: dir })[0].phase, 'complete');
   assert.equal((await prepare(input, { stateDir: dir })).revision, 1);
   await sync(options);
-  assert.deepEqual(order, ['space', 'diary']);
+  assert.deepEqual(order, ['pending', 'space', 'synced']);
 });
 
 test('Space success survives diary failure without republishing', async t => {
   const dir = stateDir(t); await prepare(source(), { stateDir: dir });
   let publications = 0;
   const publisher = async job => { publications++; return publisherReceipt(job); };
-  await sync({ stateDir: dir, publisher, importer: async () => { throw new Error('EXE unavailable'); } });
+  await sync({ stateDir: dir, publisher, importer: async r => { if(r.deliveryState === 'pending') return saved(r); throw new Error('EXE unavailable'); } });
   assert.equal(status({ stateDir: dir })[0].phase, 'space_saved');
-  await sync({ stateDir: dir, publisher, importer: async r => ({ outcome: 'saved', workId: r.workId, revision: r.revision, entryId: 'entry-1' }) });
+  await sync({ stateDir: dir, retryNow: true, publisher, importer: async r => saved(r) });
   assert.equal(publications, 1);
   assert.equal(status({ stateDir: dir })[0].phase, 'complete');
 });
@@ -65,16 +66,15 @@ test('queued is not complete and user-edit conflict is retained', async t => {
   const publisher = async job => publisherReceipt(job);
   await sync({ stateDir: dir, publisher, importer: async r => ({ outcome: 'queued', workId: r.workId, revision: r.revision, entryId: null }) });
   assert.equal(status({ stateDir: dir })[0].phase, 'diary_queued');
-  await sync({ stateDir: dir, publisher: async () => { throw new Error('must not republish'); }, importer: async r => ({ outcome: 'conflict', workId: r.workId, revision: r.revision, message: 'user edited' }) });
+  await sync({ stateDir: dir, retryNow: true, publisher: async () => { throw new Error('must not republish'); }, importer: async r => ({ outcome: 'conflict', workId: r.workId, revision: r.revision, message: 'user edited' }) });
   assert.equal(status({ stateDir: dir })[0].phase, 'conflict');
 });
 
 test('uncertain publication is reconciled without permission to create again', async t => {
   const dir = stateDir(t); const input = source(); await prepare(input, { stateDir: dir });
-  await sync({ stateDir: dir, publisher: async () => { throw new Error('connection lost after create'); }, importer: async () => { throw new Error('must not import'); } });
+  await sync({ stateDir: dir, publisher: async () => { throw new Error('connection lost after create'); }, importer: async r => saved(r) });
   assert.equal(status({ stateDir: dir })[0].phase, 'publishing');
-  await assert.rejects(prepare({ ...input, title: 'changed during uncertain create' }, { stateDir: dir }), /확인|불확실|reconcil/i);
-  await sync({ stateDir: dir, publisher: async (job, { recoverOnly }) => { assert.equal(recoverOnly, true); return publisherReceipt(job); }, importer: async r => ({ outcome: 'saved', workId: r.workId, revision: r.revision, entryId: 'entry-1' }) });
+  await sync({ stateDir: dir, retryNow: true, publisher: async (job, { recoverOnly }) => { assert.equal(recoverOnly, true); return publisherReceipt(job); }, importer: async r => saved(r) });
   assert.equal(status({ stateDir: dir })[0].phase, 'complete');
 });
 
@@ -89,7 +89,7 @@ test('summary must retain a whole source paragraph including limitations', async
 test('wrong publication body or URL never reaches the diary', async t => {
   for (const change of [{ pageUrl: 'https://evil.test/page' }, { markdown: '모든 성능이 향상되었다.' }]) {
     const dir = stateDir(t); await prepare(source(), { stateDir: dir }); let imports = 0;
-    await sync({ stateDir: dir, publisher: async job => ({ ...publisherReceipt(job), ...change }), importer: async () => { imports++; } });
+    await sync({ stateDir: dir, publisher: async job => ({ ...publisherReceipt(job), ...change }), importer: async r => { if(r.spaceUrl) imports++; return saved(r); } });
     assert.equal(imports, 0);
     assert.notEqual(status({ stateDir: dir })[0].phase, 'complete');
   }
@@ -129,7 +129,7 @@ test('a stale lock observer cannot enter while another process owns delivery', a
   const moduleUrl = pathToFileURL(path.resolve('scripts/project-records.mjs')).href;
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import {sync} from ${JSON.stringify(moduleUrl)};
-    try { await sync({stateDir:process.argv[1],publisher:async()=>{
+    try { await sync({stateDir:process.argv[1],importer:async r=>({outcome:'saved',workId:r.workId,revision:r.revision,entryId:'entry-1'}),publisher:async()=>{
       process.send('entered'); await new Promise(r=>process.once('message',r)); throw Error('test finished');
     }}); } catch {} finally { process.disconnect(); }
   `, dir], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });

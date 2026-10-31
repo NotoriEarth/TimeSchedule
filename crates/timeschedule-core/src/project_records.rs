@@ -20,6 +20,10 @@ pub struct ProjectRecord {
     pub summary: String,
     pub space_url: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub delivery_state: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,8 +38,21 @@ pub struct RecordReceipt {
 
 impl ProjectRecord {
     pub fn validate(&self) -> Result<(), String> {
-        if self.schema_version != 1 {
+        if ![1, 2].contains(&self.schema_version) {
             return Err("지원하지 않는 프로젝트 기록 형식입니다.".into());
+        }
+        if self.schema_version == 1 && (!self.delivery_state.is_empty() || !self.detail.is_empty())
+        {
+            return Err("오프라인 기록은 v2 형식이 필요합니다.".into());
+        }
+        if self.schema_version == 2 {
+            if !["pending", "synced"].contains(&self.delivery_state.as_str())
+                || self.detail.trim().is_empty()
+                || self.detail.len() > 48000
+                || self.detail.contains('\0')
+            {
+                return Err("연결 상태와 전체 기록 원문을 확인해 주세요.".into());
+            }
         }
         if Uuid::parse_str(&self.work_id)
             .map(|id| id.to_string())
@@ -64,6 +81,13 @@ impl ProjectRecord {
         }
         self.status_label()?;
         validate_text(&self.space_url, "Space 링크", 2000)?;
+        if self.delivery_state == "pending" {
+            return if self.space_url.is_empty() {
+                Ok(())
+            } else {
+                Err("대기 기록에는 미검증 Space 링크를 넣을 수 없습니다.".into())
+            };
+        }
         let url = url::Url::parse(&self.space_url).map_err(|_| "Space 링크를 확인해 주세요.")?;
         let valid_page = url
             .path()
@@ -209,16 +233,30 @@ impl Storage {
             .as_ref()
             .map(|row| row.2.clone())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let body = if record.schema_version == 2 {
+            format!(
+                "{}\n\n상태: {}\n\n{}",
+                record.detail.trim(),
+                record.status_label()?,
+                if record.delivery_state == "pending" {
+                    "Space 연결 대기 — 원문은 다이어리에 보관되어 있습니다."
+                } else {
+                    "Space 연결 완료"
+                }
+            )
+        } else {
+            format!(
+                "{}\n\n상태: {}",
+                record.summary.trim(),
+                record.status_label()?
+            )
+        };
         let snapshot = ManagedSnapshot {
             project_id: Some(project_id),
             date: record.date.clone(),
             kind: record.kind.clone(),
             title: record.title.trim().into(),
-            body: format!(
-                "{}\n\n상태: {}",
-                record.summary.trim(),
-                record.status_label()?
-            ),
+            body,
             source_url: record.space_url.clone(),
         };
         let source_ref = format!("space-work:{}", record.work_id);
@@ -261,7 +299,72 @@ mod tests {
             summary: "오류를 수정했다. 실제 IME 동작은 아직 확인하지 않았다.".into(),
             space_url: "https://chatgpt.com/space/page_6ae1b18a44f08191ad2a86276972476c".into(),
             status: "verification_pending".into(),
+            delivery_state: String::new(),
+            detail: String::new(),
         }
+    }
+
+    #[test]
+    fn offline_record_keeps_full_text_and_later_links_the_same_entry() {
+        let store = Storage::open(":memory:").unwrap();
+        let mut pending = record();
+        pending.schema_version = 2;
+        pending.delivery_state = "pending".into();
+        pending.detail = "작업 배경과 시도한 방법\n\n원인은 미확인. 후속 검증 필요.".into();
+        pending.space_url.clear();
+        let saved = store.apply_project_record(&pending).unwrap();
+        let id = saved.entry_id.unwrap();
+        let offline = store.get_entry(&id).unwrap();
+        assert!(offline.body.contains(&pending.detail));
+        assert!(offline.body.contains("Space 연결 대기"));
+        assert!(offline.source_url.is_empty());
+        pending.revision += 1;
+        pending.delivery_state = "synced".into();
+        pending.space_url = record().space_url;
+        assert_eq!(
+            store
+                .apply_project_record(&pending)
+                .unwrap()
+                .entry_id
+                .as_deref(),
+            Some(id.as_str())
+        );
+        let online = store.get_entry(&id).unwrap();
+        assert!(online.body.contains(&pending.detail));
+        assert!(!online.body.contains("Space 연결 대기"));
+        assert_eq!(online.source_url, pending.space_url);
+        assert_eq!(
+            store.apply_project_record(&pending).unwrap().outcome,
+            "unchanged"
+        );
+        pending.revision -= 1;
+        pending.delivery_state = "pending".into();
+        pending.space_url.clear();
+        assert_eq!(
+            store.apply_project_record(&pending).unwrap().outcome,
+            "stale"
+        );
+        assert_eq!(
+            store
+                .list_entries("2026-10-01", "2026-10-31", None, 0)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pending_record_requires_v2_full_text_and_no_unverified_link() {
+        let mut pending = record();
+        pending.delivery_state = "pending".into();
+        pending.space_url.clear();
+        assert!(pending.validate().is_err());
+        pending.schema_version = 2;
+        assert!(pending.validate().is_err());
+        pending.detail = "완전한 작업 원문".into();
+        assert!(pending.validate().is_ok());
+        pending.space_url = record().space_url;
+        assert!(pending.validate().is_err());
     }
 
     #[test]
@@ -384,7 +487,7 @@ mod tests {
         let store = Storage::open(":memory:").unwrap();
         for input in [
             ProjectRecord {
-                schema_version: 2,
+                schema_version: 99,
                 ..record()
             },
             ProjectRecord {

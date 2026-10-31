@@ -12,6 +12,7 @@ mod popup;
 mod quick_editor;
 mod record_cli;
 mod record_inbox;
+mod record_sync;
 mod shell;
 mod text_layout;
 mod theme;

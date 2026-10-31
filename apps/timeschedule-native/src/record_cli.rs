@@ -17,6 +17,7 @@ fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
         "enqueue" => &["--input"],
         "drain" => &[],
         "status" => &["--work-id", "--revision"],
+        "configure-sync" => &["--node", "--script", "--state-dir"],
         _ => return Err(USAGE.into()),
     };
     let mut options = HashMap::new();
@@ -51,6 +52,15 @@ pub fn execute(args: &[String]) -> Result<serde_json::Value, String> {
         None
     };
     let dir = paths::resolve_data_dir(options.get("--data-dir").map(PathBuf::from), true)?;
+    if command == "configure-sync" {
+        crate::record_sync::register(
+            &dir,
+            Path::new(options["--node"]),
+            Path::new(options["--script"]),
+            Path::new(options["--state-dir"]),
+        )?;
+        return Ok(serde_json::json!({"outcome":"configured"}));
+    }
     if command == "status" {
         let revision: u64 = options["--revision"]
             .parse()
