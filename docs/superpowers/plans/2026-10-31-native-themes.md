@@ -43,7 +43,7 @@ Consumes `Preferences.theme`; produces semantic Iced styles shared by every view
 - [x] Run `cargo fmt --all -- --check`, `cargo test --workspace --locked`, and release build.
 - [x] Independent whole-change review; fix material findings and rerun relevant verification.
 - [x] Prepare `artifacts/TimeSchedule-themed.exe`, screenshots and a concise verification guide.
-- [ ] Commit, push, create and link a PR to the Rust experiment branch; do not merge.
+- [x] Commit, push, create and link a PR to the Rust experiment branch; do not merge.
 
 ## Execution record
 
@@ -54,3 +54,4 @@ Consumes `Preferences.theme`; produces semantic Iced styles shared by every view
 - Independent review found text overflow and short-window calendar overflow. Actual font measurement, clipping and height-adaptive chip counts resolve both; second review found no remaining P1/P2.
 - Final release: 5,575,168 bytes. Isolated Windows startup loaded 6 events / 2 projects / 1 diary entry; both windows initialized and desktop attachment succeeded.
 - Windows capture timed out. Same-renderer PNGs were inspected at wide/default/short/narrow sizes; actual clicking, IME and application restart remain manual checks. See `docs/native-themes-verification.md`.
+- Implementation committed as `366c1ae` and pushed. PR #3 targets `codex/rust-native-experiment`, is attached to the current chat, and remains unmerged pending user testing: https://github.com/NotoriEarth/TimeSchedule/pull/3.
