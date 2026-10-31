@@ -1,10 +1,12 @@
 node_modules/
+/target/
 dist/
 src-tauri/target/
 .tooling/
 .cache/
 .test-data/
 artifacts/
+experiments/rust-ui-spike/target/
 src-tauri/gen/schemas/
 .env
 .env.*

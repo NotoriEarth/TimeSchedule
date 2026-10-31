@@ -1,0 +1,19 @@
+[package]
+name = "timeschedule-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+test-support = []
+
+[[test]]
+name = "desktop_native"
+required-features = ["test-support"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+timeschedule-core = { path = "../timeschedule-core" }
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = { version = "=0.25.1", default-features = false }

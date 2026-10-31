@@ -1,0 +1,13 @@
+[workspace]
+members = ["crates/timeschedule-core", "crates/timeschedule-desktop", "apps/timeschedule-native"]
+exclude = ["src-tauri", "experiments/rust-ui-spike", "vendor/softbuffer"]
+resolver = "2"
+
+[patch.crates-io]
+softbuffer = { path = "vendor/softbuffer" }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
