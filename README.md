@@ -1,25 +1,27 @@
 # TimeSchedule
 
-## Rust 네이티브 이식 실험
+## 최신 앱: TimeSchedule 0.7.0
 
-`codex/rust-native-experiment`에서는 기존 PC 기능을 Iced 기반 Rust 앱으로 옮깁니다. 기존 Tauri 앱과 별도로 빌드하며, 공통 SQLite/Git 코어를 사용합니다. 새 앱 실행에는 WebView/JavaScript 런타임이 필요하지 않습니다.
+대표 실행 파일은 **`artifacts/TimeSchedule.exe`** 하나입니다. Rust/Iced로 화면을 만들며 실행에 WebView/JavaScript 런타임이 필요하지 않습니다. 앱 설정·창 제목과 Windows 파일 속성에서 버전을 확인할 수 있습니다. [버전 규칙과 업데이트 이력](CHANGELOG.md)을 참고하세요.
+
+[0.7.0 검증 결과와 사용자 확인 순서](docs/release-0.7.0-verification.md)에 실행 파일 해시, 보관 위치와 확인 범위를 기록했습니다.
 
 ```powershell
 .\scripts\build-native.ps1
-.\artifacts\TimeSchedule-native.exe
+.\artifacts\TimeSchedule.exe
 ```
 
 네이티브 기본 저장 폴더는 `%LOCALAPPDATA%\com.timeschedule.personal.native-experiment`, 파일은 `schedule.db`입니다. 기존 앱의 DB를 자동으로 가져오지 않습니다. `TIMESCHEDULE_DATA_DIR`로 별도 테스트 폴더를 지정할 수 있습니다. 기존 DB의 호환성 확인에는 원본 대신 일관되게 백업한 복사본을 사용하세요.
 
-[네이티브 기능 대조·검증·테스트 방법](docs/rust-native/full-port.md)과 [20회 비교 벤치마크](docs/rust-native/benchmark.md)를 참고하세요. 기본 월간 상세창+위젯 유휴 상태에서 전용 상주 RAM은 약90% 줄었지만 유휴 CPU는 늘었습니다. 검색·편집 속도와 실제 한글 IME/바탕화면 동작은 별도 검증 대상입니다. 아래 설명과 과거 메모리 표는 별도 표시가 없는 한 기존 Tauri 버전 기준입니다.
+PR #2–#6의 Rust 이식·테마·위젯·편집·설정·연월 선택 변경은 사용자 승인 후 main에 병합했습니다. 기존 Tauri/Svelte 소스와 빌드 경로도 보존합니다. 두 앱은 공통 SQLite/Git 코어를 사용합니다.
 
-`codex/desktopcal-priority-features`에서는 바탕화면 날짜 더블클릭 빠른 편집, 위젯 완료 체크, 글자 선명도를 유지하는 배경 투명도를 추가합니다. 테스트 실행 파일은 `artifacts/TimeSchedule-desktopcal-priority.exe`이며, [검증 결과와 직접 확인할 순서](docs/desktopcal-priority-verification.md)를 참고하세요. 실제 바탕화면 조작은 사용자 테스트 후 머지합니다.
+최신 앱에는 날짜 더블클릭 편집, 완료 체크, 배경 전용 투명도, 크기·표시 주 수·글꼴·색상 설정, Windows식 연도→월 선택, 위젯과 다이어리 공통 일정 폼이 포함됩니다.
 
-`codex/widget-customization`에서는 위젯 크기·표시 주 수·글꼴·간격·테마별 색상을 설정할 수 있습니다. 상단 년/월을 누르면 두 값을 함께 바꾸는 이동창이 열립니다. 테스트 파일은 `artifacts/TimeSchedule-widget-customization.exe`이며, [사용 방법과 검증 범위](docs/widget-customization-verification.md)를 참고하세요.
+기존 수동 테스트 EXE는 `artifacts/archive/`에 보관합니다. 앞으로 빌드할 때도 `TimeSchedule.exe`를 교체하고 이전 파일은 보관하므로 실행할 파일 이름은 늘어나지 않습니다. 실행 중이면 저장 후 트레이에서 완전히 종료하고 빌드하세요. 빌드나 버전 검증 실패 시 기존 EXE를 교체하지 않습니다. 의존성이 준비된 환경에서는 `scripts/build-native.ps1 -Offline`을 사용할 수 있습니다.
 
-다이어리 연월 이동·날짜 더블클릭·원본 창 중앙 배치·공통 일정 폼의 이전 테스트 파일은 `artifacts/TimeSchedule-diary-navigation.exe`입니다. [검증 및 테스트 방법](docs/diary-navigation-verification.md)을 참고하세요.
+[선택창 테스트 안내](docs/calendar-picker-verification.md), [공통 폼 안내](docs/diary-navigation-verification.md), [설정 안내](docs/widget-customization-verification.md)는 당시 검증 기록입니다. 그 안의 이전 파일명 대신 현재 `artifacts/TimeSchedule.exe`로 확인하세요.
 
-최신 연·월 이동창은 Windows 달력처럼 **연도 격자 → 월 격자**로 선택합니다. 실행 파일은 `artifacts/TimeSchedule-calendar-picker.exe`이며 [선택창 사용 방법과 검증](docs/calendar-picker-verification.md)을 참고하세요.
+[네이티브 기능 대조](docs/rust-native/full-port.md)와 [20회 비교 벤치마크](docs/rust-native/benchmark.md)도 보존합니다. 기본 월간 상세창+위젯 유휴 상태에서 전용 상주 RAM은 약 90% 줄었지만 유휴 CPU는 늘었습니다. 수치는 당시 빌드의 측정 결과이며 이번 버전을 다시 측정한 결과가 아닙니다. 아래 설명과 과거 메모리 표는 기존 Tauri 버전 기준입니다.
 
 ## 기존 Tauri 앱
 
@@ -30,7 +32,7 @@
 
 프로젝트별 자유 노트·트러블슈팅·개발 기록, 로컬 Git 커밋 가져오기, 편집 가능한 근거 요약과 포트폴리오 초안을 제공합니다. Git은 프로젝트의 저장소 경로에서 **Git 커밋 수집**을 눌러 최근 500개를 가져옵니다. 재수집은 기존 기록과 사용자가 수정한 내용을 보존합니다. 요약은 저장된 자료를 정리한 **로컬 초안**이며 외부 AI 분석 결과가 아닙니다. ChatGPT 공부 내역·Space 연동, 자동 수집 주기, 기기 간 동기화는 아직 연결하지 않았습니다.
 
-전체 검색은 일정·할 일·메모·프로젝트·개발 기록의 제목과 본문을 찾습니다. SQLite FTS5 인덱스(3글자 이상), 짧은 검색어의 문자 검색, 최대 50개 결과와 입력 대기를 사용합니다. 기록 목록은 200개씩 불러오고 본문은 펼칠 때 읽습니다. 이 변경의 메모리 절감량은 아직 측정하지 않았으며 아래 과거 수치와 구분해야 합니다. 이번 테스트용 실행 파일은 `artifacts/TimeSchedule-diary.exe`로 별도 준비합니다. [직접 확인할 절차](docs/diary-verification.md)를 참고하세요.
+전체 검색은 일정·할 일·메모·프로젝트·개발 기록의 제목과 본문을 찾습니다. SQLite FTS5 인덱스(3글자 이상), 짧은 검색어의 문자 검색, 최대 50개 결과와 입력 대기를 사용합니다. 기록 목록은 200개씩 불러오고 본문은 펼칠 때 읽습니다. 이 변경의 메모리 절감량은 아직 측정하지 않았으며 아래 과거 수치와 구분해야 합니다. 당시 테스트 실행 파일은 보관 폴더로 이동했습니다. [직접 확인할 절차](docs/diary-verification.md)를 참고하세요.
 
 현재 사용할 수 있는 기능은 다음과 같습니다.
 
@@ -51,7 +53,7 @@
 
 바탕화면 위젯은 Windows 10의 Explorer 바탕화면 호스트에 연결하는 실험 기능입니다. 일반 창을 최소화해도 바탕화면에 남고 다른 앱보다 앞에 뜨지 않는 동작을 목표로 합니다. 연결 상태를 앱에 표시하며, 지원하지 않는 환경에서는 연결 실패를 알립니다. 2026-10-28 현재 PC에서 0.1.0의 관리자 창과 Win+D 이후 달력 표시, 0.1.1 수정본의 배경 비침과 상단 드래그 이동을 사용자가 확인했습니다. 0.1.2 적용 후에는 가려졌던 위젯 제어 버튼이 다시 보이는 것을 사용자가 확인했습니다. Windows 11 및 다른 Explorer 구성에서의 동작은 별도 확인이 필요합니다.
 
-이 저장소에는 소스와 빌드 방법을 포함합니다. 실행 파일과 개인 데이터는 Git으로 관리하지 않습니다. 아래 빌드 절차로 만드는 로컬 실행 파일은 `artifacts/TimeSchedule.exe`이며, 2026-10-28의 0.1.2 빌드 크기는 7,607,296바이트(7.25MiB)입니다. 실행 환경에는 Microsoft Edge WebView2 Runtime이 필요합니다. Rust, Cargo, Microsoft C++ Build Tools는 소스 빌드에 사용하는 도구이며, 사용자가 실행 파일을 실행하기 위해 함께 배포하는 앱 구성 요소가 아닙니다. 현재는 앱을 한 번만 실행하세요. 중복 실행 방지는 아직 포함하지 않습니다.
+이 저장소에는 소스와 빌드 방법을 포함합니다. 실행 파일과 개인 데이터는 Git으로 관리하지 않습니다. 아래 Tauri 빌드 결과는 `src-tauri/target/release/timeschedule.exe`입니다. 대표 네이티브 EXE와 구분해 사용하세요. 2026-10-28의 0.1.2 빌드 크기는 7,607,296바이트(7.25MiB)입니다. 실행 환경에는 Microsoft Edge WebView2 Runtime이 필요합니다. Rust, Cargo, Microsoft C++ Build Tools는 소스 빌드에 사용하는 도구이며, 사용자가 실행 파일을 실행하기 위해 함께 배포하는 앱 구성 요소가 아닙니다. 현재는 앱을 한 번만 실행하세요. 중복 실행 방지는 아직 포함하지 않습니다.
 
 소스에서 실행하거나 빌드할 때는 프로젝트 루트의 PowerShell에서 아래 명령을 사용합니다. Node.js와 npm이 필요하며, 먼저 프런트엔드 의존성을 설치합니다.
 
@@ -68,17 +70,16 @@ npm.cmd ci
 npm.cmd run tauri dev
 ```
 
-릴리스 빌드는 다음과 같습니다. `build.ps1`은 프런트엔드 타입 검사와 프런트엔드·네이티브 빌드를 실행합니다. 설치 프로그램은 만들지 않으며, 생성된 실행 파일을 배포 폴더로 복사합니다.
+릴리스 빌드는 다음과 같습니다. `build.ps1`은 프런트엔드 타입 검사와 프런트엔드·네이티브 빌드를 실행합니다. 설치 프로그램은 만들지 않으며 대표 네이티브 EXE를 덮어쓰지 않습니다.
 
 ```powershell
 .\scripts\build.ps1
-New-Item -ItemType Directory -Path .\artifacts -Force | Out-Null
-Copy-Item -LiteralPath .\src-tauri\target\release\timeschedule.exe -Destination .\artifacts\TimeSchedule.exe
+.\src-tauri\target\release\timeschedule.exe
 ```
 
 디버그 빌드는 `scripts/build.ps1 -DebugBuild`를 사용합니다. 이때 원본 실행 파일은 `src-tauri/target/debug/timeschedule.exe`에 생성됩니다.
 
-네이티브 앱의 기본 저장 위치는 Tauri의 `app_data_dir()`이 반환하는 `com.timeschedule.personal` 앱 데이터 폴더입니다. Windows에서는 보통 `%APPDATA%\com.timeschedule.personal`이며, 앱의 **내 컴퓨터에 저장** 정보에서 실제 경로를 확인할 수 있습니다.
+기존 Tauri 앱의 기본 저장 위치는 Tauri의 `app_data_dir()`이 반환하는 `com.timeschedule.personal` 앱 데이터 폴더입니다. Windows에서는 보통 `%APPDATA%\com.timeschedule.personal`이며, 앱의 **내 컴퓨터에 저장** 정보에서 실제 경로를 확인할 수 있습니다.
 
 | 파일 | 내용 |
 | --- | --- |
@@ -92,7 +93,7 @@ Copy-Item -LiteralPath .\src-tauri\target\release\timeschedule.exe -Destination 
 
 ```powershell
 $env:TIMESCHEDULE_DATA_DIR = Join-Path $PWD '.test-data'
-.\artifacts\TimeSchedule.exe
+.\src-tauri\target\release\timeschedule.exe
 ```
 
 다음 실행부터 기본 저장 위치로 돌아가려면 앱을 완전히 종료한 후 같은 PowerShell에서 `$env:TIMESCHEDULE_DATA_DIR = $null`로 지웁니다.

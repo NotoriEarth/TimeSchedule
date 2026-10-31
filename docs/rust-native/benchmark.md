@@ -39,7 +39,7 @@ fixture 무결성·외래키·FTS·한국어 검색·장문·재현성·기존 �
 | 대상 | 소스 기준 | 실제 실행 파일 | SHA256 |
 |---|---|---|---|
 | 기존 Tauri | PR #1 / a8f47a1 | artifacts/baseline/TimeSchedule.exe | 2C109E6C8D09A904C480B7B111B763824B3C47C42F54D879925E1FF92DCB5047 |
-| Rust 네이티브 | 1984949 | artifacts/TimeSchedule-native.exe | 30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD |
+| Rust 네이티브 | 1984949 | artifacts/archive/legacy-20261031/TimeSchedule-native.exe | 30EE5BFB0BD7A9FFB4814DA18F31E4507FB74A46E7DDE2BE4339B303B17096BD |
 
 둘 다 release 실행 파일을 사용했고 측정을 위해 앱 코드나 바이너리를 바꾸지 않았다. 사용자 DB·설정·기존 실행 프로세스와 분리했다. 기존 Tauri의 자식 WebView2 프로세스도 포함했다.
 

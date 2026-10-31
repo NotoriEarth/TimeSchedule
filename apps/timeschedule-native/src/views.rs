@@ -571,6 +571,7 @@ pub(crate) fn search_results(app: &App) -> Element<'_, Message> {
 }
 pub(crate) fn settings(app: &App) -> Element<'_, Message> {
     let mut c = column![
+        text(format!("TimeSchedule {}", env!("CARGO_PKG_VERSION"))).size(20),
         title("화면 모드"),
         quiet("Midnight · 어두운 모드 / Porcelain · 밝은 모드"),
         container(crate::shell::theme_toggle(app)).width(220),
