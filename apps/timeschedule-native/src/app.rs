@@ -1692,6 +1692,25 @@ mod tests {
             assert_eq!(app.widget_ui.selected.unwrap().to_string(), "2028-02-29");
         }
     }
+    #[test]
+    fn picker_bounds_sources_reached_by_diary_month_arrows() {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        for (year, month, delta, outside) in [(1900, 1, -1, 1899), (9998, 12, 1, 9999)] {
+            let mut app = fixture();
+            app.month = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+            let _ = app.update(Message::Month(delta));
+            assert_eq!(app.month.year(), outside);
+            let _ = app.jump_message(JumpMessage::Open(JumpTarget::Diary, JumpField::Month));
+            assert_eq!(
+                app.widget_ui.jump.as_ref().unwrap().year,
+                year,
+                "picker must start in the supported range even if the source has crossed it"
+            );
+            let _ = app.jump_message(JumpMessage::PickMonth(6));
+            assert_eq!(app.month.to_string(), format!("{year}-06-01"));
+            assert!(app.widget_ui.jump.is_none());
+        }
+    }
     fn hit(title: &str) -> SearchHit {
         SearchHit {
             id: "test".into(),

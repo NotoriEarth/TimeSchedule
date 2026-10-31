@@ -58,13 +58,14 @@ pub struct MonthJump {
 }
 impl MonthJump {
     pub fn new(window: window::Id, target: JumpTarget, level: JumpField, date: NaiveDate) -> Self {
+        let year = date.year().clamp(FIRST_YEAR, LAST_YEAR);
         Self {
             window,
             target,
             level,
-            year: date.year(),
+            year,
             month: date.month(),
-            decade: date.year() / 10 * 10,
+            decade: year / 10 * 10,
             direct: false,
             date: String::new(),
             error: String::new(),
@@ -144,7 +145,8 @@ impl App {
                         }
                     }
                     JumpMessage::PickMonth(month) if jump.level == JumpField::Month => {
-                        chosen = NaiveDate::from_ymd_opt(jump.year, month, 1);
+                        chosen = NaiveDate::from_ymd_opt(jump.year, month, 1)
+                            .filter(|d| (FIRST_YEAR..=LAST_YEAR).contains(&d.year()));
                         if chosen.is_none() {
                             jump.error = "1~12월 중에서 선택하세요.".into();
                         }
