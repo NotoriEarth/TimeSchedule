@@ -14,6 +14,8 @@ use timeschedule_core::{
     storage::{CalendarEvent, Task},
 };
 
+pub(crate) const EDITOR_SIZE: iced::Size = iced::Size::new(650.0, 560.0);
+
 const WEEKDAYS: [&str; 7] = ["일", "월", "화", "수", "목", "금", "토"];
 pub(crate) fn preview(value: &str, limit: usize) -> String {
     let mut chars = value.chars();
@@ -99,10 +101,9 @@ pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
         // confirmation. Retain cursor/selection/scroll and freeze its input.
         let editor_layer = crate::frozen::frozen(
             if quick {
-                container(editor_view(app))
-                    .padding(14)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
+                container(panel(editor_view(app), true))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill)
                     .style(theme::root)
                     .into()
             } else {
@@ -811,6 +812,18 @@ fn editor_view(app: &App) -> Element<'_, Message> {
     .height(Length::Fill)
     .into()
 }
+// Shared form surface: widget quick window and diary modal use one template.
+fn panel<'a>(content: Element<'a, Message>, editor: bool) -> Element<'a, Message> {
+    let mut surface = container(content)
+        .padding(22)
+        .width(EDITOR_SIZE.width)
+        .style(paper_style);
+    if editor {
+        surface = surface.height(EDITOR_SIZE.height);
+    }
+    opaque(mouse_area(surface).on_scroll(|_| Message::Ignore)).into()
+}
+
 fn modal<'a>(
     base: Element<'a, Message>,
     content: Element<'a, Message>,
@@ -827,11 +840,7 @@ fn modal<'a>(
     )
     .on_press(backdrop.unwrap_or(Message::Ignore))
     .on_scroll(|_| Message::Ignore);
-    let mut box_ = container(content).padding(22).width(650).style(paper_style);
-    if editor {
-        box_ = box_.height(560);
-    }
-    let box_ = opaque(mouse_area(box_).on_scroll(|_| Message::Ignore));
+    let box_ = panel(content, editor);
     stack![
         base,
         shade,

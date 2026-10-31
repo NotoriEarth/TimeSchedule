@@ -25,7 +25,7 @@ impl App {
             self.place_popup(self.widget.unwrap_or(self.manager), id)
         } else {
             let (id, open) = window::open(window::Settings {
-                size: Size::new(440.0, 480.0),
+                size: crate::views::EDITOR_SIZE,
                 min_size: Some(Size::new(350.0, 330.0)),
                 visible: false,
                 exit_on_close_request: false,

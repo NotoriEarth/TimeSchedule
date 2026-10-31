@@ -4,7 +4,7 @@ use crate::{
     theme,
 };
 use chrono::{Datelike, NaiveDate};
-use iced::widget::{button, column, container, operation, row, space, text, text_input};
+use iced::widget::{button, column, container, row, space, text, text_input};
 use iced::{window, Element, Length, Size, Task};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,10 +72,8 @@ impl App {
                     if self.placing_popups.contains_key(&jump.window) {
                         return Task::none();
                     }
-                    return window::minimize(jump.window, false)
-                        .chain(window::gain_focus(jump.window))
-                        .chain(operation::focus(focus.id()))
-                        .chain(operation::select_all(focus.id()));
+                    let id = jump.window;
+                    return self.place_popup(target.source(self), id);
                 }
                 let (id, open) = window::open(window::Settings {
                     size: Size::new(400.0, 300.0),

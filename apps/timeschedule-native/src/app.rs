@@ -1625,6 +1625,23 @@ mod tests {
             "focus must not restore a hidden popup at the default screen position"
         );
     }
+    #[test]
+    fn reopening_jump_repositions_without_resetting_its_draft() {
+        use crate::month_jump::{JumpField, JumpMessage, JumpTarget};
+        let mut app = fixture();
+        let _ = app.jump_message(JumpMessage::Open(JumpTarget::Diary, JumpField::Year));
+        let id = app.widget_ui.jump.as_ref().unwrap().window;
+        app.placing_popups.clear(); // Placement of the first opening completed.
+        let _ = app.jump_message(JumpMessage::Year("2035".into()));
+        let _ = app.jump_message(JumpMessage::Open(JumpTarget::Diary, JumpField::Month));
+        assert!(
+            app.placing_popups.contains_key(&id),
+            "reused popup must recapture the moved diary position"
+        );
+        let jump = app.widget_ui.jump.as_ref().unwrap();
+        assert_eq!(jump.year, "2035");
+        assert_eq!(jump.focus, JumpField::Month);
+    }
     fn hit(title: &str) -> SearchHit {
         SearchHit {
             id: "test".into(),

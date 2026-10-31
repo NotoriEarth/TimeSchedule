@@ -24,3 +24,6 @@ Interface: popup::anchor(hwnd) -> Result<Anchor,String>; popup::center(hwnd,Anch
 - [ ] Add owned-window Windows fixture proving screen coordinates from a child origin and centered top-level popup. Run tests green.
 - [ ] Full workspace, fmt/diff checks, meaningful renderer previews, release build and isolated launch. Independently review immutable change range e33925f..HEAD; fix material findings once, rerun affected checks.
 - [ ] Update verification doc, commit/push and update PR6, attach, deliver EXE and manual checks. No merge.
+
+## Added during implementation: common event form
+User explicitly requested matching widget/diary event-add style and one template. Add a renderer-operation test comparing title-input bounds relative to each form panel. Observe old padding14vs22 fail; extract the existing diary panel into shared panel(), use it in both surfaces, and set quick default size to the shared editor size. Inspect quick-editor and diary-editor PNGs; retain narrow-window and dirty-confirmation tests. Reviewer finding about reused jump position also gets a red/green regression preserving its draft.

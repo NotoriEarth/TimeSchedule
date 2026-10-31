@@ -318,7 +318,8 @@ fn render_theme_previews() {
             Size::new(400.0, 350.0),
         ),
         ("quick-list", AppTheme::Midnight, Size::new(440.0, 480.0)),
-        ("quick-editor", AppTheme::Midnight, Size::new(440.0, 480.0)),
+        ("quick-editor", AppTheme::Midnight, Size::new(650.0, 560.0)),
+        ("diary-editor", AppTheme::Midnight, Size::new(1160.0, 820.0)),
         (
             "quick-editor-small",
             AppTheme::Porcelain,
@@ -414,14 +415,14 @@ fn render_theme_previews() {
         app.manager_size = size;
         app.editor = None;
         app.editor_in_quick = false;
-        if name.starts_with("quick-") && name != "quick-list" {
+        if (name.starts_with("quick-") && name != "quick-list") || name == "diary-editor" {
             let mut editor = Editor::new(Form::event(app.quick_events[0].clone()), 1);
             editor.form.title.push_str(" 수정 중");
             if name == "quick-confirm-small" {
                 editor.request_close(CloseIntent::Quick);
             }
             app.editor = Some(editor);
-            app.editor_in_quick = true;
+            app.editor_in_quick = name.starts_with("quick-");
         }
         app.preferences.widget_opacity = 65;
         let mut renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
@@ -620,4 +621,61 @@ fn diary_week_event_controls_do_not_trigger_date_creation() {
         "{messages:?}"
     );
     assert!(!messages.iter().any(|m| matches!(m, Message::New(..))));
+}
+
+#[test]
+fn widget_and_diary_event_forms_share_panel_geometry() {
+    use iced::advanced::widget::{operation::TextInput, Id, Operation};
+    struct InputBounds(Option<Rectangle>);
+    impl Operation for InputBounds {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn text_input(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn TextInput) {
+            if id == Some(&Id::new("editor-title")) {
+                self.0 = Some(bounds);
+            }
+        }
+    }
+    let mut app = fixture();
+    app.quick_window = Some(window::Id::unique());
+    let _ = app.update(Message::New(Kind::Event, None));
+    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+    let mut inputs = Vec::new();
+    for quick in [false, true] {
+        app.editor_in_quick = quick;
+        let size = if quick {
+            Size::new(650., 560.)
+        } else {
+            Size::new(1160., 820.)
+        };
+        let mut element = app.view(if quick {
+            app.quick_window.unwrap()
+        } else {
+            app.manager
+        });
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let mut probe = InputBounds(None);
+        element.as_widget_mut().operate(
+            &mut tree,
+            layout::Layout::new(&node),
+            &renderer,
+            &mut probe,
+        );
+        let mut b = probe.0.expect("real title input exists");
+        if !quick {
+            b.x -= 255.;
+            b.y -= 130.;
+        }
+        inputs.push(b);
+    }
+    assert_eq!(
+        inputs[0], inputs[1],
+        "same form must have identical size and offsets inside its panel"
+    );
 }
