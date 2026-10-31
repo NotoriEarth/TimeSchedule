@@ -18,7 +18,7 @@ use timeschedule_core::{
 };
 use timeschedule_desktop::{
     paths::{self, InstanceLock},
-    preferences::{self, Preferences},
+    preferences::{self, AppTheme, Preferences},
     tray::{NativeTray, TrayAction},
     windows,
 };
@@ -113,6 +113,8 @@ pub struct NativeReport {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    ToggleTheme,
+    Resized(window::Id, Size),
     Ready(window::Id),
     WidgetReady(window::Id),
     CloseWindow(window::Id),
@@ -175,6 +177,7 @@ pub enum Message {
 
 pub struct App {
     pub manager: window::Id,
+    pub manager_size: Size,
     pub widget: Option<window::Id>,
     pub store: Option<Arc<Storage>>,
     pub data_dir: PathBuf,
@@ -281,6 +284,7 @@ impl App {
         }
         let mut app = Self {
             manager,
+            manager_size: Size::new(1160.0, 820.0),
             widget: None,
             store,
             data_dir,
@@ -358,6 +362,9 @@ impl App {
             window::close_events().map(Message::WindowClosed),
             iced::time::every(std::time::Duration::from_millis(500)).map(|_| Message::Tick),
             iced::event::listen_with(|event, status, id| {
+                if let iced::Event::Window(window::Event::Resized(size)) = &event {
+                    return Some(Message::Resized(id, *size));
+                }
                 if let iced::Event::InputMethod(ime) = &event {
                     match ime {
                         iced::advanced::input_method::Event::Preedit(s, _) => {
@@ -613,11 +620,20 @@ impl App {
                     | Message::FormLoaded(..)
                     | Message::Composition(..)
                     | Message::WindowClosed(_)
+                    | Message::Resized(..)
             )
         {
             return Task::none();
         }
         match message {
+            Message::ToggleTheme => {
+                self.preferences.theme = match self.preferences.theme {
+                    AppTheme::Midnight => AppTheme::Porcelain,
+                    AppTheme::Porcelain => AppTheme::Midnight,
+                };
+                return self.save_preferences();
+            }
+            Message::Resized(id, size) if id == self.manager => self.manager_size = size,
             Message::Ready(id) => self.log(&format!("manager ready {id:?}")),
             Message::WidgetReady(id) => {
                 self.log(&format!("widget ready {id:?}"));
@@ -703,7 +719,6 @@ impl App {
             Message::HoverWeek(value) if self.editor.is_none() => self.hovered_week = value,
             Message::SelectDay(date) if self.editor.is_none() => {
                 self.selected = date;
-                return self.open_form(Form::new(Kind::Event, date.to_string(), None));
             }
             Message::WidgetMonth(delta) => {
                 self.widget_month = shift_month(self.widget_month, delta);
@@ -1184,15 +1199,21 @@ impl App {
     pub fn view(&self, id: window::Id) -> Element<'_, Message> {
         crate::views::view(self, id)
     }
+    pub fn theme(&self, _: window::Id) -> iced::Theme {
+        crate::theme::iced_theme(self.preferences.theme)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[path = "visual.rs"]
+    mod visual;
     fn fixture() -> App {
         let date = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
         App {
             manager: window::Id::unique(),
+            manager_size: Size::new(1160.0, 820.0),
             widget: None,
             store: Some(Arc::new(Storage::open(":memory:").unwrap())),
             data_dir: PathBuf::new(),
@@ -1244,6 +1265,153 @@ mod tests {
             date: None,
             project_id: None,
         }
+    }
+    #[test]
+    fn selecting_calendar_day_shows_details_without_opening_editor() {
+        let mut app = fixture();
+        let date = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
+        let _ = app.update(Message::SelectDay(date));
+        assert_eq!(app.selected, date);
+        assert!(
+            app.editor.is_none(),
+            "date selection should show the inspector"
+        );
+        let _ = app.update(Message::New(Kind::Event, Some(date.to_string())));
+        assert_eq!(app.editor.as_ref().unwrap().form.date, date.to_string());
+    }
+    #[test]
+    fn dense_calendar_keeps_chips_within_short_rows() {
+        use iced::advanced::{layout, widget::Tree};
+        fn check(node: &layout::Node) {
+            for child in node.children() {
+                let b = child.bounds();
+                assert!(
+                    b.x >= -0.1 && b.x + b.width <= node.size().width + 0.1,
+                    "child {b:?} exceeds {:?}",
+                    node.size()
+                );
+                assert!(
+                    b.y >= -0.1 && b.y + b.height <= node.size().height + 0.1,
+                    "child {b:?} exceeds {:?}",
+                    node.size()
+                );
+                check(child);
+            }
+        }
+        let mut app = fixture();
+        for day in timeschedule_core::dates::calendar_days(app.month) {
+            for _ in 0..3 {
+                let mut form = Form::new(Kind::Event, day.to_string(), None);
+                form.title = "일정 제목과 긴 영문 WWWWWWWWWWW".into();
+                form.save(app.store.as_ref().unwrap()).unwrap();
+            }
+        }
+        app.snapshot = worker::snapshot(app.store.as_ref().unwrap(), &app.scope()).unwrap();
+        let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        for size in [
+            Size::new(584.0, 360.0),
+            Size::new(644.0, 420.0),
+            Size::new(644.0, 620.0),
+            Size::new(930.0, 700.0),
+        ] {
+            let mut calendar = crate::shell::calendar(&app);
+            let mut tree = Tree::new(calendar.as_widget());
+            let node = calendar.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            check(&node);
+        }
+    }
+    #[test]
+    fn themed_pages_keep_content_inside_window_width() {
+        use iced::advanced::{layout, widget::Tree};
+        fn check(node: &layout::Node, parent_x: f32, width: f32, context: &str) {
+            let bounds = node.bounds();
+            let x = parent_x + bounds.x;
+            assert!(
+                x.is_finite() && bounds.width.is_finite(),
+                "{context}: non-finite layout"
+            );
+            assert!(
+                x + bounds.width <= width + 1.0,
+                "{context}: horizontal overflow: x={x}, width={}, limit={width}",
+                bounds.width
+            );
+            for child in node.children() {
+                check(child, x, width, context);
+            }
+        }
+        let mut app = fixture();
+        let mut form = Form::new(Kind::Event, app.selected.to_string(), None);
+        form.title = "긴 일정 제목과 공백 없는 영문 abcdefghijklmnopqrstuvwxyz".repeat(2);
+        form.save(app.store.as_ref().unwrap()).unwrap();
+        app.snapshot = worker::snapshot(app.store.as_ref().unwrap(), &app.scope()).unwrap();
+        let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        for size in [
+            Size::new(800.0, 620.0),
+            Size::new(1160.0, 620.0),
+            Size::new(1160.0, 820.0),
+            Size::new(1440.0, 900.0),
+        ] {
+            app.manager_size = size;
+            for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+                app.preferences.theme = mode;
+                for page in [
+                    Page::Month,
+                    Page::Week,
+                    Page::Projects,
+                    Page::Records,
+                    Page::Tasks,
+                    Page::Notes,
+                    Page::Settings,
+                ] {
+                    app.page = page;
+                    let mut element = app.view(app.manager);
+                    let mut tree = Tree::new(element.as_widget());
+                    let node = element.as_widget_mut().layout(
+                        &mut tree,
+                        &renderer,
+                        &layout::Limits::new(Size::ZERO, size),
+                    );
+                    assert_eq!(node.size(), size);
+                    check(
+                        &node,
+                        0.0,
+                        size.width,
+                        &format!("{page:?}/{mode:?}/{size:?}"),
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn theme_toggle_keeps_editor_and_queues_latest_preference() {
+        let mut app = fixture();
+        let dir = std::env::temp_dir().join(format!("timeschedule-theme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        app._instance = Some(InstanceLock::acquire(&dir).unwrap());
+        app.data_dir = dir.clone();
+        let _ = app.open_form(Form::new(Kind::Entry, app.selected.to_string(), None));
+        app.editor.as_mut().unwrap().form.title = "보존할 초안".into();
+        let generation = app.editor_generation;
+        let _ = app.update(Message::ToggleTheme);
+        assert_eq!(app.preferences.theme, AppTheme::Porcelain);
+        assert!(app.prefs_saving);
+        let _ = app.update(Message::ToggleTheme);
+        assert_eq!(app.preferences.theme, AppTheme::Midnight);
+        assert!(
+            app.prefs_pending,
+            "last choice must be saved after the in-flight write"
+        );
+        assert_eq!(app.editor_generation, generation);
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "보존할 초안");
+        let _ = app.update(Message::PrefsDone(Ok(())));
+        assert!(app.prefs_saving);
+        assert!(!app.prefs_pending);
+        app._instance = None;
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn stale_search_does_not_replace_latest_results() {

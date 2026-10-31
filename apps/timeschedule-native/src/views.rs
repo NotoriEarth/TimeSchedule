@@ -1,26 +1,22 @@
 use crate::{
     app::{App, Field, Message, NativeAction, Page},
     editor::{Confirmation, Form, Kind},
+    theme,
 };
 use chrono::{Datelike, Duration, Local, NaiveDate};
 use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, row, scrollable, space,
     stack, text, text_editor, text_input, Column, Row,
 };
-use iced::{window, Alignment, Border, Color, Element, Length, Theme};
+use iced::{window, Alignment, Color, Element, Length, Theme};
 use timeschedule_core::{
-    dates::{calendar_days, week_after_sunday},
+    dates::calendar_days,
     diary::{EntrySummary, SearchHit},
     storage::{CalendarEvent, Task},
 };
 
-const INK: Color = Color::from_rgb(0.19, 0.23, 0.20);
-const MUTED: Color = Color::from_rgb(0.43, 0.46, 0.41);
-const PAPER: Color = Color::from_rgb(1.0, 0.99, 0.96);
-const LINE: Color = Color::from_rgb(0.86, 0.85, 0.79);
-const ACCENT: Color = Color::from_rgb(0.29, 0.42, 0.33);
 const WEEKDAYS: [&str; 7] = ["일", "월", "화", "수", "목", "금", "토"];
-fn preview(value: &str, limit: usize) -> String {
+pub(crate) fn preview(value: &str, limit: usize) -> String {
     let mut chars = value.chars();
     let mut shortened: String = chars.by_ref().take(limit).collect();
     if chars.next().is_some() {
@@ -45,17 +41,20 @@ const KIND_VALUES: [&str; 6] = [
     "portfolio",
 ];
 
-fn control<'a>(label: impl Into<String>, message: Message) -> iced::widget::Button<'a, Message> {
+pub(crate) fn control<'a>(
+    label: impl Into<String>,
+    message: Message,
+) -> iced::widget::Button<'a, Message> {
     button(text(label.into()).size(13))
         .padding([7, 10])
-        .style(button::secondary)
+        .style(theme::secondary)
         .on_press(message)
 }
-fn quiet<'a>(value: impl Into<String>) -> Element<'a, Message> {
-    text(value.into()).size(12).color(MUTED).into()
+pub(crate) fn quiet<'a>(value: impl Into<String>) -> Element<'a, Message> {
+    text(value.into()).size(12).style(theme::muted).into()
 }
-fn title<'a>(value: impl Into<String>) -> Element<'a, Message> {
-    text(value.into()).size(23).color(INK).into()
+pub(crate) fn title<'a>(value: impl Into<String>) -> Element<'a, Message> {
+    text(value.into()).size(23).into()
 }
 fn kind_label(value: &str) -> &'static str {
     KIND_VALUES
@@ -64,15 +63,8 @@ fn kind_label(value: &str) -> &'static str {
         .map(|i| KIND_LABELS[i])
         .unwrap_or("기록")
 }
-fn paper_style(_: &Theme) -> container::Style {
-    container::Style::default()
-        .background(PAPER)
-        .color(INK)
-        .border(Border {
-            color: LINE,
-            width: 1.0,
-            radius: 5.0.into(),
-        })
+fn paper_style(theme: &Theme) -> container::Style {
+    theme::surface(theme)
 }
 fn paper<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     container(content)
@@ -82,36 +74,11 @@ fn paper<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
         .into()
 }
 fn graph_paper<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
-    let lines = Column::with_children((0..18).map(|_| {
-        column![
-            space().height(Length::Fill),
-            container(space())
-                .height(1)
-                .width(Length::Fill)
-                .style(|_| container::Style::default()
-                    .background(Color::from_rgba(0.65, 0.67, 0.60, 0.10)))
-        ]
-        .height(Length::Fill)
-        .into()
-    }))
-    .height(Length::Fill);
-    let columns = Row::with_children((0..12).map(|_| {
-        row![
-            space().width(Length::Fill),
-            container(space())
-                .width(1)
-                .height(Length::Fill)
-                .style(|_| container::Style::default()
-                    .background(Color::from_rgba(0.65, 0.67, 0.60, 0.09)))
-        ]
-        .width(Length::Fill)
-        .into()
-    }))
-    .height(Length::Fill);
-    container(stack![lines, columns, container(content).padding(10)])
+    container(content)
+        .padding(12)
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(paper_style)
+        .style(theme::surface)
         .into()
 }
 
@@ -119,143 +86,7 @@ pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
     if Some(id) == app.widget {
         return widget(app);
     }
-    let mut nav = column![
-        text("TS").size(36).color(ACCENT),
-        text("TimeSchedule").size(17),
-        quiet("나의 만년 다이어리"),
-        space().height(15)
-    ]
-    .spacing(8);
-    for page in [
-        Page::Month,
-        Page::Week,
-        Page::Projects,
-        Page::Records,
-        Page::Tasks,
-        Page::Notes,
-        Page::Settings,
-    ] {
-        let active = app.page == page;
-        nav = nav.push(
-            button(text(page.label()).size(13))
-                .width(Length::Fill)
-                .padding([11, 9])
-                .style(if active {
-                    button::primary
-                } else {
-                    button::text
-                })
-                .on_press(Message::Navigate(page)),
-        );
-    }
-    nav = nav.push(space().height(8)).push(row![
-        quiet("프로젝트"),
-        space().width(Length::Fill),
-        button("+")
-            .on_press(Message::New(Kind::Project, None))
-            .style(button::text)
-    ]);
-    for project in app.snapshot.projects.iter().take(6) {
-        nav = nav.push(
-            button(text(&project.title).size(12))
-                .width(Length::Fill)
-                .on_press(Message::Project(Some(project.id.clone())))
-                .style(button::text),
-        );
-    }
-    nav = nav
-        .push(space().height(Length::Fill))
-        .push(quiet("내 컴퓨터 · SQLite"))
-        .push(control("앱 종료", Message::Quit));
-    let sidebar = container(nav)
-        .padding(14)
-        .width(158)
-        .height(Length::Fill)
-        .style(|_| container::Style::default().background(Color::from_rgb8(235, 232, 217)));
-    let heading = match app.page {
-        Page::Month => format!("{}년 {}월", app.month.year(), app.month.month()),
-        Page::Week => format!("{} — {}", app.week, app.week + Duration::days(6)),
-        Page::Projects => app
-            .snapshot
-            .projects
-            .iter()
-            .find(|p| Some(&p.id) == app.project.as_ref())
-            .map(|p| p.title.clone())
-            .unwrap_or("나의 프로젝트".into()),
-        _ => app.page.label().into(),
-    };
-    let search = text_input("일정, 프로젝트, 기록 검색", &app.search)
-        .on_input(|s| Message::Search(s.chars().take(200).collect()))
-        .width(250)
-        .size(13)
-        .padding(9);
-    let mut top = column![
-        row![
-            quiet(format!("오늘, {}", Local::now().format("%Y.%m.%d"))),
-            space().width(Length::Fill),
-            search
-        ]
-        .align_y(Alignment::Center),
-        row![
-            title(heading),
-            space().width(Length::Fill),
-            control("오늘", Message::Today),
-            control("새로 고침", Message::Load)
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center)
-    ]
-    .spacing(12);
-    if !app.error.is_empty() {
-        top = top.push(
-            container(
-                text(&app.error)
-                    .size(12)
-                    .color(Color::from_rgb8(156, 51, 40)),
-            )
-            .padding(7)
-            .width(Length::Fill)
-            .style(|_| container::Style::default().background(Color::from_rgb8(255, 237, 229))),
-        );
-    }
-    if !app.notice.is_empty() {
-        top = top.push(quiet(&app.notice));
-    }
-    let actions = actions(app);
-    top = top.push(actions);
-    let content = if !app.search.trim().is_empty() {
-        search_results(app)
-    } else {
-        match app.page {
-            Page::Month => month(app),
-            Page::Week => week(app),
-            Page::Projects => projects(app),
-            Page::Records => records(app),
-            Page::Tasks => tasks(app),
-            Page::Notes => notes(app),
-            Page::Settings => settings(app),
-        }
-    };
-    let mut main = column![top, content].spacing(12).height(Length::Fill);
-    if app.loading {
-        main = main.push(quiet("기록을 불러오는 중…"));
-    }
-    let base: Element<'_, Message> = container(
-        row![
-            sidebar,
-            container(main)
-                .padding(18)
-                .width(Length::Fill)
-                .height(Length::Fill)
-        ]
-        .height(Length::Fill),
-    )
-    .style(|_| {
-        container::Style::default()
-            .background(Color::from_rgb8(246, 243, 232))
-            .color(INK)
-    })
-    .into();
+    let base = crate::shell::view(app);
     if let Some(editor) = &app.editor {
         // This child stays at the same tree path both with and without the
         // confirmation. Retain cursor/selection/scroll and freeze its input.
@@ -284,7 +115,7 @@ pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
             };
             let mut panel = column![title(question), text(explanation).size(14)].spacing(18);
             if !editor.error.is_empty() {
-                panel = panel.push(text(&editor.error).color(Color::from_rgb8(170, 50, 40)));
+                panel = panel.push(text(&editor.error).style(theme::danger));
             }
             let controls = if editor.saving {
                 row![quiet("처리 중…")]
@@ -310,7 +141,7 @@ pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
     base
 }
 
-fn actions(app: &App) -> Element<'_, Message> {
+pub(crate) fn actions(app: &App) -> Element<'_, Message> {
     let mut actions = Row::new().spacing(6);
     match app.page {
         Page::Month => {
@@ -348,147 +179,14 @@ fn actions(app: &App) -> Element<'_, Message> {
         Page::Notes => actions = actions.push(control("+ 메모", Message::New(Kind::Note, None))),
         Page::Settings => {}
     }
-    actions.into()
+    actions.wrap().into()
 }
-fn month(app: &App) -> Element<'_, Message> {
-    let dates = calendar_days(app.month);
-    let mut grid = column![row![
-        container(text("주").size(11)).width(30),
-        Row::with_children(
-            WEEKDAYS
-                .iter()
-                .map(|d| container(text(*d).size(12)).center_x(Length::Fill).into())
-        )
-        .spacing(2)
-    ]
-    .spacing(2)]
-    .spacing(2);
-    for index in 0..6 {
-        let sunday = dates[index * 7];
-        let selector = mouse_area(
-            button(text(format!("W{}", index + 1)).size(11))
-                .padding([5, 2])
-                .width(30)
-                .height(Length::Fill)
-                .style(button::text)
-                .on_press(Message::OpenWeek(sunday)),
-        )
-        .on_enter(Message::HoverWeek(Some(sunday)))
-        .on_exit(Message::HoverWeek(None));
-        let mut cells = Row::new().spacing(2).height(80).push(selector);
-        for date in &dates[index * 7..index * 7 + 7] {
-            let date = *date;
-            let key = date.to_string();
-            let events: Vec<_> = app
-                .snapshot
-                .events
-                .iter()
-                .filter(|e| e.date == key)
-                .collect();
-            let entries = app
-                .snapshot
-                .entries
-                .iter()
-                .filter(|e| e.date == key)
-                .count();
-            let mut c = column![text(format!(
-                "{}{}",
-                date.day(),
-                if date == Local::now().date_naive() {
-                    " · 오늘"
-                } else {
-                    ""
-                }
-            ))
-            .size(14)]
-            .spacing(3);
-            for event in events.iter().take(2) {
-                c = c.push(
-                    text(format!(
-                        "{}{}",
-                        if event.completed { "✓ " } else { "" },
-                        preview(&event.title, 10)
-                    ))
-                    .size(10),
-                );
-            }
-            if events.len() > 2 {
-                c = c.push(quiet(format!("일정 +{}", events.len() - 2)));
-            }
-            if entries > 0 {
-                c = c.push(quiet(format!("기록 {entries}")));
-            }
-            let highlight = app
-                .hovered_week
-                .and_then(|s| week_after_sunday(s).ok())
-                .is_some_and(|w| date >= w.from && date <= w.to);
-            let today = date == Local::now().date_naive();
-            let outside = date.month() != app.month.month();
-            cells = cells.push(
-                button(c)
-                    .padding(7)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .on_press(Message::SelectDay(date))
-                    .style(move |_, status| {
-                        let hovered = status == button::Status::Hovered;
-                        button::Style {
-                            background: Some(
-                                if highlight || hovered {
-                                    Color::from_rgb8(231, 239, 220)
-                                } else {
-                                    PAPER
-                                }
-                                .into(),
-                            ),
-                            text_color: if outside { MUTED } else { INK },
-                            border: Border {
-                                color: if today { ACCENT } else { LINE },
-                                width: if today || highlight { 2.0 } else { 1.0 },
-                                radius: 3.0.into(),
-                            },
-                            ..Default::default()
-                        }
-                    }),
-            );
-        }
-        grid = grid.push(cells);
-    }
-    let mut content = column![
-        paper(grid),
-        quiet("날짜를 누르면 일정을 추가합니다. W 선택은 다음 월요일부터 일요일입니다."),
-        row![
-            title(format!("{}의 일정", app.selected)),
-            control(
-                "+ 기록",
-                Message::New(Kind::Entry, Some(app.selected.to_string()))
-            )
-        ]
-        .spacing(10)
-    ]
-    .spacing(14);
-    for event in app
-        .snapshot
-        .events
-        .iter()
-        .filter(|e| e.date == app.selected.to_string())
-    {
-        content = content.push(event_card(app, event));
-    }
-    if app.more {
-        content = content.push(more(app));
-    }
-    scrollable(content)
-        .id("month-page")
-        .height(Length::Fill)
-        .into()
-}
-fn week(app: &App) -> Element<'_, Message> {
+pub(crate) fn week(app: &App) -> Element<'_, Message> {
     let mut overview = column![
-        text("WEEKLY").size(12).color(MUTED),
+        text("WEEKLY").size(12).style(theme::muted),
         text(format!("{}월", app.week.month()))
             .size(32)
-            .color(ACCENT),
+            .style(theme::accent),
         quiet(format!(
             "{} — {}",
             app.week.format("%m.%d"),
@@ -559,10 +257,12 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
             WEEKDAYS[date.weekday().num_days_from_sunday() as usize]
         ))
         .size(12)
-        .color(if date.weekday().num_days_from_sunday() == 0 {
-            Color::from_rgb8(181, 82, 64)
-        } else {
-            MUTED
+        .style(move |t| text::Style {
+            color: Some(if date.weekday().num_days_from_sunday() == 0 {
+                theme::colors(t).rose
+            } else {
+                theme::colors(t).muted
+            })
         })
     ]
     .align_y(Alignment::Center);
@@ -571,10 +271,10 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
             header,
             row![
                 button(text("+ 일정").size(11))
-                    .style(button::text)
+                    .style(theme::text_button)
                     .on_press(Message::New(Kind::Event, Some(key.clone()))),
                 button(text("+ 기록").size(11))
-                    .style(button::text)
+                    .style(theme::text_button)
                     .on_press(Message::New(Kind::Entry, Some(key.clone())))
             ]
             .spacing(3),
@@ -587,7 +287,7 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
         .into(),
     )
 }
-fn event_card<'a>(app: &'a App, event: &'a CalendarEvent) -> Element<'a, Message> {
+pub(crate) fn event_card<'a>(app: &'a App, event: &'a CalendarEvent) -> Element<'a, Message> {
     let expanded = app.expanded_events.contains(&event.id);
     let mut contents = column![button(
         column![
@@ -617,7 +317,7 @@ fn event_card<'a>(app: &'a App, event: &'a CalendarEvent) -> Element<'a, Message
         ]
         .spacing(3)
     )
-    .style(button::text)
+    .style(theme::text_button)
     .width(Length::Fill)
     .on_press(Message::ToggleEvent(event.id.clone()))]
     .spacing(8);
@@ -627,26 +327,14 @@ fn event_card<'a>(app: &'a App, event: &'a CalendarEvent) -> Element<'a, Message
             Message::EditForm(Form::event(event.clone())),
         ));
     }
-    let color = match event.color.as_str() {
-        "blue" => Color::from_rgb8(227, 237, 245),
-        "amber" => Color::from_rgb8(249, 239, 215),
-        "rose" => Color::from_rgb8(248, 230, 227),
-        _ => Color::from_rgb8(231, 238, 222),
-    };
+    let category = event.color.clone();
     container(contents)
-        .padding(6)
+        .padding(10)
         .width(Length::Fill)
-        .style(move |_| {
-            container::Style::default()
-                .background(color)
-                .border(Border {
-                    radius: 4.0.into(),
-                    ..Default::default()
-                })
-        })
+        .style(move |t| theme::event_surface(t, &category))
         .into()
 }
-fn entry_card<'a>(app: &'a App, entry: &'a EntrySummary) -> Element<'a, Message> {
+pub(crate) fn entry_card<'a>(app: &'a App, entry: &'a EntrySummary) -> Element<'a, Message> {
     let expanded = app.expanded.contains(&entry.id);
     let mut c = column![button(
         column![
@@ -661,7 +349,7 @@ fn entry_card<'a>(app: &'a App, entry: &'a EntrySummary) -> Element<'a, Message>
         .spacing(3)
     )
     .width(Length::Fill)
-    .style(button::text)
+    .style(theme::text_button)
     .on_press(Message::ToggleEntry(entry.id.clone()))]
     .spacing(8);
     if expanded {
@@ -690,21 +378,14 @@ fn entry_card<'a>(app: &'a App, entry: &'a EntrySummary) -> Element<'a, Message>
         }
     }
     container(c)
-        .padding(6)
+        .padding(10)
         .width(Length::Fill)
-        .style(|_| {
-            container::Style::default()
-                .background(Color::from_rgba(1.0, 1.0, 1.0, 0.75))
-                .border(Border {
-                    color: LINE,
-                    width: 1.0,
-                    radius: 4.0.into(),
-                })
-        })
+        .style(theme::surface)
         .into()
 }
-fn task_card<'a>(app: &'a App, task: &'a Task) -> Element<'a, Message> {
-    let tick = button(text(if task.completed { "✓" } else { "□" }).size(18)).style(button::text);
+pub(crate) fn task_card<'a>(app: &'a App, task: &'a Task) -> Element<'a, Message> {
+    let tick =
+        button(text(if task.completed { "✓" } else { "□" }).size(18)).style(theme::text_button);
     let tick = if app.busy {
         tick
     } else {
@@ -719,14 +400,14 @@ fn task_card<'a>(app: &'a App, task: &'a Task) -> Element<'a, Message> {
             ]
             .spacing(3)
         )
-        .style(button::text)
+        .style(theme::text_button)
         .width(Length::Fill)
         .on_press(Message::EditForm(Form::task(task.clone())))
     ]
     .spacing(5)
     .into()
 }
-fn more(app: &App) -> Element<'_, Message> {
+pub(crate) fn more(app: &App) -> Element<'_, Message> {
     let b = control(
         format!("기록 더 보기 · {}개", app.snapshot.entries.len()),
         Message::More,
@@ -737,7 +418,7 @@ fn more(app: &App) -> Element<'_, Message> {
         b.into()
     }
 }
-fn records(app: &App) -> Element<'_, Message> {
+pub(crate) fn records(app: &App) -> Element<'_, Message> {
     let mut c = column![quiet(
         "모든 날짜의 노트, 개발 기록, 트러블슈팅과 저장한 초안"
     )]
@@ -753,7 +434,7 @@ fn records(app: &App) -> Element<'_, Message> {
     }
     scrollable(c).id("records-page").height(Length::Fill).into()
 }
-fn projects(app: &App) -> Element<'_, Message> {
+pub(crate) fn projects(app: &App) -> Element<'_, Message> {
     let mut list = column![control("모든 프로젝트", Message::Project(None))].spacing(5);
     for p in &app.snapshot.projects {
         list = list.push(control(&p.title, Message::Project(Some(p.id.clone()))));
@@ -805,7 +486,7 @@ fn projects(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .into()
 }
-fn tasks(app: &App) -> Element<'_, Message> {
+pub(crate) fn tasks(app: &App) -> Element<'_, Message> {
     let mut c = column![quiet(format!(
         "{} / {}개 완료",
         app.snapshot.tasks.iter().filter(|t| t.completed).count(),
@@ -817,7 +498,7 @@ fn tasks(app: &App) -> Element<'_, Message> {
     }
     scrollable(c).height(Length::Fill).into()
 }
-fn notes(app: &App) -> Element<'_, Message> {
+pub(crate) fn notes(app: &App) -> Element<'_, Message> {
     let mut c = column![quiet("제목을 선택하면 본문을 불러옵니다.")].spacing(10);
     for n in &app.snapshot.notes {
         c = c.push(control(
@@ -838,7 +519,7 @@ fn notes(app: &App) -> Element<'_, Message> {
     }
     scrollable(c).height(Length::Fill).into()
 }
-fn search_results(app: &App) -> Element<'_, Message> {
+pub(crate) fn search_results(app: &App) -> Element<'_, Message> {
     let mut c = column![title("검색 결과"), quiet("최대 50개 · 제목 또는 본문 검색")].spacing(10);
     if app.searching {
         c = c.push(quiet("검색 중…"));
@@ -855,7 +536,7 @@ fn search_results(app: &App) -> Element<'_, Message> {
             )
             .padding(12)
             .width(Length::Fill)
-            .style(button::secondary)
+            .style(theme::secondary)
             .on_press(if hit.kind == "project" {
                 Message::Project(Some(hit.id.clone()))
             } else {
@@ -868,8 +549,13 @@ fn search_results(app: &App) -> Element<'_, Message> {
     }
     scrollable(c).height(Length::Fill).into()
 }
-fn settings(app: &App) -> Element<'_, Message> {
+pub(crate) fn settings(app: &App) -> Element<'_, Message> {
     let mut c = column![
+        title("화면 모드"),
+        quiet("Midnight · 어두운 모드 / Porcelain · 밝은 모드"),
+        container(crate::shell::theme_toggle(app)).width(220),
+        quiet("선택한 모드는 다음 실행에도 유지됩니다."),
+        space().height(10),
         title("내 컴퓨터에 보관하는 다이어리"),
         quiet("데이터 저장 위치"),
         text(app.data_dir.display().to_string()).size(14),
@@ -933,13 +619,13 @@ fn widget(app: &App) -> Element<'_, Message> {
             .on_press(Message::DragWidget),
             space().width(Length::Fill),
             button("‹")
-                .style(button::text)
+                .style(theme::text_button)
                 .on_press(Message::WidgetMonth(-1)),
             button(text("오늘").size(12))
-                .style(button::text)
+                .style(theme::text_button)
                 .on_press(Message::WidgetToday),
             button("›")
-                .style(button::text)
+                .style(theme::text_button)
                 .on_press(Message::WidgetMonth(1))
         ]
         .align_y(Alignment::Center),
@@ -986,9 +672,9 @@ fn widget(app: &App) -> Element<'_, Message> {
                     .height(46)
                     .padding(2)
                     .style(if *date == Local::now().date_naive() {
-                        button::primary
+                        theme::primary
                     } else {
-                        button::text
+                        theme::text_button
                     })
                     .on_press(Message::WidgetDate(*date)),
             );
@@ -1005,7 +691,7 @@ fn widget(app: &App) -> Element<'_, Message> {
         ))
         .size(12)
     )
-    .style(button::text)
+    .style(theme::text_button)
     .on_press(Message::WidgetDate(today))]
     .spacing(2);
     for event in today_events.iter().take(3) {
@@ -1023,7 +709,7 @@ fn widget(app: &App) -> Element<'_, Message> {
                 ))
                 .size(11),
             )
-            .style(button::text)
+            .style(theme::text_button)
             .on_press(Message::WidgetDate(today)),
         );
     }
@@ -1034,7 +720,7 @@ fn widget(app: &App) -> Element<'_, Message> {
     c = c.push(row![
         button(text("다이어리 열기").size(12))
             .on_press(Message::ShowManager)
-            .style(button::text),
+            .style(theme::text_button),
         space().width(Length::Fill),
         button(
             text(if app.preferences.widget_locked {
@@ -1047,7 +733,7 @@ fn widget(app: &App) -> Element<'_, Message> {
         .on_press(Message::Native(NativeAction::Lock(
             !app.preferences.widget_locked
         )))
-        .style(button::text)
+        .style(theme::text_button)
     ]);
     c = c.push(
         row![
@@ -1212,7 +898,7 @@ fn editor_view(app: &App) -> Element<'_, Message> {
         fields = fields.push(input("로컬 Git 저장소 경로", &form.repo_path, Field::Repo));
     }
     if !e.error.is_empty() {
-        fields = fields.push(text(&e.error).size(13).color(Color::from_rgb8(170, 50, 40)));
+        fields = fields.push(text(&e.error).size(13).style(theme::danger));
     }
     let mut footer = Row::new().spacing(8).align_y(Alignment::Center);
     if e.saving {
@@ -1244,7 +930,7 @@ fn editor_view(app: &App) -> Element<'_, Message> {
             )),
             space().width(Length::Fill),
             button("×")
-                .style(button::text)
+                .style(theme::text_button)
                 .on_press(Message::CloseEditor)
         ],
         scrollable(fields)
@@ -1267,7 +953,7 @@ fn modal<'a>(
             .width(Length::Fill)
             .height(Length::Fill)
             .style(|_| {
-                container::Style::default().background(Color::from_rgba(0.1, 0.13, 0.1, 0.45))
+                container::Style::default().background(Color::from_rgba(0.02, 0.03, 0.05, 0.62))
             }),
     )
     .on_press(backdrop.unwrap_or(Message::Ignore))

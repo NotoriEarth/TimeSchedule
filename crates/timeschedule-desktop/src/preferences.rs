@@ -1,6 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AppTheme {
+    Porcelain,
+    #[default]
+    #[serde(other)]
+    Midnight,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Preferences {
@@ -9,6 +18,7 @@ pub struct Preferences {
     pub widget_locked: bool,
     pub widget_visible: bool,
     pub widget_opacity: u8,
+    pub theme: AppTheme,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -18,6 +28,7 @@ impl Default for Preferences {
             widget_locked: true,
             widget_visible: true,
             widget_opacity: 82,
+            theme: AppTheme::Midnight,
         }
     }
 }
@@ -55,6 +66,24 @@ pub fn save(directory: &Path, value: &Preferences) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn legacy_preferences_gain_midnight_without_losing_widget_settings() {
+        let old = r#"{"widgetX":-1200,"widgetY":50,"widgetLocked":false,"widgetVisible":false,"widgetOpacity":65}"#;
+        let prefs: Preferences = serde_json::from_str(old).unwrap();
+        let json = serde_json::to_value(prefs).unwrap();
+        assert_eq!(json["theme"], "midnight");
+        assert_eq!(json["widgetX"], -1200);
+        assert_eq!(json["widgetOpacity"], 65);
+        assert_eq!(json["widgetVisible"], false);
+    }
+    #[test]
+    fn light_theme_round_trips_and_unknown_theme_falls_back() {
+        for (input, expected) in [("porcelain", "porcelain"), ("future-theme", "midnight")] {
+            let prefs: Preferences =
+                serde_json::from_value(serde_json::json!({"theme": input})).unwrap();
+            assert_eq!(serde_json::to_value(prefs).unwrap()["theme"], expected);
+        }
+    }
+    #[test]
     fn old_preferences_default_opacity_and_reject_invalid() {
         let old = r#"{"widgetX":-1200,"widgetY":50,"widgetLocked":false,"widgetVisible":true}"#;
         let prefs: Preferences = serde_json::from_str(old).unwrap();
@@ -75,6 +104,7 @@ mod tests {
         let changed = Preferences {
             widget_x: Some(-500),
             widget_opacity: 40,
+            theme: AppTheme::Porcelain,
             ..Preferences::default()
         };
         save(&dir, &changed).unwrap();

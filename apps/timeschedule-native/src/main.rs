@@ -2,6 +2,9 @@
 mod app;
 mod editor;
 mod frozen;
+mod icons;
+mod shell;
+mod theme;
 mod views;
 mod worker;
 
@@ -16,7 +19,7 @@ fn main() {
     if let Err(error) = iced::daemon(App::boot, App::update, App::view)
         .title(App::title)
         .default_font(Font::with_name("Malgun Gothic"))
-        .theme(|_: &App, _| iced::Theme::Light)
+        .theme(App::theme)
         .subscription(App::subscription)
         .run()
     {
