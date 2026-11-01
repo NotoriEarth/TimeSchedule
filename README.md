@@ -4,7 +4,7 @@
 
 대표 실행 파일은 **`artifacts/TimeSchedule.exe`** 하나입니다. Rust/Iced로 화면을 만들며 실행에 WebView/JavaScript 런타임이 필요하지 않습니다. 앱 설정·창 제목과 Windows 파일 속성에서 버전을 확인할 수 있습니다. [버전 규칙과 업데이트 이력](CHANGELOG.md)을 참고하세요.
 
-[0.8.0 자동 기록 안내](docs/project-records.md)와 [최신 검증 결과](docs/offline-project-records-verification.md)를 참고하세요. [초기 0.8.0 검증](docs/project-records-verification.md)과 [0.7.0 검증](docs/release-0.7.0-verification.md)도 보존합니다.
+[0.8.0 자동 기록 안내](docs/project-records.md)와 [최신 검증 결과](docs/offline-project-records-verification.md)를 참고하세요. 2026-11-01 재검증에서 자동 테스트 138개와 실제 기록 전달을 확인하고 Space 목록 블록 비교 오류를 수정했습니다. [초기 0.8.0 검증](docs/project-records-verification.md)과 [0.7.0 검증](docs/release-0.7.0-verification.md)도 보존합니다.
 
 ```powershell
 .\scripts\build-native.ps1

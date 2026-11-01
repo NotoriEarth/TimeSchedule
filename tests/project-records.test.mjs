@@ -124,6 +124,39 @@ test('a changed word is rejected but actual create receipts retain the page for 
   assert.equal(createdPageObservation([changed], job), null);
 });
 
+test('Space list-item blocks verify against the original compact list without rewriting it', () => {
+  for (const list of ['- 검증 136개 통과\n- [PR #8](https://github.com/NotoriEarth/TimeSchedule/pull/8)', '1. 원문 저장\n2. 링크 연결']) {
+    const job = { source: { ...source(), parentPageId }, pageMarkdown: `실제 입력은 미확인.\n\n## 관련 자료\n\n${list}`, space: null };
+    const child = readEvent(pageId, job.source.title, job.pageMarkdown);
+    const blocks = child.item.result.structured_content.content.blocks;
+    const listBlock = blocks.pop();
+    blocks.push(...listBlock.markdown.split('\n').map((markdown, i) => ({ ...listBlock, id: `list${i}`, markdown })));
+    // Real Pages readbacks return each list item as a separate markdown block.
+    const events = [child, readEvent(parentPageId, '포트폴리오', `[기록](${pageUrl})`)];
+    const verified = verifyPageEvents(events, job);
+    assert.equal(verified.markdown, job.pageMarkdown);
+    job.space = { ...verified, markdown: blocks.map(b => b.markdown).join('\n\n') };
+    assert.equal(verifyPageEvents(events, job).pageId, pageId);
+  }
+});
+
+test('Space block reconciliation rejects changed facts, links, order and code whitespace', () => {
+  const original = '- 검증 136개 통과\n- 실제 입력은 미확인.\n- [PR #8](https://github.com/NotoriEarth/TimeSchedule/pull/8)';
+  const job = { source: { ...source(), parentPageId }, pageMarkdown: original, space: null };
+  const parent = readEvent(parentPageId, '포트폴리오', `[기록](${pageUrl})`);
+  for (const changed of [original.replace('136', '137'), original.replace('미확인', '확인'), original.replace('/pull/8', '/pull/7'), original.split('\n').reverse().join('\n')]) {
+    const child = readEvent(pageId, job.source.title, changed.replaceAll('\n', '\n\n'));
+    assert.throws(() => verifyPageEvents([child, parent], job), /검증/);
+  }
+  for (const [expected, actual] of [
+    ['첫 줄\n둘째 줄', '첫 줄\n\n둘째 줄'],
+    ['```text\n- 원문\n- 공백 보존\n```', '```text\n- 원문\n\n- 공백 보존\n```'],
+    ['- 첫 항목\n  내부 줄\n- 다음 항목', '- 첫 항목\n\n  내부 줄\n\n- 다음 항목'],
+  ]) {
+    assert.throws(() => verifyPageEvents([readEvent(pageId, job.source.title, actual), parent], { ...job, pageMarkdown: expected }), /검증/);
+  }
+});
+
 test('a stale lock observer cannot enter while another process owns delivery', async t => {
   const dir = stateDir(t); await prepare(source(), { stateDir: dir });
   const moduleUrl = pathToFileURL(path.resolve('scripts/project-records.mjs')).href;

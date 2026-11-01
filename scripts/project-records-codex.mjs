@@ -11,7 +11,33 @@ export function validatePublication(space, job) {
       || normal(space.markdown ?? '') !== normal(job.pageMarkdown) || space.indexVerified !== true
       || (job.space && space.pageId !== job.space.pageId)) throw new Error('Space 읽기 결과의 위치·제목·본문·링크 검증에 실패했습니다.');
 }
-function pageReads(events) {
+function readMarkdown(blocks, expected) {
+  const pieces = blocks.map(b => b.markdown.replace(/\r\n/g, '\n'));
+  const observed = normal(pieces.join('\n\n'));
+  if (typeof expected !== 'string' || observed === normal(expected)) return observed;
+  const desired = normal(expected);
+  // Pages can return adjacent one-line list items as individual blocks. Only
+  // their synthetic separator may differ; never normalize words, indentation,
+  // paragraph breaks or whitespace inside a block (especially fenced code).
+  const listItem = text => /^(?:[-+*]|\d+[.)]) [^\n]+$/.test(text);
+  let offset = 0;
+  for (let i = 0; i < pieces.length; i++) {
+    let piece = pieces[i];
+    if (i === 0) piece = piece.trimStart();
+    if (i === pieces.length - 1) piece = piece.trimEnd();
+    if (i > 0) {
+      const compactList = listItem(pieces[i - 1]) && listItem(piece)
+        && desired.startsWith(`\n${piece}`, offset);
+      const separator = compactList ? '\n' : '\n\n';
+      if (!desired.startsWith(separator, offset)) return observed;
+      offset += separator.length;
+    }
+    if (!desired.startsWith(piece, offset)) return observed;
+    offset += piece.length;
+  }
+  return offset === desired.length ? desired : observed;
+}
+function pageReads(events, job) {
   return events.flatMap(event => {
     const item = event.item;
     if (event.type !== 'item.completed' || item?.type !== 'mcp_tool_call' || item.server !== 'codex_apps' || item.status !== 'completed' || item.error || !/^chatgpt_space(?:\.|__)read_page$/.test(item.tool ?? '')) return [];
@@ -20,11 +46,11 @@ function pageReads(events) {
         || page.content.page_id !== item.arguments?.page_id || page.metadata.page_id !== item.arguments?.page_id
         || page.content.blocks.some(b => b.kind !== 'markdown')) return [];
     return [{ pageId: page.metadata.page_id, pageUrl: page.metadata.url, title: page.metadata.title,
-      parentPageId: page.metadata.parent?.page_id, markdown: normal(page.content.blocks.map(b => b.markdown).join('\n\n')) }];
+      parentPageId: page.metadata.parent?.page_id, markdown: readMarkdown(page.content.blocks, job?.pageMarkdown) }];
   });
 }
 function childObservation(events, job) {
-  const reads = [...new Map(pageReads(events).map(p => [p.pageId, p])).values()];
+  const reads = [...new Map(pageReads(events, job).map(p => [p.pageId, p])).values()];
   const candidates = reads.filter(p => p.parentPageId === job.source.parentPageId && p.title === job.source.title
     && p.markdown === normal(job.pageMarkdown) && (!job.space || p.pageId === job.space.pageId));
   if (new Set(candidates.map(p => p.pageId)).size !== 1) return null;
@@ -41,7 +67,7 @@ export function createdPageObservation(events, job) {
   if (new Set(ids).size !== 1) return null;
   // Keep the actual ID and last observed snapshot even if the writer changed a
   // word. A retry can repair that snapshot, but must preserve later human edits.
-  const observed = pageReads(events).filter(p => p.pageId === ids[0]).at(-1);
+  const observed = pageReads(events, job).filter(p => p.pageId === ids[0]).at(-1);
   return observed && { ...observed, indexVerified: false };
 }
 export function publicationMayHaveStarted(events) {
@@ -50,7 +76,7 @@ export function publicationMayHaveStarted(events) {
 }
 export function verifyPageEvents(events, job) {
   const child = childObservation(events, job);
-  const root = pageReads(events).filter(p => p.pageId === job.source.parentPageId).at(-1);
+  const root = pageReads(events, job).filter(p => p.pageId === job.source.parentPageId).at(-1);
   const result = child && { ...child, indexVerified: root?.markdown.includes(`](${child.pageUrl})`) === true };
   validatePublication(result, job);
   return result;
@@ -103,6 +129,8 @@ function promptFor(job, recoverOnly) {
 
 Goal: save the EXACT supplied Korean project record below the configured parent Page, then ensure the parent contains a simple Markdown link to that child. Keep all numbers, caveats, uncertainties and wording exactly. No rewriting or new claims. A PR is not required. Do not add the page title as a body heading. The native Page title must equal source.title.
 
+Pages may return adjacent single-line list items as separate blocks. The host can reconcile only those block separators with the supplied original. Do not rewrite list text or edit an otherwise identical page merely to change spacing between those blocks.
+
 Read the parent and the target before any edit. If an existing mapped page's current title/body differs from BOTH the last verified snapshot AND desired title/body, report conflict and make no changes. Preserve human edits. Use actual read-derived block hashes/sequence guards. After editing, read the child with full content (not excerpts), and read the parent with full content. These actual read_page receipts, not your final statement, are required to verify the operation.
 
 If mapped page exists, keep its ID. If unmapped, first look for an existing child under this parent with the exact title and exact body. Reuse exactly one match; report conflict for multiple matches. ${recoverOnly ? 'RECOVERY ONLY: a previous create may have succeeded. You may reconcile existing pages, but MUST NOT create any new page. If no exact match can be established, report not_found and stop.' : 'Only if no matching page exists and there is no mapped page, create one child using the supplied parent_page_id, exact title and exact body. Retain workId as an idempotency_key if supported; never put internal IDs or run labels in the visible content.'}
@@ -135,7 +163,7 @@ export async function publishCodex(job, options) {
       && (['ENOENT','EACCES'].includes(error.code) || traceComplete);
     const observed = childObservation(events, job) ?? createdPageObservation(events, job);
     if (observed) error.space = { ...observed, indexVerified: false };
-    const existing = job.space && pageReads(events).find(p => p.pageId === job.space.pageId);
+    const existing = job.space && pageReads(events, job).find(p => p.pageId === job.space.pageId);
     if (existing && (existing.markdown !== normal(job.space.markdown) || existing.title !== job.space.title)
         && (existing.markdown !== normal(job.pageMarkdown) || existing.title !== job.source.title)) {
       error.conflict = true; error.message = 'Space의 사용자 편집을 보존했습니다. 자동 갱신을 보류합니다.';
