@@ -137,6 +137,12 @@ test('Space list-item blocks verify against the original compact list without re
     assert.equal(verified.markdown, job.pageMarkdown);
     job.space = { ...verified, markdown: blocks.map(b => b.markdown).join('\n\n') };
     assert.equal(verifyPageEvents(events, job).pageId, pageId);
+    // A subsequent revision must recognize the previously verified snapshot
+    // even before the page receives the new text, without accepting it as new.
+    const next = { ...job, space: verified, pageMarkdown: `${job.pageMarkdown}\n\n후속 검증: 완료.` };
+    const created = structuredClone(child); created.item.tool = 'chatgpt_space.create_page';
+    assert.equal(createdPageObservation([created, child], next).markdown, verified.markdown);
+    assert.throws(() => verifyPageEvents(events, next), /검증/);
   }
 });
 

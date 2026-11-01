@@ -11,31 +11,36 @@ export function validatePublication(space, job) {
       || normal(space.markdown ?? '') !== normal(job.pageMarkdown) || space.indexVerified !== true
       || (job.space && space.pageId !== job.space.pageId)) throw new Error('Space 읽기 결과의 위치·제목·본문·링크 검증에 실패했습니다.');
 }
-function readMarkdown(blocks, expected) {
+function readMarkdown(blocks, ...expectedVersions) {
   const pieces = blocks.map(b => b.markdown.replace(/\r\n/g, '\n'));
   const observed = normal(pieces.join('\n\n'));
-  if (typeof expected !== 'string' || observed === normal(expected)) return observed;
-  const desired = normal(expected);
   // Pages can return adjacent one-line list items as individual blocks. Only
   // their synthetic separator may differ; never normalize words, indentation,
   // paragraph breaks or whitespace inside a block (especially fenced code).
   const listItem = text => /^(?:[-+*]|\d+[.)]) [^\n]+$/.test(text);
-  let offset = 0;
-  for (let i = 0; i < pieces.length; i++) {
-    let piece = pieces[i];
-    if (i === 0) piece = piece.trimStart();
-    if (i === pieces.length - 1) piece = piece.trimEnd();
-    if (i > 0) {
-      const compactList = listItem(pieces[i - 1]) && listItem(piece)
-        && desired.startsWith(`\n${piece}`, offset);
-      const separator = compactList ? '\n' : '\n\n';
-      if (!desired.startsWith(separator, offset)) return observed;
-      offset += separator.length;
-    }
-    if (!desired.startsWith(piece, offset)) return observed;
-    offset += piece.length;
+  for (const expected of expectedVersions) {
+    if (typeof expected !== 'string') continue;
+    const desired = normal(expected);
+    if (observed === desired) return desired;
+    let offset = 0;
+    const matches = pieces.every((raw, i) => {
+      let piece = raw;
+      if (i === 0) piece = piece.trimStart();
+      if (i === pieces.length - 1) piece = piece.trimEnd();
+      if (i > 0) {
+        const compactList = listItem(pieces[i - 1]) && listItem(piece)
+          && desired.startsWith(`\n${piece}`, offset);
+        const separator = compactList ? '\n' : '\n\n';
+        if (!desired.startsWith(separator, offset)) return false;
+        offset += separator.length;
+      }
+      if (!desired.startsWith(piece, offset)) return false;
+      offset += piece.length;
+      return true;
+    });
+    if (matches && offset === desired.length) return desired;
   }
-  return offset === desired.length ? desired : observed;
+  return observed;
 }
 function pageReads(events, job) {
   return events.flatMap(event => {
@@ -46,7 +51,7 @@ function pageReads(events, job) {
         || page.content.page_id !== item.arguments?.page_id || page.metadata.page_id !== item.arguments?.page_id
         || page.content.blocks.some(b => b.kind !== 'markdown')) return [];
     return [{ pageId: page.metadata.page_id, pageUrl: page.metadata.url, title: page.metadata.title,
-      parentPageId: page.metadata.parent?.page_id, markdown: readMarkdown(page.content.blocks, job?.pageMarkdown) }];
+      parentPageId: page.metadata.parent?.page_id, markdown: readMarkdown(page.content.blocks, job?.pageMarkdown, job?.space?.markdown) }];
   });
 }
 function childObservation(events, job) {
