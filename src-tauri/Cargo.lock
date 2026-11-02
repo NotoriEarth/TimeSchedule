@@ -3392,6 +3392,7 @@ dependencies = [
  "chrono",
  "rusqlite",
  "serde",
+ "serde_json",
  "url",
  "uuid",
 ]

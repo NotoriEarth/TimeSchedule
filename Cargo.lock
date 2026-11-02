@@ -2157,17 +2157,20 @@ dependencies = [
 
 [[package]]
 name = "timeschedule-native"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "iced",
  "png",
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "softbuffer",
  "timeschedule-core",
  "timeschedule-desktop",
  "tiny-skia",
  "tokio",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 

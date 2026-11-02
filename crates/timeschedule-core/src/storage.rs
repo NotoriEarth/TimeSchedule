@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const MAX_TITLE_LENGTH: usize = 200;
 const MAX_TEXT_LENGTH: usize = 20_000;
 
@@ -418,6 +418,21 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
             PRAGMA user_version = 2;"
         ).map_err(database_error)?;
         crate::diary::create_search_index(&transaction)?;
+    }
+    if version < 3 {
+        // Deliberately no FK: retaining this receipt also preserves a user's
+        // deletion when an external delivery is retried later.
+        transaction
+            .execute_batch(
+                "CREATE TABLE project_record_receipts (
+                work_id TEXT PRIMARY KEY NOT NULL,
+                revision INTEGER NOT NULL,
+                payload TEXT NOT NULL,
+                entry_id TEXT NOT NULL,
+                managed_snapshot TEXT NOT NULL
+            ); PRAGMA user_version = 3;",
+            )
+            .map_err(database_error)?;
     }
     transaction.commit().map_err(database_error)
 }

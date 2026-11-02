@@ -125,6 +125,8 @@ pub enum Message {
     CloseWindow(window::Id),
     WindowClosed(window::Id),
     Tick,
+    RecordsDue,
+    RecordsDrained(Result<crate::record_inbox::DrainReport, String>),
     Navigate(Page),
     Month(i32),
     Week(i64),
@@ -211,6 +213,7 @@ pub struct App {
     pub project: Option<String>,
     pub expanded: HashSet<String>,
     pub expanded_events: HashSet<String>,
+    record_sync: crate::record_sync::Runner,
     pub bodies: HashMap<String, Entry>,
     pub entry_errors: HashMap<String, String>,
     pub editor: Option<Editor>,
@@ -232,6 +235,8 @@ pub struct App {
     pub tray: Option<NativeTray>,
     _instance: Option<InstanceLock>,
     ticks: u32,
+    records_due: bool,
+    records_processing: bool,
     pub manager_visible: bool,
     prefs_saving: bool,
     prefs_pending: bool,
@@ -326,6 +331,7 @@ impl App {
             project: None,
             expanded: HashSet::new(),
             expanded_events: HashSet::new(),
+            record_sync: crate::record_sync::Runner::default(),
             bodies: HashMap::new(),
             entry_errors: HashMap::new(),
             editor: None,
@@ -347,6 +353,8 @@ impl App {
             tray,
             _instance: instance,
             ticks: 0,
+            records_due: false,
+            records_processing: false,
             manager_visible: true,
             prefs_saving: false,
             prefs_pending: false,
@@ -362,7 +370,15 @@ impl App {
         ));
         let widget = app.open_widget();
         let load = app.refresh();
-        (app, Task::batch([open.map(Message::Ready), widget, load]))
+        (
+            app,
+            Task::batch([
+                open.map(Message::Ready),
+                widget,
+                load,
+                Task::done(Message::RecordsDue),
+            ]),
+        )
     }
     pub fn title(&self, id: window::Id) -> String {
         if Some(id) == self.widget {
@@ -477,6 +493,30 @@ impl App {
             store,
             move |s| worker::snapshot(s, &scope),
             move |result| Message::Loaded(generation, result),
+        )
+    }
+    fn poll_record_inbox(&mut self) -> Task<Message> {
+        if !self.records_due
+            || self.records_processing
+            || self.busy
+            || self.loading
+            || self.editor.is_some()
+            || self.quit_when_idle
+            || self.data_dir.as_os_str().is_empty()
+        {
+            return Task::none();
+        }
+        let Some(store) = self.store.clone() else {
+            return Task::none();
+        };
+        self.records_due = false;
+        self.records_processing = true;
+        self.busy = true;
+        let dir = self.data_dir.clone();
+        worker::job(
+            store,
+            move |s| crate::record_inbox::drain(&dir, s),
+            Message::RecordsDrained,
         )
     }
     fn open_widget(&mut self) -> Task<Message> {
@@ -697,6 +737,8 @@ impl App {
                     | Message::PopupPositioned(..)
                     | Message::Jump(crate::month_jump::JumpMessage::Ready(_))
                     | Message::Tick
+                    | Message::RecordsDue
+                    | Message::RecordsDrained(_)
                     | Message::NativeDone(..)
                     | Message::PrefsDone(_)
                     | Message::Loaded(..)
@@ -715,6 +757,47 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::RecordsDue => {
+                self.records_due = true;
+                return self.poll_record_inbox();
+            }
+            Message::RecordsDrained(result) if self.records_processing => {
+                self.records_processing = false;
+                self.busy = false;
+                match result {
+                    Ok(report) => {
+                        if report.conflicts > 0 {
+                            self.error = format!(
+                                "자동 기록 {}건은 사용자 수정·삭제를 보존하기 위해 보류했습니다.",
+                                report.conflicts
+                            );
+                        }
+                        if !report.errors.is_empty() {
+                            self.error = report.errors.join("\n");
+                        }
+                        if report.saved > 0 {
+                            self.notice =
+                                format!("Space 기록 {}건을 다이어리에 반영했습니다.", report.saved);
+                            self.log(&format!(
+                                "project records saved={} conflicts={} failed={}",
+                                report.saved, report.conflicts, report.failed
+                            ));
+                            return self.refresh();
+                        }
+                        if report.unchanged > 0 {
+                            // A previous delivery may have committed before its
+                            // acknowledgement failed. Drop old editable bodies.
+                            return self.refresh();
+                        }
+                    }
+                    Err(error) => {
+                        self.error = format!("자동 기록 수신 실패: {error}");
+                        // Errors can happen after the SQLite transaction commits.
+                        // Refresh before allowing any edit of the cached snapshot.
+                        return self.refresh();
+                    }
+                }
+            }
             Message::WidgetSetting(change) => return self.widget_setting(change),
             Message::Jump(change) => return self.jump_message(change),
             Message::ResizeWidget if !self.preferences.widget_locked && !self.native_busy => {
@@ -804,6 +887,9 @@ impl App {
                     return self.request_close(CloseIntent::Application);
                 }
                 self.ticks += 1;
+                if let Some(message) = self.record_sync.poll(&self.data_dir) {
+                    self.log(&message);
+                }
                 let action = self.tray.as_ref().and_then(|tray| tray.try_recv());
                 if let Some(action) = action {
                     return match action {
@@ -819,6 +905,12 @@ impl App {
                     };
                 }
                 let mut tasks = vec![self.widget_today_changed()];
+                if self.ticks % 120 == 0 {
+                    self.records_due = true;
+                }
+                if self.records_due {
+                    tasks.push(self.poll_record_inbox());
+                }
                 if self
                     .widget_ui
                     .save_due
@@ -1459,6 +1551,7 @@ mod tests {
             project: None,
             expanded: HashSet::new(),
             expanded_events: HashSet::new(),
+            record_sync: crate::record_sync::Runner::default(),
             bodies: HashMap::new(),
             entry_errors: HashMap::new(),
             editor: None,
@@ -1480,12 +1573,81 @@ mod tests {
             tray: None,
             _instance: None,
             ticks: 0,
+            records_due: false,
+            records_processing: false,
             manager_visible: true,
             prefs_saving: false,
             prefs_pending: false,
             quit_when_idle: false,
             native_pending: None,
         }
+    }
+
+    #[test]
+    fn record_queue_waits_for_editor_and_blocks_stale_edits_during_import() {
+        let dir = crate::record_inbox::tests::TestDir::new();
+        let mut app = fixture();
+        app.data_dir = dir.0.clone();
+        let _ = app.update(Message::New(Kind::Entry, None));
+        let _ = app.update(Message::Field(Field::Title("작성 중인 원문".into())));
+        let _ = app.update(Message::RecordsDue);
+        assert_eq!(app.editor.as_ref().unwrap().form.title, "작성 중인 원문");
+        assert!(!app.busy);
+        assert!(app.records_due);
+        app.editor = None;
+        let _ = app.poll_record_inbox();
+        assert!(app.busy);
+        let _ = app.update(Message::New(Kind::Entry, None));
+        assert!(
+            app.editor.is_none(),
+            "기록 반영 중 오래된 목록에서 편집기를 열지 않는다"
+        );
+        let _ = app.update(Message::RecordsDrained(Ok(
+            crate::record_inbox::DrainReport {
+                saved: 1,
+                ..Default::default()
+            },
+        )));
+        assert!(!app.busy);
+        assert!(!app.records_processing);
+        assert!(app.loading, "반영 후 새 목록을 조회한다");
+    }
+
+    #[test]
+    fn record_commit_receipt_failure_invalidates_cached_body_before_editing() {
+        let dir = crate::record_inbox::tests::TestDir::new();
+        let mut app = fixture();
+        let store = app.store.clone().unwrap();
+        let mut record = crate::record_inbox::tests::sample();
+        let id = store
+            .apply_project_record(&record)
+            .unwrap()
+            .entry_id
+            .unwrap();
+        let old = store.get_entry(&id).unwrap();
+        app.bodies.insert(id.clone(), old.clone());
+        app.expanded.insert(id.clone());
+        record.revision = 2;
+        record.summary = "새 검증 결과. 사용자 확인은 남아 있다.".into();
+        crate::record_inbox::enqueue(&dir.0, &record).unwrap();
+        std::fs::write(dir.0.join("record-receipts"), b"receipt path blocked").unwrap();
+        let result = crate::record_inbox::drain(&dir.0, &store);
+        assert!(result.is_err());
+        assert!(store.get_entry(&id).unwrap().body.contains("새 검증 결과"));
+        app.records_processing = true;
+        app.busy = true;
+        let _ = app.update(Message::RecordsDrained(result));
+        assert!(app.loading, "DB commit 이후 수신 결과 실패도 갱신해야 한다");
+        assert!(app.bodies.is_empty());
+        let _ = app.open_form(Form::entry(old));
+        assert!(app.editor.is_none());
+        std::fs::remove_file(dir.0.join("record-receipts")).unwrap();
+        let replay = crate::record_inbox::drain(&dir.0, &store).unwrap();
+        assert_eq!(replay.unchanged, 1);
+        app.loading = false;
+        app.records_processing = true;
+        let _ = app.update(Message::RecordsDrained(Ok(replay)));
+        assert!(app.loading, "재시도에서도 이미 커밋된 기록을 다시 읽는다");
     }
 
     #[test]
