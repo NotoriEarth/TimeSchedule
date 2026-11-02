@@ -149,3 +149,37 @@ test('re-preparing excluded uncertain work keeps recovery-only publication and t
   } });
   assert.equal(recoveryOnly, true);
 });
+
+test('a new revision prepared before exclusion inherits the old uncertain publication', async t => {
+  const f = setup(t), candidate = input(f);
+  await prepare(candidate, f);
+  const file = path.join(f.stateDir, candidate.workId, 'state.json');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete state.source.gitChanges;
+  state.phase = 'publishing'; state.publicationUncertain = true;
+  state.space = published(state);
+  fs.writeFileSync(file, JSON.stringify(state));
+  await prepare({ ...candidate, detailedMarkdown: candidate.detailedMarkdown + '\n\n후속 수정도 완료했다.' }, f);
+  const calls = [];
+  await sync({ ...f, importer: async r => saved(r), publisher: async (j, o) => {
+    calls.push({ revision: j.revision, recoverOnly: o.recoverOnly, pageId: j.space?.pageId });
+    return published(j);
+  } });
+  assert.deepEqual(calls, [{ revision: 2, recoverOnly: true, pageId: state.space.pageId }]);
+});
+
+test('legacy schema-v1 publishing is normalized before exclusion and later re-preparation', async t => {
+  const f = setup(t), candidate = input(f);
+  await prepare(candidate, f);
+  const file = path.join(f.stateDir, candidate.workId, 'state.json');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete state.source.gitChanges;
+  state.schemaVersion = 1; state.phase = 'publishing';
+  delete state.publicationUncertain;
+  fs.writeFileSync(file, JSON.stringify(state));
+  await sync({ ...f, exe: 'must-not-run.exe' });
+  await prepare({ ...candidate, detailedMarkdown: candidate.detailedMarkdown + '\n\n후속 수정도 완료했다.' }, f);
+  let recoveryOnly;
+  await sync({ ...f, importer: async r => saved(r), publisher: async (j, o) => { recoveryOnly = o.recoverOnly; return published(j); } });
+  assert.equal(recoveryOnly, true);
+});

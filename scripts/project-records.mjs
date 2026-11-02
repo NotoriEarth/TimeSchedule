@@ -58,6 +58,8 @@ function loadJobs(stateDir, workId) {
     .sort((a,b) => a.job.source.workId === b.job.source.workId ? a.job.revision-b.job.revision : (a.job.createdAt ?? a.job.updatedAt).localeCompare(b.job.createdAt ?? b.job.updatedAt));
 }
 const finished = job => ['complete', 'conflict', 'excluded'].includes(job.phase);
+const uncertainPublication = job => job?.publicationUncertain === true
+  || (job && job.schemaVersion !== 2 && (job.phase === 'publishing' || job.excludedFromPhase === 'publishing'));
 function writeWake(stateDir) {
   const pending = loadJobs(stateDir).map(x=>x.job).filter(j=>!finished(j));
   atomicJson(path.join(stateDir,'wake.json'), {pending:pending.length,nextAttemptAt:pending.length ? Math.min(...pending.map(j=>j.nextAttemptAt ?? 0)) : null});
@@ -105,7 +107,7 @@ export async function prepare(input, { stateDir = DEFAULT_STATE, projectRoot = P
     const localRevision = (previous?.finalRevision ?? previous?.diaryReceipt?.revision ?? previous?.revision ?? 0)+1;
     const job = { schemaVersion: 2, source, revision, contentHash, pageMarkdown, phase: 'prepared', space: previous?.space ?? null,
       localRevision, finalRevision:localRevision+1, localSaved:false, spaceVerified:false,
-      publicationUncertain: previous?.phase === 'excluded' && previous.publicationUncertain === true,
+      publicationUncertain: !!uncertainPublication(previous),
       attempts:0,nextAttemptAt:0,modelCalls: previous?.modelCalls ?? 0, lastError: null, createdAt:new Date().toISOString(), updatedAt: new Date().toISOString() };
     atomicJson(path.join(stateDir, source.workId, `${revision}.json`), { source, revision, contentHash, pageMarkdown });
     atomicJson(file, job);
@@ -151,6 +153,7 @@ export async function sync(options = {}) {
     // research jobs must stop waking the app even if their retry is not due.
     for (const { file, job } of jobs) {
       if (finished(job) || (options.workId && job.source.workId !== options.workId)) continue;
+      upgradeJob(job);
       const evidence = developmentEvidence(job.source.repoPath, job.source.gitChanges, options.projectRoot ?? PROJECT_ROOT);
       if (!evidence.eligible) {
         job.excludedFromPhase = job.phase;
@@ -167,6 +170,14 @@ export async function sync(options = {}) {
         results.push({ workId: job.source.workId,revision:job.revision, phase: job.phase, skipped: true }); continue;
       }
       processed++; upgradeJob(job);
+      // A previously prepared revision may predate the policy migration. An
+      // excluded older attempt can still have created a page remotely.
+      const uncertainPrior = jobs.filter(({job: prior}) => prior.source.workId === job.source.workId
+        && prior.revision < job.revision && prior.phase === 'excluded' && uncertainPublication(prior)).at(-1)?.job;
+      if (uncertainPrior) {
+        job.publicationUncertain = true;
+        job.space ??= uncertainPrior.space;
+      }
       const inheritedUncertainty=job.publicationUncertain;
       const save = () => { job.updatedAt = new Date().toISOString(); atomicJson(file, job); };
       const importRecord=async linked=>{
