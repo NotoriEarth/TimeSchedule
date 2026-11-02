@@ -40,6 +40,7 @@ pub struct Form {
     pub end: String,
     pub color: String,
     pub completed: bool,
+    pub event_version: Option<String>,
 }
 impl Form {
     pub fn new(kind: Kind, date: String, project_id: Option<String>) -> Self {
@@ -58,6 +59,7 @@ impl Form {
             end: "10:00".into(),
             color: "sage".into(),
             completed: false,
+            event_version: None,
         }
     }
     pub fn event(e: CalendarEvent) -> Self {
@@ -71,6 +73,7 @@ impl Form {
             end: e.end_time.unwrap_or_else(|| "10:00".into()),
             color: e.color,
             completed: e.completed,
+            event_version: Some(e.updated_at),
             ..Self::new(Kind::Event, String::new(), None)
         }
     }
@@ -115,25 +118,28 @@ impl Form {
     pub fn save(&self, store: &timeschedule_core::storage::Storage) -> Result<(), String> {
         match self.kind {
             Kind::Event => store
-                .save_event(EventInput {
-                    id: self.id.clone(),
-                    title: self.title.clone(),
-                    date: self.date.clone(),
-                    start_time: if self.all_day {
-                        None
-                    } else {
-                        Some(self.start.clone())
+                .save_event_if_unchanged(
+                    EventInput {
+                        id: self.id.clone(),
+                        title: self.title.clone(),
+                        date: self.date.clone(),
+                        start_time: if self.all_day {
+                            None
+                        } else {
+                            Some(self.start.clone())
+                        },
+                        end_time: if self.all_day {
+                            None
+                        } else {
+                            Some(self.end.clone())
+                        },
+                        all_day: self.all_day,
+                        notes: self.body.clone(),
+                        color: self.color.clone(),
+                        completed: self.completed,
                     },
-                    end_time: if self.all_day {
-                        None
-                    } else {
-                        Some(self.end.clone())
-                    },
-                    all_day: self.all_day,
-                    notes: self.body.clone(),
-                    color: self.color.clone(),
-                    completed: self.completed,
-                })
+                    self.event_version.as_deref(),
+                )
                 .map(|_| ()),
             Kind::Entry => store
                 .save_entry(EntryInput {

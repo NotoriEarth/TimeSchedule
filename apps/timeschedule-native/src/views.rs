@@ -581,6 +581,9 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         quiet("데이터 저장 위치"),
         text(app.data_dir.display().to_string()).size(14),
         quiet("기존 Tauri 앱과 분리된 네이티브 데이터 폴더입니다."),
+        title("로컬 일정 MCP"),
+        text(&app.mcp_status).size(13),
+        quiet("앱이 트레이에 있는 동안에도 연결됩니다. 완전 종료하면 중지됩니다."),
         title("바탕화면 위젯"),
         text(&app.desktop_message).size(13)
     ]
