@@ -161,6 +161,12 @@ sequenceDiagram
 ### Agent memory management
 
 main만 이 cycle/plan을 작성하고 worker/reviewer의 고정 인계·STOP을 기록했다. v1/v2/v3 파일해시와 결정적 실패를 무시되는 캐시에 보존했으며 오래된 후보를 최종본으로 표현하지 않는다. 전역 기억/설정·정기 자동화는 추가하지 않았다. 개인 기록 전달 ID·Space 링크·인증정보는 이 추적 문서에 넣지 않는다. 사용자 최종 수락 전 이 cycle은 유지한다.
+
+## 전달 상태
+
+- 구현 커밋 `f00131fae276c113e56995f43a8e36f61085bc3b`, `codex/widget-layout-events` 원격 푸시 완료. [PR #11](https://github.com/NotoriEarth/TimeSchedule/pull/11)을 만들고 현재 Codex 채팅에 연결했다. 원격 head/base/13개 변경 파일을 읽어 확인했다. PR #10이 open이므로 base는 `codex/local-calendar-mcp`다. 두 PR은 미병합이다.
+- 실제 개발 변경의 시작/완료 커밋과 이번 작업의 코드 경로만으로 기록 prepare/sync를 실행했다. 첫 기록 모델 실행은 부모 읽기/검색만 수행하고 매핑이 없다는 상태를 판단하지 못해 게시를 시도하지 않았다. 도구 추적에서 create/edit가 없음을 확인해 같은 작업 ID·원문으로 정상 재시도했다. 두 번째 실행에서 `complete`, `localSaved=true`, `spaceVerified=true`, `publicationUncertain=false`, `lastError=null`을 확인했다. 다이어리 상세 원문·Space 본문/위치/링크 검증·같은 다이어리 항목 링크 연결까지 완료했다. 전달 ID와 개인 Space 주소는 무시되는 캐시에만 유지한다. 기록 전용 실행의 결과를 앱 구현/테스트 통과와 혼동하지 않는다.
+- 남은 사용자 확인: 최종0.9.1의 설정 위치 유지/이동 저장/실제 화면 변경 보정. 원격 PR 머지는 대기하며 최종 사용자 수락 전 이 cycle을 보존한다. 실행파일 설치·자동 기록 완료가 머지 승인을 대신하지 않는다.
 - Needs and friction: 실제 화면의 반복 상태를 확인하지 못했던 검증 누락을 이번 회귀 테스트의 대상으로 삼는다.
 - Harness: 네이티브 앱에 웹 E2E를 억지로 추가하지 않고 기존 Iced renderer와 소유 Win32 fixture를 활용한다. 기존 Computer Use 창 캡처 timeout 이력이 있으므로 자동 캡처 실패를 시각 검증 성공으로 취급하지 않는다.
 - Agent memory management: 이번 승인/계획/검증은 이 파일에 유지한다. 기존 MCP 사이클/개인 기록 정보는 복제하지 않는다.
