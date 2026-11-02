@@ -1,10 +1,10 @@
 # TimeSchedule
 
-## 최신 앱: TimeSchedule 0.8.0
+## 최신 앱: TimeSchedule 0.8.1
 
 대표 실행 파일은 **`artifacts/TimeSchedule.exe`** 하나입니다. Rust/Iced로 화면을 만들며 실행에 WebView/JavaScript 런타임이 필요하지 않습니다. 앱 설정·창 제목과 Windows 파일 속성에서 버전을 확인할 수 있습니다. [버전 규칙과 업데이트 이력](CHANGELOG.md)을 참고하세요.
 
-[0.8.0 자동 기록 안내](docs/project-records.md)와 [최신 검증 결과](docs/offline-project-records-verification.md)를 참고하세요. 2026-11-01 재검증에서 자동 테스트 138개와 실제 기록 전달을 확인하고 Space 목록 블록 비교 오류를 수정했습니다. [초기 0.8.0 검증](docs/project-records-verification.md)과 [0.7.0 검증](docs/release-0.7.0-verification.md)도 보존합니다.
+[자동 기록 안내](docs/project-records.md)를 참고하세요. 0.8.1은 Git에 실제 개발 변경이 있는 작업만 기록하며 검색·견적 조사·탐색·설명과 문서만 작성한 작업은 제외합니다. [0.8.0 후속 검증](docs/offline-project-records-verification.md), [초기 0.8.0 검증](docs/project-records-verification.md), [0.7.0 검증](docs/release-0.7.0-verification.md)은 당시 결과로 보존합니다.
 
 ```powershell
 .\scripts\build-native.ps1
@@ -17,7 +17,7 @@ PR #2–#6의 Rust 이식·테마·위젯·편집·설정·연월 선택 변경�
 
 최신 앱에는 날짜 더블클릭 편집, 완료 체크, 배경 전용 투명도, 크기·표시 주 수·글꼴·색상 설정, Windows식 연도→월 선택, 위젯과 다이어리 공통 일정 폼이 포함됩니다.
 
-0.8.0은 Codex 작업 종료 시 다이어리에 개발 기록 원문을 먼저 보관하고 Space에 연결합니다. 연결 실패 중에도 기록을 남기며, 앱 실행 중 누적된 대기 기록만 재시도해 복구 후 같은 항목에 링크를 붙입니다. 별도 오전 9시 포트폴리오 자동화는 중지했습니다. Space 내용은 PR 작성에 유용할 때만 재사용합니다. 기록용 CLI는 GPT-6 Luna medium과 원문 검증을 사용합니다. 사용자 편집을 보존하고 편집 중에는 외부 기록 수신을 미룹니다. 외부 전달에는 Node.js와 로그인된 Codex CLI·Pages 연결이 필요합니다.
+0.8.1은 작업 시작·완료 커밋과 해당 작업의 변경 파일을 로컬 Git으로 확인한 뒤, 기존 대화의 개발 요약·상세 원문을 다이어리에 보관하고 Space에 연결합니다. 소스·테스트·빌드/설정 변경이 없는 후보는 로컬 저장과 모델 호출을 건너뜁니다. 연결 실패 중에도 개발 기록 원문은 남으며, 앱 실행 중 유효한 대기 기록만 재시도해 복구 후 같은 항목에 링크를 붙입니다. 별도 오전 9시 포트폴리오 자동화는 중지했습니다. Space 내용은 PR 작성에 유용할 때만 재사용합니다. 기록용 CLI는 GPT-6 Luna medium과 원문 검증을 사용합니다. 사용자 편집을 보존하고 편집 중에는 외부 기록 수신을 미룹니다. 외부 전달에는 Git·Node.js와 로그인된 Codex CLI·Pages 연결이 필요합니다.
 
 기존 수동 테스트 EXE는 `artifacts/archive/`에 보관합니다. 앞으로 빌드할 때도 `TimeSchedule.exe`를 교체하고 이전 파일은 보관하므로 실행할 파일 이름은 늘어나지 않습니다. 실행 중이면 저장 후 트레이에서 완전히 종료하고 빌드하세요. 빌드나 버전 검증 실패 시 기존 EXE를 교체하지 않습니다. 의존성이 준비된 환경에서는 `scripts/build-native.ps1 -Offline`을 사용할 수 있습니다.
 

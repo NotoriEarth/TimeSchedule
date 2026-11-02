@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -6,15 +6,22 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-import { prepare, sync, status } from '../scripts/project-records.mjs';
+import { prepare as prepareRecord, sync as syncRecords, status } from '../scripts/project-records.mjs';
 import { verifyPageEvents, createdPageObservation } from '../scripts/project-records-codex.mjs';
+import { gitFixture } from './helpers/record-git-fixture.mjs';
+
+const fixtureDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'timeschedule-record-git-'));
+const fixture = gitFixture(fixtureDirectory);
+after(() => fs.rmSync(fixtureDirectory, { recursive: true, force: true }));
+const prepare = (input, options) => prepareRecord(input, { ...options, projectRoot: fixture.repo });
+const sync = options => syncRecords({ ...options, projectRoot: fixture.repo });
 
 const parentPageId = 'page_6ae1b18a44f08191ad2a86276972476c';
 const pageId = 'page_1234567890abcdef1234567890abcdef';
 const pageUrl = `https://chatgpt.com/space/${pageId}`;
 function source() {
   return {
-    workId: randomUUID(), projectTitle: 'TimeSchedule', repoPath: process.cwd(), date: '2026-10-31',
+    workId: randomUUID(), projectTitle: 'TimeSchedule', repoPath: fixture.repo, gitChanges: fixture.gitChanges, date: '2026-10-31',
     kind: 'troubleshooting', title: '검증 결과와 한계', status: 'verification_pending',
     detailedMarkdown: 'RAM은 감소했지만 유휴 CPU는 증가했다. 실제 입력 성능은 측정하지 않았다.\n\n# 원인\n\nCPU 증가 원인은 아직 확인하지 않았다.',
     diarySummary: 'RAM은 감소했지만 유휴 CPU는 증가했다. 실제 입력 성능은 측정하지 않았다.',
@@ -168,10 +175,10 @@ test('a stale lock observer cannot enter while another process owns delivery', a
   const moduleUrl = pathToFileURL(path.resolve('scripts/project-records.mjs')).href;
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import {sync} from ${JSON.stringify(moduleUrl)};
-    try { await sync({stateDir:process.argv[1],importer:async r=>({outcome:'saved',workId:r.workId,revision:r.revision,entryId:'entry-1'}),publisher:async()=>{
+    try { await sync({stateDir:process.argv[1],projectRoot:process.argv[2],importer:async r=>({outcome:'saved',workId:r.workId,revision:r.revision,entryId:'entry-1'}),publisher:async()=>{
       process.send('entered'); await new Promise(r=>process.once('message',r)); throw Error('test finished');
     }}); } catch {} finally { process.disconnect(); }
-  `, dir], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+  `, dir, fixture.repo], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   t.after(() => child.kill());
   await new Promise((resolve, reject) => { child.once('message', resolve); child.once('error', reject); child.once('exit', () => reject(Error('holder exited early'))); });
   const originalRead = fs.readFileSync;
