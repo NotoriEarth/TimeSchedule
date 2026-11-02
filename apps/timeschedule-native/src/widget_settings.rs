@@ -83,6 +83,9 @@ pub struct State {
     pub color_role: ColorRole,
     pub color: String,
     pub error: String,
+    pub geometry_error: Option<String>,
+    pub native_error: Option<String>,
+    pub display_observer_error: Option<String>,
     pub save_due: Option<Instant>,
 }
 impl State {
@@ -99,11 +102,34 @@ impl State {
             color_role: ColorRole::Background,
             color: widget_appearance::hex(Appearance::resolve(prefs).colors.background),
             error: String::new(),
+            geometry_error: None,
+            native_error: None,
+            display_observer_error: None,
             save_due: None,
         }
     }
 }
 impl App {
+    pub(crate) fn widget_errors(&self) -> String {
+        [
+            self.widget_ui.geometry_error.as_deref(),
+            self.widget_ui.native_error.as_deref(),
+            self.widget_ui.display_observer_error.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+    pub(crate) fn widget_status_text(&self) -> String {
+        let errors = self.widget_errors();
+        if errors.is_empty() {
+            self.desktop_message.clone()
+        } else {
+            errors
+        }
+    }
+
     pub(crate) fn sync_color_draft(&mut self) {
         let p = Appearance::resolve(&self.preferences).colors;
         self.widget_ui.color = widget_appearance::hex(match self.widget_ui.color_role {

@@ -585,52 +585,65 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         text(&app.mcp_status).size(13),
         quiet("앱이 트레이에 있는 동안에도 연결됩니다. 완전 종료하면 중지됩니다."),
         title("바탕화면 위젯"),
-        text(&app.desktop_message).size(13)
+        scrollable(text(app.widget_status_text()).size(13))
+            .height(52)
+            .width(Length::Fill)
     ]
     .spacing(15);
-    if app.native_busy {
-        c = c.push(quiet("Windows 작업 중…"));
-    } else {
-        c = c.push(
+    // Keep controls and scroll content mounted during native requests.
+    let enabled = !app.native_busy;
+    let native_control = |label: &str, action| {
+        control(label, Message::Native(action))
+            .on_press_maybe(enabled.then_some(Message::Native(action)))
+    };
+    c = c
+        .push(
+            container(quiet(if app.native_busy {
+                "Windows 작업 중…"
+            } else {
+                " "
+            }))
+            .height(20)
+            .width(Length::Fill),
+        )
+        .push(
             row![
-                control(
+                native_control(
                     if app.preferences.widget_visible && app.widget_attached {
                         "위젯 숨기기"
                     } else {
                         "위젯 표시"
                     },
-                    Message::Native(if app.preferences.widget_visible && app.widget_attached {
+                    if app.preferences.widget_visible && app.widget_attached {
                         NativeAction::Hide
                     } else {
                         NativeAction::Show
-                    })
+                    }
                 ),
-                control("위젯 위치 복구", Message::Native(NativeAction::Recover)),
-                control(
+                native_control("위젯 위치 복구", NativeAction::Recover),
+                native_control(
                     if app.preferences.widget_locked {
                         "잠금 해제"
                     } else {
                         "위치 잠금"
                     },
-                    Message::Native(NativeAction::Lock(!app.preferences.widget_locked))
+                    NativeAction::Lock(!app.preferences.widget_locked)
                 )
             ]
             .spacing(6),
-        );
-        c = c
-            .push(
-                text(format!(
-                    "배경 불투명도 {}% · 글자는 선명하게 유지",
-                    app.preferences.widget_opacity
-                ))
-                .size(14),
-            )
-            .push(iced::widget::slider(
-                40..=100,
-                app.preferences.widget_opacity,
-                |v| Message::Native(NativeAction::Opacity(v)),
-            ));
-    }
+        )
+        .push(
+            text(format!(
+                "배경 불투명도 {}% · 글자는 선명하게 유지",
+                app.preferences.widget_opacity
+            ))
+            .size(14),
+        )
+        .push(iced::widget::slider(
+            40..=100,
+            app.preferences.widget_opacity,
+            |v| Message::Native(NativeAction::Opacity(v)),
+        ));
     c = c.push(crate::widget_settings::view(app));
     c=c.push(title("근거 초안과 외부 연결")).push(text("요약과 포트폴리오는 저장된 원문을 정리한 편집 가능한 초안입니다. AI 분석 결과가 아닙니다. ChatGPT/Space·모바일·여러 기기 동기화는 아직 연결되지 않았습니다.").size(14)).push(quiet("상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."));
     scrollable(paper(c)).height(Length::Fill).into()

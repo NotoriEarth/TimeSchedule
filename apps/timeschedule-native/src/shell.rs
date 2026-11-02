@@ -227,9 +227,21 @@ pub fn view(app: &App) -> Element<'_, Message> {
         views::actions(app)
     };
     top = top.push(toolbar);
-    if !app.error.is_empty() {
+    // Omit the native banner only while the fixed settings status is rendered.
+    // Search replaces that content even when Settings remains the selected page.
+    let native_errors = if app.page == Page::Settings && app.search.trim().is_empty() {
+        String::new()
+    } else {
+        app.widget_errors()
+    };
+    let error = [app.error.as_str(), native_errors.as_str()]
+        .into_iter()
+        .filter(|message| !message.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !error.is_empty() {
         top = top.push(
-            container(text(&app.error).size(12))
+            container(text(error).size(12))
                 .padding(8)
                 .width(Length::Fill)
                 .style(theme::alert),

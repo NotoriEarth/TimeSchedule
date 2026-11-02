@@ -30,11 +30,42 @@ pub struct AttachmentInfo {
     pub opacity_percent: Option<u8>,
 }
 
+/// Authored physical screen position and logical (96-DPI) dimensions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WidgetGeometry {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct GeometryEvent {
+    /// Only explicit user moves/resizes change the persisted preference.
+    pub preferred: Option<WidgetGeometry>,
+    pub actual_size: (u32, u32),
+    pub error: Option<String>,
+}
+
+#[cfg(not(windows))]
+pub fn take_geometry_events() -> Vec<GeometryEvent> {
+    Vec::new()
+}
+#[cfg(not(windows))]
+pub fn configure_geometry(_: &WebviewWindow, _: WidgetGeometry) -> Result<(), String> {
+    Ok(())
+}
+#[cfg(not(windows))]
+pub fn observe_display_changes(_: &WebviewWindow) -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(windows)]
 pub use native::{
-    attach, detach, enable_per_pixel_alpha, initialize_process_dpi_for_shell, logical_size,
-    position, prepare_widget_class, recover_position, resize_logical, restore_position, set_locked,
-    set_opacity, set_visible, status, with_shell_dpi_context,
+    attach, configure_geometry, detach, enable_per_pixel_alpha, initialize_process_dpi_for_shell,
+    logical_size, observe_display_changes, position, prepare_widget_class, recover_position,
+    resize_logical, restore_position, set_locked, set_opacity, set_visible, status,
+    take_geometry_events, with_shell_dpi_context,
 };
 
 #[cfg(not(windows))]
@@ -113,7 +144,7 @@ pub fn set_visible(window: &WebviewWindow, _: bool) -> Result<AttachmentInfo, St
 
 #[cfg(windows)]
 mod native {
-    use super::{AttachmentInfo, WebviewWindow, WIDGET_CLASS};
+    use super::{AttachmentInfo, GeometryEvent, WebviewWindow, WidgetGeometry, WIDGET_CLASS};
     use std::{
         collections::HashMap,
         sync::{Mutex, OnceLock},
@@ -165,6 +196,11 @@ mod native {
     const SWP_NOOWNERZORDER: u32 = 0x0200;
     const SUBCLASS_ID: usize = 0x5449_4d45;
     const RECOVERY_TIMER_ID: usize = 0x5449_4d46;
+    const DISPLAY_TIMER_ID: usize = 0x5449_4d47;
+    const OBSERVER_SUBCLASS_ID: usize = 0x5449_4d48;
+    const DISPLAY_CHANGED: u32 = 0x8000 + 0x317;
+    const RECOVERY_INTERVAL_MS: u32 = 30_000;
+    const DISPLAY_SETTLE_MS: u32 = 200;
     const STRATEGY: &str = "explorer-icon-host-child";
 
     #[repr(C)]
@@ -348,12 +384,15 @@ mod native {
             flags: u32,
         ) -> i32;
         fn ShowWindow(hwnd: Hwnd, command: i32) -> i32;
+        fn PostMessageW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> i32;
         fn GetWindowDpiAwarenessContext(hwnd: Hwnd) -> isize;
         fn SetProcessDpiAwarenessContext(context: isize) -> i32;
         fn GetThreadDpiAwarenessContext() -> isize;
         fn GetDpiForWindow(hwnd: Hwnd) -> u32;
+        #[cfg(any(test, feature = "test-support"))]
         fn MonitorFromWindow(hwnd: Hwnd, flags: u32) -> isize;
         fn MonitorFromRect(rect: *const Rect, flags: u32) -> isize;
+        fn MonitorFromPoint(point: Point, flags: u32) -> isize;
         fn GetMonitorInfoW(monitor: isize, info: *mut MonitorInfo) -> i32;
         fn SetTimer(
             hwnd: Hwnd,
@@ -404,6 +443,10 @@ mod native {
         recovering: bool,
         moving: bool,
         geometry_error: Option<String>,
+        preferred: WidgetGeometry,
+        move_start: Option<WidgetGeometry>,
+        pending_event: Option<GeometryEvent>,
+        last_geometry: WidgetGeometry,
     }
 
     fn records() -> &'static Mutex<HashMap<Hwnd, Attachment>> {
@@ -1004,6 +1047,7 @@ mod native {
         // correctly refuses the restoration move. Only our HWND is touched.
         unsafe {
             KillTimer(hwnd, RECOVERY_TIMER_ID);
+            KillTimer(hwnd, DISPLAY_TIMER_ID);
             RemoveWindowSubclass(hwnd, subclass, SUBCLASS_ID);
         }
         set_parent(hwnd, 0)?;
@@ -1089,6 +1133,10 @@ mod native {
             recovering: false,
             moving: false,
             geometry_error: None,
+            preferred: read_geometry(hwnd)?,
+            move_start: None,
+            pending_event: None,
+            last_geometry: read_geometry(hwnd)?,
         };
         let result = (|| {
             // Child style is required *before* SetParent. Do not make the
@@ -1108,7 +1156,7 @@ mod native {
                 .lock()
                 .map_err(|_| "바탕화면 상태 잠금 오류")?
                 .insert(hwnd, saved.clone());
-            if unsafe { SetTimer(hwnd, RECOVERY_TIMER_ID, 1000, None) } == 0 {
+            if unsafe { SetTimer(hwnd, RECOVERY_TIMER_ID, RECOVERY_INTERVAL_MS, None) } == 0 {
                 return Err(error("SetTimer(widget recovery)"));
             }
             let info = status(window)?;
@@ -1230,9 +1278,8 @@ mod native {
         Ok(())
     }
 
-    // Use the same DPI scope for monitor, screen and parent coordinates. A child
-    // does not reliably receive display-change broadcasts, so its own UI-thread
-    // timer also checks this after resolution/DPI changes or monitor removal.
+    // Preferred physical screen coordinates are mapped in one physical-DPI
+    // scope. Both display notifications and the sparse fallback use this path.
     fn recover_geometry(hwnd: Hwnd) -> Result<(), String> {
         require_ui_thread(hwnd)?;
         let saved = record(hwnd)?.ok_or("위젯 연결 상태가 없습니다.")?;
@@ -1242,8 +1289,17 @@ mod native {
         if unsafe { GetParent(hwnd) } != saved.host || unsafe { IsWindow(saved.host) } == 0 {
             return Err("바탕화면 호스트가 변경되어 위치를 복구할 수 없습니다.".into());
         }
-        let _dpi = DpiGuard::enter(unsafe { GetWindowDpiAwarenessContext(hwnd) })?;
-        let monitor = unsafe { MonitorFromWindow(hwnd, 2) }; // nearest surviving monitor
+        let _dpi = DpiGuard::enter(-4)?;
+        let preferred = saved.preferred;
+        let monitor = unsafe {
+            MonitorFromPoint(
+                Point {
+                    x: preferred.x,
+                    y: preferred.y,
+                },
+                2,
+            )
+        };
         let mut info = MonitorInfo {
             size: std::mem::size_of::<MonitorInfo>() as u32,
             ..Default::default()
@@ -1268,16 +1324,21 @@ mod native {
             return Err("바탕화면 호스트와 모니터의 표시 영역이 겹치지 않습니다.".into());
         }
         let current = to_parent(rect(hwnd)?, saved.host)?;
-        let width = (current.right - current.left).clamp(1, bounds.right - bounds.left);
-        let height = (current.bottom - current.top).clamp(1, bounds.bottom - bounds.top);
-        let left = current.left.clamp(bounds.left, bounds.right - width);
-        let top = current.top.clamp(bounds.top, bounds.bottom - height);
-        let target = Rect {
-            left,
-            top,
-            right: left + width,
-            bottom: top + height,
+        let scale = f64::from(unsafe { GetDpiForWindow(hwnd) }.max(96)) / 96.;
+        let desired = Rect {
+            left: preferred.x,
+            top: preferred.y,
+            right: preferred
+                .x
+                .saturating_add((f64::from(preferred.width) * scale).round() as i32),
+            bottom: preferred
+                .y
+                .saturating_add((f64::from(preferred.height) * scale).round() as i32),
         };
+        let desired = to_parent(desired, saved.host)?;
+        let target = clamp_requested_rect(desired, desired.left, desired.top, bounds)?;
+        let (left, top) = (target.left, target.top);
+        let (width, height) = (target.right - left, target.bottom - top);
         if current == target {
             return Ok(());
         }
@@ -1323,6 +1384,163 @@ mod native {
         result
     }
 
+    fn read_geometry(hwnd: Hwnd) -> Result<WidgetGeometry, String> {
+        let _physical = DpiGuard::enter(-4)?;
+        let r = rect(hwnd)?;
+        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+        Ok(WidgetGeometry {
+            x: r.left,
+            y: r.top,
+            width: ((r.right - r.left) as f64 * 96. / f64::from(dpi)).round() as u32,
+            height: ((r.bottom - r.top) as f64 * 96. / f64::from(dpi)).round() as u32,
+        })
+    }
+
+    pub fn configure_geometry(
+        window: &WebviewWindow,
+        preferred: WidgetGeometry,
+    ) -> Result<(), String> {
+        let hwnd = hwnd(window)?;
+        require_ui_thread(hwnd)?;
+        if preferred.width == 0
+            || preferred.height == 0
+            || preferred.width > 3840
+            || preferred.height > 2160
+        {
+            return Err("위젯 크기가 허용 범위를 벗어났습니다.".into());
+        }
+        let previous = {
+            let mut entries = records().lock().map_err(|_| "바탕화면 상태 잠금 오류")?;
+            let entry = entries.get_mut(&hwnd).ok_or("위젯 연결 상태가 없습니다.")?;
+            std::mem::replace(&mut entry.preferred, preferred)
+        };
+        let result = recover_geometry(hwnd);
+        if result.is_err() {
+            if let Ok(mut entries) = records().lock() {
+                if let Some(entry) = entries.get_mut(&hwnd) {
+                    entry.preferred = previous;
+                }
+            }
+        }
+        emit_geometry(hwnd, None, result.clone().err());
+        result
+    }
+
+    /// Drain only the bounded in-memory notifications. No HWND/desktop polling.
+    /// Destroy/detach removes its record and any pending event before HWND reuse.
+    pub fn take_geometry_events() -> Vec<GeometryEvent> {
+        records()
+            .lock()
+            .map(|mut entries| {
+                entries
+                    .values_mut()
+                    .filter_map(|entry| entry.pending_event.take())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn emit_geometry(hwnd: Hwnd, preferred: Option<WidgetGeometry>, error: Option<String>) {
+        let actual = read_geometry(hwnd).ok();
+        if let Ok(mut entries) = records().lock() {
+            if let Some(entry) = entries.get_mut(&hwnd) {
+                let actual = actual.unwrap_or(entry.last_geometry);
+                if preferred.is_none()
+                    && actual == entry.last_geometry
+                    && error == entry.geometry_error
+                {
+                    return;
+                }
+                entry.last_geometry = actual;
+                entry.geometry_error = error.clone();
+                // A later automatic correction must not erase an unconsumed user move.
+                let preferred =
+                    preferred.or_else(|| entry.pending_event.as_ref().and_then(|e| e.preferred));
+                entry.pending_event = Some(GeometryEvent {
+                    preferred,
+                    actual_size: (actual.width, actual.height),
+                    error,
+                });
+            }
+        }
+    }
+
+    fn recover_and_report(hwnd: Hwnd) {
+        let error = recover_geometry(hwnd).err();
+        emit_geometry(hwnd, None, error);
+    }
+
+    /// Observe broadcast notifications on our existing top-level manager, which
+    /// remains alive while hidden in the tray. Desktop children miss broadcasts.
+    pub fn observe_display_changes(window: &WebviewWindow) -> Result<(), String> {
+        let hwnd = hwnd(window)?;
+        require_ui_thread(hwnd)?;
+        if unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32 & WS_CHILD != 0 {
+            return Err("화면 알림에는 앱의 최상위 창이 필요합니다.".into());
+        }
+        if unsafe { SetWindowSubclass(hwnd, display_observer, OBSERVER_SUBCLASS_ID, 0) } == 0 {
+            return Err(error("SetWindowSubclass(display observer)"));
+        }
+        Ok(())
+    }
+
+    fn is_display_change(message: u32, wparam: usize) -> bool {
+        message == 0x007e
+            || (message == 0x001a && wparam == 0x002f)
+            || matches!(message, 0x02e0 | 0x02e2 | 0x02e3)
+    }
+
+    unsafe extern "system" fn display_observer(
+        hwnd: Hwnd,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        _: usize,
+        _: usize,
+    ) -> isize {
+        if message == 0x0082 {
+            RemoveWindowSubclass(hwnd, display_observer, OBSERVER_SUBCLASS_ID);
+        } else if is_display_change(message, wparam) {
+            let handles = records()
+                .lock()
+                .map(|entries| entries.keys().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for widget in handles {
+                // Our app's widget UI thread receives this; no cross-process work.
+                PostMessageW(widget, DISPLAY_CHANGED, 0, 0);
+            }
+        }
+        DefSubclassProc(hwnd, message, wparam, lparam)
+    }
+
+    fn finish_user_move(hwnd: Hwnd) {
+        let actual = read_geometry(hwnd);
+        let preferred = if let Ok(mut entries) = records().lock() {
+            entries.get_mut(&hwnd).and_then(|entry| {
+                entry.moving = false;
+                let start = entry.move_start.take()?;
+                let actual = actual.as_ref().ok()?;
+                if entry.locked || *actual == start {
+                    return None;
+                }
+                let before = entry.preferred;
+                if (actual.x, actual.y) != (start.x, start.y) {
+                    entry.preferred.x = actual.x;
+                    entry.preferred.y = actual.y;
+                }
+                if (actual.width, actual.height) != (start.width, start.height) {
+                    entry.preferred.width = actual.width;
+                    entry.preferred.height = actual.height;
+                }
+                (before != entry.preferred).then_some(entry.preferred)
+            })
+        } else {
+            None
+        };
+        emit_geometry(hwnd, preferred, actual.err());
+        recover_and_report(hwnd);
+    }
+
     pub fn recover_position(window: &WebviewWindow) -> Result<(), String> {
         recover_geometry(hwnd(window)?)
     }
@@ -1356,53 +1574,10 @@ mod native {
         if unsafe { GetParent(hwnd) } != saved.host || unsafe { IsWindow(saved.host) } == 0 {
             return Err("바탕화면 호스트가 변경되었습니다.".into());
         }
-        let _physical = DpiGuard::enter(-4)?;
-        let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
-        let current = to_parent(rect(hwnd)?, saved.host)?;
-        let desired = Rect {
-            right: current.left + (f64::from(width) * f64::from(dpi) / 96.).round() as i32,
-            bottom: current.top + (f64::from(height) * f64::from(dpi) / 96.).round() as i32,
-            ..current
-        };
-        let monitor = unsafe { MonitorFromWindow(hwnd, 2) };
-        let mut info = MonitorInfo {
-            size: std::mem::size_of::<MonitorInfo>() as u32,
-            ..Default::default()
-        };
-        let mut client = Rect::default();
-        if monitor == 0
-            || unsafe { GetMonitorInfoW(monitor, &mut info) } == 0
-            || unsafe { GetClientRect(saved.host, &mut client) } == 0
-        {
-            return Err(error("위젯 크기 조정 영역 조회"));
-        }
-        let work = to_parent(info.work, saved.host)?;
-        let bounds = Rect {
-            left: work.left.max(client.left),
-            top: work.top.max(client.top),
-            right: work.right.min(client.right),
-            bottom: work.bottom.min(client.bottom),
-        };
-        let target = clamp_requested_rect(desired, current.left, current.top, bounds)?;
-        if unsafe {
-            SetWindowPos(
-                hwnd,
-                0,
-                target.left,
-                target.top,
-                target.right - target.left,
-                target.bottom - target.top,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-            )
-        } == 0
-        {
-            return Err(error("SetWindowPos(resize)"));
-        }
-        let actual = to_parent(rect(hwnd)?, saved.host)?;
-        if actual != target {
-            return Err("크기 조정 결과가 요청한 영역과 다릅니다.".into());
-        }
-        Ok(())
+        let mut preferred = saved.preferred;
+        preferred.width = width;
+        preferred.height = height;
+        configure_geometry(window, preferred)
     }
 
     /// Lock position/size, preserving normal pointer clicks on calendar dates.
@@ -1426,6 +1601,9 @@ mod native {
         let before = status(window)?;
         if visible && !before.attached {
             return Err(before.message);
+        }
+        if visible {
+            recover_geometry(handle)?;
         }
         let flags = SWP_NOMOVE
             | SWP_NOSIZE
@@ -1464,6 +1642,7 @@ mod native {
         if message == 0x0082 {
             // WM_NCDESTROY; Explorer can destroy its children.
             KillTimer(hwnd, RECOVERY_TIMER_ID);
+            KillTimer(hwnd, DISPLAY_TIMER_ID);
             RemoveWindowSubclass(hwnd, subclass, SUBCLASS_ID);
             if let Ok(mut entries) = records().lock() {
                 entries.remove(&hwnd);
@@ -1473,21 +1652,27 @@ mod native {
         if message == 0x0021 {
             return 3;
         } // MA_NOACTIVATE, keep the click.
-        if message == 0x0231 || message == 0x0232 {
-            // WM_ENTER/EXITSIZEMOVE
+        if message == 0x0231 {
+            let start = read_geometry(hwnd).ok();
             if let Ok(mut entries) = records().lock() {
                 if let Some(entry) = entries.get_mut(&hwnd) {
-                    entry.moving = message == 0x0231;
+                    entry.moving = true;
+                    entry.move_start = start;
                 }
+            }
+        } else if message == 0x0232 {
+            finish_user_move(hwnd);
+        }
+        if message == DISPLAY_CHANGED || is_display_change(message, wparam) {
+            if SetTimer(hwnd, DISPLAY_TIMER_ID, DISPLAY_SETTLE_MS, None) == 0 {
+                emit_geometry(hwnd, None, Some(error("SetTimer(display settle)")));
             }
         }
-        if message == 0x0113 && wparam == RECOVERY_TIMER_ID {
-            let error = recover_geometry(hwnd).err();
-            if let Ok(mut entries) = records().lock() {
-                if let Some(entry) = entries.get_mut(&hwnd) {
-                    entry.geometry_error = error;
-                }
+        if message == 0x0113 && matches!(wparam, RECOVERY_TIMER_ID | DISPLAY_TIMER_ID) {
+            if wparam == DISPLAY_TIMER_ID {
+                KillTimer(hwnd, DISPLAY_TIMER_ID);
             }
+            recover_and_report(hwnd);
             return 0;
         }
         let locked = records()
@@ -1579,6 +1764,41 @@ mod native {
             fn DefWindowProcW(hwnd: Hwnd, message: u32, wparam: usize, lparam: isize) -> isize;
         }
 
+        #[repr(C)]
+        #[derive(Default)]
+        struct TestMessage {
+            hwnd: Hwnd,
+            message: u32,
+            wparam: usize,
+            lparam: isize,
+            time: u32,
+            point: Point,
+            private: u32,
+        }
+        #[link(name = "user32")]
+        extern "system" {
+            fn PeekMessageW(
+                message: *mut TestMessage,
+                hwnd: Hwnd,
+                min: u32,
+                max: u32,
+                remove: u32,
+            ) -> i32;
+            fn DispatchMessageW(message: *const TestMessage) -> isize;
+        }
+        fn pump_for(duration: std::time::Duration) {
+            let start = std::time::Instant::now();
+            while start.elapsed() < duration {
+                let mut msg = TestMessage::default();
+                while unsafe { PeekMessageW(&mut msg, 0, 0, 0, 1) } != 0 {
+                    unsafe {
+                        DispatchMessageW(&msg);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
         struct HiddenWindows {
             source: Hwnd,
             widget: Hwnd,
@@ -1605,6 +1825,7 @@ mod native {
         // Real native seam, using only this test process's hidden windows:
         // validates cloned class isolation and layered-child alpha readback.
         // It does not inspect, automate, or change Explorer or the real desktop.
+        #[cfg_attr(test, test)]
         pub fn verify_layered_child_fixture() {
             let suffix = format!("{}_{}", unsafe { GetCurrentProcessId() }, unsafe {
                 GetCurrentThreadId()
@@ -1794,6 +2015,10 @@ mod native {
                     recovering: false,
                     moving: false,
                     geometry_error: None,
+                    preferred: read_geometry(windows.widget).unwrap(),
+                    move_start: None,
+                    pending_event: None,
+                    last_geometry: read_geometry(windows.widget).unwrap(),
                 },
             );
             assert_ne!(
@@ -1846,6 +2071,40 @@ mod native {
                 to_parent(rect(windows.widget).unwrap(), windows.source).unwrap(),
                 recovered
             );
+            // A temporary clamp must not destroy the preferred dimensions.
+            unsafe {
+                SetWindowPos(
+                    windows.source,
+                    0,
+                    0,
+                    0,
+                    300,
+                    200,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                SendMessageW(windows.widget, 0x0113, RECOVERY_TIMER_ID, 0);
+            }
+            let expanded = to_parent(rect(windows.widget).unwrap(), windows.source).unwrap();
+            assert_eq!(
+                (
+                    expanded.right - expanded.left,
+                    expanded.bottom - expanded.top
+                ),
+                (80, 60),
+                "temporary shrink destroyed the preferred size"
+            );
+            unsafe {
+                SetWindowPos(
+                    windows.source,
+                    0,
+                    0,
+                    0,
+                    60,
+                    40,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                SendMessageW(windows.widget, 0x0113, RECOVERY_TIMER_ID, 0);
+            }
             // Recovery must not remove the user's movement lock.
             position_native(
                 windows.widget,
@@ -1902,6 +2161,50 @@ mod native {
             );
             resize_logical(&owned, 400, 300).unwrap();
             assert_eq!(logical_size(&owned).unwrap(), Some((400, 300)));
+            // Real OS move-loop notifications must yield exactly one final
+            // authored change; intermediate WINDOWPOSCHANGED is display-only.
+            take_geometry_events();
+            unsafe {
+                SendMessageW(windows.widget, 0x0231, 0, 0);
+            }
+            for x in [25, 30, 35] {
+                unsafe {
+                    SetWindowPos(
+                        windows.widget,
+                        0,
+                        x,
+                        25,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+                assert!(
+                    take_geometry_events().is_empty(),
+                    "do not save intermediate moves"
+                );
+            }
+            unsafe {
+                SendMessageW(windows.widget, 0x0232, 0, 0);
+            }
+            let events = take_geometry_events();
+            assert_eq!(
+                events.len(),
+                1,
+                "move end must notify the app without position polling"
+            );
+            assert_eq!(
+                events[0].preferred,
+                Some(read_geometry(windows.widget).unwrap())
+            );
+            unsafe {
+                SendMessageW(windows.widget, 0x0231, 0, 0);
+                SendMessageW(windows.widget, 0x0232, 0, 0);
+            }
+            assert!(
+                take_geometry_events().is_empty(),
+                "unchanged move must not save twice"
+            );
             let resized = rect(windows.widget).unwrap();
             assert!(resize_logical(&owned, 0, 0).is_err());
             assert_eq!(rect(windows.widget).unwrap(), resized);
@@ -1924,6 +2227,181 @@ mod native {
                 .get_mut(&windows.widget)
                 .unwrap()
                 .moving = false;
+            // Deliver display/work-area/DPI notifications to an owned TOP-LEVEL
+            // window and pump real posted messages/timers. No system display changes.
+            let observer = unsafe { WebviewWindow::iced_widget(windows.source) };
+            observe_display_changes(&observer).unwrap();
+            assert!(observe_display_changes(&owned).is_err());
+            take_geometry_events();
+            let preferred = record(windows.widget).unwrap().unwrap().preferred;
+            records()
+                .lock()
+                .unwrap()
+                .get_mut(&windows.widget)
+                .unwrap()
+                .locked = true;
+            for (message, wparam) in [(0x007e, 0), (0x001a, 0x002f), (0x02e0, 0)] {
+                unsafe {
+                    SetWindowPos(
+                        windows.source,
+                        0,
+                        0,
+                        0,
+                        250,
+                        180,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    for _ in 0..20 {
+                        SendMessageW(windows.source, message, wparam, 0);
+                    }
+                }
+                let before = rect(windows.widget).unwrap();
+                pump_for(std::time::Duration::from_millis(60));
+                assert_eq!(
+                    rect(windows.widget).unwrap(),
+                    before,
+                    "must coalesce the notification burst"
+                );
+                pump_for(std::time::Duration::from_millis(300));
+                let actual = to_parent(rect(windows.widget).unwrap(), windows.source).unwrap();
+                assert!(
+                    actual.left >= 0
+                        && actual.top >= 0
+                        && actual.right <= 250
+                        && actual.bottom <= 180,
+                    "top-level notification was not forwarded to child: {actual:?}"
+                );
+                assert_eq!(
+                    record(windows.widget).unwrap().unwrap().preferred,
+                    preferred
+                );
+                let events = take_geometry_events();
+                assert_eq!(events.len(), 1);
+                assert!(
+                    events[0].preferred.is_none(),
+                    "display corrections are not user edits"
+                );
+                unsafe {
+                    SetWindowPos(
+                        windows.source,
+                        0,
+                        0,
+                        0,
+                        1000,
+                        800,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    SendMessageW(windows.source, message, wparam, 0);
+                }
+                pump_for(std::time::Duration::from_millis(350));
+                assert_eq!(
+                    read_geometry(windows.widget).unwrap(),
+                    preferred,
+                    "restore authored geometry when area returns"
+                );
+                take_geometry_events();
+            }
+            assert_eq!(RECOVERY_INTERVAL_MS, 30_000);
+            assert_eq!(DISPLAY_SETTLE_MS, 200);
+            // Queued user movement survives a later automatic correction.
+            records()
+                .lock()
+                .unwrap()
+                .get_mut(&windows.widget)
+                .unwrap()
+                .locked = false;
+            unsafe {
+                SendMessageW(windows.widget, 0x0231, 0, 0);
+                SetWindowPos(
+                    windows.widget,
+                    0,
+                    50,
+                    40,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                SendMessageW(windows.widget, 0x0232, 0, 0);
+                SetWindowPos(
+                    windows.source,
+                    0,
+                    0,
+                    0,
+                    250,
+                    180,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                SendMessageW(windows.source, 0x007e, 0, 0);
+            }
+            pump_for(std::time::Duration::from_millis(350));
+            let event = take_geometry_events().pop().unwrap();
+            assert_eq!(
+                event.preferred.unwrap(),
+                record(windows.widget).unwrap().unwrap().preferred
+            );
+            assert!(event.actual_size.0 < preferred.width);
+            // A move while temporarily small must retain the authored dimensions.
+            unsafe {
+                SetWindowPos(
+                    windows.source,
+                    0,
+                    0,
+                    0,
+                    300,
+                    200,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                SendMessageW(windows.widget, 0x0231, 0, 0);
+                SetWindowPos(
+                    windows.widget,
+                    0,
+                    5,
+                    6,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                SendMessageW(windows.widget, 0x0232, 0, 0);
+            }
+            let event = take_geometry_events().pop().unwrap();
+            assert_eq!(
+                (
+                    event.preferred.unwrap().width,
+                    event.preferred.unwrap().height
+                ),
+                (400, 300)
+            );
+            // A recreated adapter starts with clamped actual geometry, then
+            // configures the same persisted preference before showing the child.
+            let persisted = record(windows.widget).unwrap().unwrap().preferred;
+            let mut restarted = records().lock().unwrap().remove(&windows.widget).unwrap();
+            restarted.preferred = read_geometry(windows.widget).unwrap();
+            restarted.pending_event = None;
+            records().lock().unwrap().insert(windows.widget, restarted);
+            configure_geometry(&owned, persisted).unwrap();
+            assert_eq!(
+                record(windows.widget).unwrap().unwrap().preferred,
+                persisted
+            );
+            // Restore room for the existing native sizing checks.
+            unsafe {
+                SetWindowPos(
+                    windows.source,
+                    0,
+                    0,
+                    0,
+                    1000,
+                    800,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+                SendMessageW(windows.widget, 0x0113, RECOVERY_TIMER_ID, 0);
+            }
+            take_geometry_events();
+            assert_eq!(
+                read_geometry(windows.widget).unwrap(),
+                persisted,
+                "restart must restore persisted authored size/position"
+            );
             let marker = wide(super::super::PER_PIXEL_ALPHA_PROPERTY);
             assert_ne!(unsafe { SetPropW(windows.widget, marker.as_ptr(), 1) }, 0);
             configure_native_sizing(windows.widget).unwrap();
@@ -1955,6 +2433,37 @@ mod native {
             let scale = f64::from(unsafe { GetDpiForWindow(windows.widget) }.max(96)) / 96.;
             assert_eq!(sizing.right, (320. * scale).round() as i32);
             assert_eq!(sizing.bottom, (220. * scale).round() as i32);
+            emit_geometry(
+                windows.widget,
+                Some(read_geometry(windows.widget).unwrap()),
+                None,
+            );
+            let previous = record(windows.widget).unwrap().unwrap().preferred;
+            set_parent(windows.widget, 0).unwrap();
+            assert!(configure_geometry(
+                &owned,
+                WidgetGeometry {
+                    width: 800,
+                    ..previous
+                }
+            )
+            .is_err());
+            assert_eq!(
+                record(windows.widget).unwrap().unwrap().preferred,
+                previous,
+                "failed numeric resize must not silently replace the authored preference"
+            );
+            set_parent(windows.widget, windows.source).unwrap();
+            let destroyed = windows.widget;
+            unsafe {
+                DestroyWindow(destroyed);
+            }
+            windows.widget = 0;
+            assert!(record(destroyed).unwrap().is_none());
+            assert!(
+                take_geometry_events().is_empty(),
+                "destroyed HWND cannot publish stale preferences"
+            );
         }
     }
 }
