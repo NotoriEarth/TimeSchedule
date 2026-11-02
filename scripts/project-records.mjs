@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { publishCodex, validatePublication, runBounded } from './project-records-codex.mjs';
+import { developmentEvidence } from './project-records-git.mjs';
 
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const PARENT_PAGE_ID = 'page_6ae1b18a44f08191ad2a86276972476c';
@@ -17,10 +18,10 @@ function text(value, name, max) {
   if (typeof value !== 'string' || !value.trim() || value.includes('\0') || [...value].length > max) throw new Error(`${name} 값을 확인해 주세요.`);
   return normal(value);
 }
-function normalizeSource(input) {
+function normalizeSource(input, projectRoot = PROJECT_ROOT) {
   if (!input || !UUID.test(input.workId)) throw new Error('고정된 UUID workId가 필요합니다. 같은 작업의 갱신에는 같은 ID를 사용하세요.');
   const repoPath = text(input.repoPath, 'repoPath', 2000);
-  if (!path.isAbsolute(repoPath) || fs.realpathSync(repoPath).toLowerCase() !== fs.realpathSync(PROJECT_ROOT).toLowerCase()) throw new Error('현재 설정된 TimeSchedule 저장소의 기록만 처리합니다.');
+  if (!path.isAbsolute(repoPath) || fs.realpathSync(repoPath).toLowerCase() !== fs.realpathSync(projectRoot).toLowerCase()) throw new Error('현재 설정된 TimeSchedule 저장소의 기록만 처리합니다.');
   const date = text(input.date, 'date', 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number(date.slice(0, 4)) < 1 || new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date) throw new Error('실제 YYYY-MM-DD 날짜가 필요합니다.');
   if (!Object.hasOwn(LABELS, input.status)) throw new Error('지원하지 않는 작업 상태입니다.');
@@ -56,7 +57,7 @@ function loadJobs(stateDir, workId) {
       .map(f => ({ file: path.join(stateDir, e.name, f), job: readJson(path.join(stateDir, e.name, f)) })))
     .sort((a,b) => a.job.source.workId === b.job.source.workId ? a.job.revision-b.job.revision : (a.job.createdAt ?? a.job.updatedAt).localeCompare(b.job.createdAt ?? b.job.updatedAt));
 }
-const finished = job => ['complete', 'conflict'].includes(job.phase);
+const finished = job => ['complete', 'conflict', 'excluded'].includes(job.phase);
 function writeWake(stateDir) {
   const pending = loadJobs(stateDir).map(x=>x.job).filter(j=>!finished(j));
   atomicJson(path.join(stateDir,'wake.json'), {pending:pending.length,nextAttemptAt:pending.length ? Math.min(...pending.map(j=>j.nextAttemptAt ?? 0)) : null});
@@ -85,13 +86,16 @@ async function locked(stateDir, action) {
   } finally { await new Promise(resolve => server.close(resolve)); }
 }
 
-export async function prepare(input, { stateDir = DEFAULT_STATE } = {}) {
-  const source = normalizeSource(input);
+export async function prepare(input, { stateDir = DEFAULT_STATE, projectRoot = PROJECT_ROOT } = {}) {
+  const source = normalizeSource(input, projectRoot);
+  const evidence = developmentEvidence(source.repoPath, input.gitChanges, projectRoot);
+  if (!evidence.eligible) return { workId: source.workId, skipped: true, reason: evidence.reason };
+  source.gitChanges = evidence.gitChanges;
   return locked(stateDir, async () => {
     const file = path.join(stateDir, source.workId, 'state.json');
     const previous = fs.existsSync(file) ? readJson(file) : null;
     const contentHash = sha(JSON.stringify(source));
-    if (previous?.contentHash === contentHash) return { workId: source.workId, revision: previous.revision, unchanged: true, phase: previous.phase };
+    if (previous?.contentHash === contentHash && previous.phase !== 'excluded') return { workId: source.workId, revision: previous.revision, unchanged: true, phase: previous.phase };
     if (previous && !finished(previous)) {
       upgradeJob(previous);
       atomicJson(path.join(stateDir, source.workId, `pending-${previous.revision}.json`), previous);
@@ -100,7 +104,8 @@ export async function prepare(input, { stateDir = DEFAULT_STATE } = {}) {
     const pageMarkdown = `**프로젝트:** ${source.projectTitle}\n\n**작업일:** ${source.date}\n\n**상태:** ${LABELS[source.status]}\n\n${source.detailedMarkdown}`;
     const localRevision = (previous?.finalRevision ?? previous?.diaryReceipt?.revision ?? previous?.revision ?? 0)+1;
     const job = { schemaVersion: 2, source, revision, contentHash, pageMarkdown, phase: 'prepared', space: previous?.space ?? null,
-      localRevision, finalRevision:localRevision+1, localSaved:false, spaceVerified:false, publicationUncertain:false,
+      localRevision, finalRevision:localRevision+1, localSaved:false, spaceVerified:false,
+      publicationUncertain: previous?.phase === 'excluded' && previous.publicationUncertain === true,
       attempts:0,nextAttemptAt:0,modelCalls: previous?.modelCalls ?? 0, lastError: null, createdAt:new Date().toISOString(), updatedAt: new Date().toISOString() };
     atomicJson(path.join(stateDir, source.workId, `${revision}.json`), { source, revision, contentHash, pageMarkdown });
     atomicJson(file, job);
@@ -142,7 +147,20 @@ export async function sync(options = {}) {
   return locked(stateDir, async () => {
     const results = []; const jobs=loadJobs(stateDir); let processed=0;
     const now=Date.now();
-    if(!options.importer && jobs.some(x=>!finished(x.job))) await registerNative({...options,stateDir});
+    // Apply the policy before registration, backoff and per-run limits: old
+    // research jobs must stop waking the app even if their retry is not due.
+    for (const { file, job } of jobs) {
+      if (finished(job) || (options.workId && job.source.workId !== options.workId)) continue;
+      const evidence = developmentEvidence(job.source.repoPath, job.source.gitChanges, options.projectRoot ?? PROJECT_ROOT);
+      if (!evidence.eligible) {
+        job.excludedFromPhase = job.phase;
+        job.phase = 'excluded'; job.exclusionReason = evidence.reason;
+        job.nextAttemptAt = null; job.updatedAt = new Date().toISOString();
+        atomicJson(file, job);
+      }
+    }
+    writeWake(stateDir);
+    if(!options.importer && jobs.some(({job})=>!finished(job) && (!options.workId || job.source.workId === options.workId))) await registerNative({...options,stateDir});
     for (const { file, job } of jobs) {
       if(options.workId && job.source.workId!==options.workId) continue;
       if (finished(job) || (!options.retryNow && (job.nextAttemptAt ?? 0)>now) || processed >= Number(options.maxJobs ?? Infinity)) {
@@ -165,7 +183,7 @@ export async function sync(options = {}) {
       try {
         if(!job.localSaved){if(!await importRecord(false))continue;job.localSaved=true;job.phase='waiting_space';save();}
         // Keep revisions of one work item ordered, but let other work proceed.
-        const earlier=jobs.find(x=>x.job.source.workId===job.source.workId && x.job.revision<job.revision && x.job.phase!=='complete');
+        const earlier=jobs.find(x=>x.job.source.workId===job.source.workId && x.job.revision<job.revision && !['complete', 'excluded'].includes(x.job.phase));
         if(earlier){job.phase=earlier.job.phase==='conflict'?'conflict':'waiting_prior';job.nextAttemptAt=Math.max(now+60000,earlier.job.nextAttemptAt??0);save();continue;}
         const mappingFile=path.join(stateDir,job.source.workId,'space-state.json');
         if(!job.spaceVerified && fs.existsSync(mappingFile)){
@@ -201,7 +219,7 @@ export async function sync(options = {}) {
 export function status({ stateDir = DEFAULT_STATE, workId } = {}) {
   return loadJobs(stateDir, workId).map(({ job }) => ({ workId: job.source.workId, title: job.source.title, revision: job.revision, phase: job.phase,
     pageUrl: job.spaceVerified || job.phase==='complete' ? job.space?.pageUrl ?? null : null, modelCalls: job.modelCalls, localSaved:job.localSaved,
-    nextAttemptAt:job.nextAttemptAt,lastError: job.lastError, updatedAt: job.updatedAt }));
+    nextAttemptAt:job.nextAttemptAt,lastError: job.lastError, exclusionReason: job.exclusionReason, updatedAt: job.updatedAt }));
 }
 
 async function main(args) {
