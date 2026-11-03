@@ -267,7 +267,7 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
     let mut items = Column::new().spacing(8);
     if let Some(day) = app.snapshot.days.iter().find(|d| d.date == key) {
         for item in &day.items {
-            items = items.push(crate::calendar_ui::item_view(app, item, 230.0, 13.0, false));
+            items = items.push(crate::calendar_ui::item_view(app, item, 13.0, false));
         }
         if day.completed > 0 || day.total > day.items.len() as u32 {
             items = items.push(control(

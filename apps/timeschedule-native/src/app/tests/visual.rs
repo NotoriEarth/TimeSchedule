@@ -227,6 +227,113 @@ fn clicking_widget_record_opens_its_day_before_loading_detail() {
 }
 
 #[test]
+fn incoming_records_and_import_refresh_open_day_and_detail() {
+    use crate::calendar_ui::{message, Action};
+    for inbox in [true, false] {
+        let mut app = calendar_record_fixture();
+        app.quick_window = Some(window::Id::unique());
+        app.quick_date = Some(app.selected);
+        let item = app
+            .snapshot
+            .days
+            .iter()
+            .flat_map(|d| &d.items)
+            .next()
+            .unwrap()
+            .clone();
+        run_message(
+            &mut app,
+            message(Action::Open(item.source, item.id.clone(), true)),
+        );
+        let store = app.store.as_ref().unwrap();
+        let mut changed =
+            worker::hydrate_form(store, Form::entry(store.get_entry(&item.id).unwrap())).unwrap();
+        changed.title = "외부 수정 반영".into();
+        changed.save(store).unwrap();
+        let mut added = Form::new(Kind::Entry, app.selected.to_string(), None);
+        added.title = "새 수신 기록".into();
+        added.save(store).unwrap();
+        if inbox {
+            app.records_processing = true;
+            run_message(
+                &mut app,
+                Message::RecordsDrained(Ok(crate::record_inbox::DrainReport {
+                    saved: 1,
+                    ..Default::default()
+                })),
+            );
+        } else {
+            run_message(
+                &mut app,
+                Message::Imported(Ok(ImportResult {
+                    imported: 1,
+                    scanned: 1,
+                    limited: false,
+                })),
+            );
+        }
+        assert_eq!(
+            app.calendar.quick.total, 2,
+            "open day must refresh, inbox={inbox}"
+        );
+        assert_eq!(
+            app.calendar.detail.as_ref().unwrap().title,
+            "외부 수정 반영"
+        );
+        app.store.as_ref().unwrap().delete_entry(&item.id).unwrap();
+        run_message(&mut app, Message::Load);
+        assert!(app.calendar.detail.is_none());
+    }
+}
+
+#[test]
+fn category_reorder_preserves_unsaved_name_and_color() {
+    use crate::category_ui::{msg, Action};
+    let mut app = calendar_record_fixture();
+    let id = app.snapshot.categories[1].id.clone();
+    run_message(&mut app, msg(Action::Open));
+    run_message(&mut app, msg(Action::Edit(id.clone())));
+    run_message(&mut app, msg(Action::Name("미저장 이름".into())));
+    run_message(&mut app, msg(Action::Color("#123456".into())));
+    run_message(&mut app, msg(Action::Move(id.clone(), -1)));
+    assert_eq!(app.categories.editing, Some(id));
+    assert_eq!(app.categories.name, "미저장 이름");
+    assert_eq!(app.categories.color, "#123456");
+}
+
+#[test]
+fn shared_calendar_rows_fit_real_narrow_width_with_visible_ellipsis() {
+    let app = calendar_record_fixture();
+    let mut item = app
+        .snapshot
+        .days
+        .iter()
+        .flat_map(|d| &d.items)
+        .next()
+        .unwrap()
+        .clone();
+    item.project_title = "아주 긴 프로젝트명 WWWWWWW 한글 가독성 확인 반복".into();
+    item.title = "아주 긴 작업 제목 WWWWWWW 날짜 목록에서 말줄임표 확인".into();
+    for (actual, quick) in [(318.0, true), (120.0, false)] {
+        let labels = calendar_texts(
+            crate::calendar_ui::item_view(&app, &item, 14.0, quick),
+            Size::new(actual, 70.),
+        );
+        for label in labels.iter().filter(|s| s.starts_with("아주")) {
+            assert!(label.ends_with('…'));
+            assert!(
+                crate::text_layout::text_width_with_font(
+                    label,
+                    14.0,
+                    iced::Font::with_name("Malgun Gothic")
+                ) <= actual - 24.0,
+                "{label} overflows {actual}"
+            );
+        }
+    }
+}
+
+#[test]
 #[ignore = "manual category/calendar native renderer previews"]
 fn render_calendar_category_previews() {
     let output = PathBuf::from(std::env::var_os("TIMESCHEDULE_PREVIEW_DIR").unwrap());
@@ -238,19 +345,37 @@ fn render_calendar_category_previews() {
         f.completed = i == 1;
         f.save(app.store.as_ref().unwrap()).unwrap();
     }
+    let mut long = Form::new(
+        Kind::Entry,
+        app.selected.to_string(),
+        Some(app.snapshot.projects[0].id.clone()),
+    );
+    long.title = "아주 긴 제목 WWWWWWW 한글 날짜 목록과 좁은 주간 화면의 말줄임표 확인".into();
+    long.save(app.store.as_ref().unwrap()).unwrap();
     app.snapshot = worker::snapshot(app.store.as_ref().unwrap(), &app.scope()).unwrap();
+    app.calendar.quick = app
+        .store
+        .as_ref()
+        .unwrap()
+        .calendar_section(&app.selected.to_string(), 0, false)
+        .unwrap();
+    app.quick_date = Some(app.selected);
     for (name, kind, size) in [
         ("diary-wide", 0, Size::new(1160., 820.)),
         ("diary-small", 0, Size::new(800., 620.)),
         ("widget", 1, Size::new(960., 640.)),
         ("categories", 2, Size::new(800., 620.)),
         ("record-editor", 3, Size::new(800., 620.)),
+        ("quick-small", 4, Size::new(350., 330.)),
+        ("week-small", 5, Size::new(800., 620.)),
     ] {
         for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
             app.preferences.theme = mode;
             app.manager_size = size;
             app.categories.open = kind == 2;
             app.editor = None;
+            app.page = if kind == 5 { Page::Week } else { Page::Month };
+            app.week = app.selected - Duration::days(2);
             if kind == 2 {
                 app.categories.color = "#82A8D8".into();
             }
@@ -262,6 +387,8 @@ fn render_calendar_category_previews() {
             }
             let mut element = if kind == 1 {
                 crate::desktop_widget::view(&app)
+            } else if kind == 4 {
+                crate::quick_editor::view(&app)
             } else {
                 crate::views::view(&app, app.manager)
             };
@@ -273,15 +400,18 @@ fn render_calendar_category_previews() {
                 &renderer,
                 &layout::Limits::new(Size::ZERO, size),
             );
-            render_settings_frame(
-                &app,
-                &mut element,
-                &mut tree,
-                &node,
-                &mut renderer,
-                size,
-                &output.join(format!("{name}-{mode:?}.png")),
-            );
+            for scale in [1.0, 1.5, 2.0] {
+                render_scaled_frame(
+                    &app,
+                    &mut element,
+                    &mut tree,
+                    &node,
+                    &mut renderer,
+                    size,
+                    &output.join(format!("{name}-{mode:?}-{scale}.png")),
+                    scale,
+                );
+            }
         }
     }
 }
@@ -354,6 +484,19 @@ fn render_settings_frame(
     size: Size,
     output: &std::path::Path,
 ) {
+    render_scaled_frame(app, element, tree, node, renderer, size, output, 1.0);
+}
+
+fn render_scaled_frame(
+    app: &App,
+    element: &mut Element<'_, Message>,
+    tree: &mut Tree,
+    node: &layout::Node,
+    renderer: &mut iced::Renderer,
+    size: Size,
+    output: &std::path::Path,
+    scale: f32,
+) {
     let bounds = Rectangle::new(Point::ORIGIN, size);
     renderer.reset(bounds);
     element.as_widget_mut().update(
@@ -377,11 +520,12 @@ fn render_settings_frame(
         mouse::Cursor::Unavailable,
         &bounds,
     );
-    let mut pixels = tiny_skia::Pixmap::new(size.width as u32, size.height as u32).unwrap();
+    let physical = Size::new((size.width * scale) as u32, (size.height * scale) as u32);
+    let mut pixels = tiny_skia::Pixmap::new(physical.width, physical.height).unwrap();
     renderer.draw(
         &mut pixels.as_mut(),
-        &mut tiny_skia::Mask::new(size.width as u32, size.height as u32).unwrap(),
-        &Viewport::with_physical_size(Size::new(size.width as u32, size.height as u32), 1.),
+        &mut tiny_skia::Mask::new(physical.width, physical.height).unwrap(),
+        &Viewport::with_physical_size(physical, scale),
         &[bounds],
         crate::theme::palette(app.preferences.theme).background,
     );
@@ -392,8 +536,8 @@ fn render_settings_frame(
     let file = std::fs::File::create(output).unwrap();
     let mut encoder = png::Encoder::new(
         std::io::BufWriter::new(file),
-        size.width as u32,
-        size.height as u32,
+        physical.width,
+        physical.height,
     );
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);

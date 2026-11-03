@@ -466,7 +466,7 @@ fn date_details(app: &App) -> Column<'_, Message> {
     .spacing(10);
     if let Some(day) = app.snapshot.days.iter().find(|d| d.date == key) {
         for item in &day.items {
-            details = details.push(crate::calendar_ui::item_view(app, item, 238.0, 13.0, false));
+            details = details.push(crate::calendar_ui::item_view(app, item, 13.0, false));
         }
         if day.completed > 0 || day.total > day.items.len() as u32 {
             details = details.push(control(

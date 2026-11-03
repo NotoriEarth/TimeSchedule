@@ -529,7 +529,6 @@ impl App {
         }
     }
     pub fn refresh(&mut self) -> Task<Message> {
-        self.calendar.detail = None;
         self.calendar.generation += 1;
         self.view_generation += 1;
         let generation = self.view_generation;
@@ -546,11 +545,25 @@ impl App {
         };
         self.loading = true;
         let scope = self.scope();
-        worker::job(
+        let detail = if let Some(form) = self.calendar.detail.clone() {
+            let g = self.calendar.generation;
+            let quick = self.calendar.detail_quick;
+            worker::job(
+                store.clone(),
+                move |s| worker::hydrate_form(s, form),
+                move |r| {
+                    crate::calendar_ui::message(crate::calendar_ui::Action::Detail(g, quick, r))
+                },
+            )
+        } else {
+            Task::none()
+        };
+        let snapshot = worker::job(
             store,
             move |s| worker::snapshot(s, &scope),
             move |result| Message::Loaded(generation, result),
-        )
+        );
+        Task::batch([snapshot, detail, self.load_quick(false)])
     }
     fn poll_record_inbox(&mut self) -> Task<Message> {
         if !self.records_due
@@ -1034,7 +1047,7 @@ impl App {
                     .swap(false, std::sync::atomic::Ordering::AcqRel)
                 {
                     tasks.push(self.refresh());
-                    tasks.push(self.load_quick(false));
+
                     self.notice =
                         "외부 도구의 일정 변경을 반영했습니다. 작성 중인 초안은 유지됩니다.".into();
                 }
@@ -1382,7 +1395,7 @@ impl App {
                         self.editor_in_quick = false;
                         self.editor_generation += 1;
                         self.notice = "내 컴퓨터에 저장했습니다.".into();
-                        return Task::batch([self.refresh(), self.load_quick(false)]);
+                        return self.refresh();
                     }
                     Err(error) => {
                         if let Some(e) = &mut self.editor {
@@ -1416,7 +1429,7 @@ impl App {
             Message::MutationDone(result) => {
                 self.busy = false;
                 match result {
-                    Ok(()) => return Task::batch([self.refresh(), self.load_quick(false)]),
+                    Ok(()) => return self.refresh(),
                     Err(e) => self.error = e,
                 }
             }

@@ -120,14 +120,17 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
                     app.calendar.detail = Some(form);
                     app.calendar.detail_quick = quick
                 }
-                Err(e) => app.error = e,
+                Err(e) => {
+                    app.calendar.detail = None;
+                    app.error = e;
+                }
             }
         }
         Action::CloseDetail => {
             app.calendar.detail = None;
             app.calendar.generation += 1;
         }
-        Action::EditDetail => {
+        Action::EditDetail if !app.loading && !app.busy => {
             if let Some(form) = app.calendar.detail.take() {
                 let quick = app.calendar.detail_quick;
                 let task = app.open_form(form);
@@ -256,6 +259,24 @@ pub fn item_height(item: &CalendarItem, size: f32) -> f32 {
 pub fn item_view<'a>(
     app: &'a App,
     item: &'a CalendarItem,
+    size: f32,
+    quick: bool,
+) -> Element<'a, Message> {
+    iced::widget::responsive(move |bounds| item_contents(app, item, bounds.width, size, quick))
+        .width(Length::Fill)
+        .height(
+            item_height(item, size)
+                + if quick {
+                    f32::from(app.preferences.widget.line_gap)
+                } else {
+                    0.0
+                },
+        )
+        .into()
+}
+fn item_contents<'a>(
+    app: &'a App,
+    item: &'a CalendarItem,
     width: f32,
     size: f32,
     quick: bool,
@@ -356,7 +377,7 @@ pub fn day_items<'a>(
         if used + next + reserve > height {
             break;
         }
-        items = items.push(item_view(app, item, width, size, quick));
+        items = items.push(item_view(app, item, size, quick));
         used += next;
         shown += 1;
     }

@@ -30,14 +30,16 @@ pub enum Action {
     Drop,
     Move(String, i32),
     Saved(Result<(), String>),
+    Reordered(Result<(), String>),
 }
 pub fn msg(action: Action) -> Message {
     Message::Category(action)
 }
 pub fn update(app: &mut App, action: Action) -> Task<Message> {
-    if app.categories.saving && !matches!(action, Action::Saved(_)) {
+    if app.categories.saving && !matches!(action, Action::Saved(_) | Action::Reordered(_)) {
         return Task::none();
     }
+    let fields_saved = matches!(action, Action::Saved(_));
     match action {
         Action::Open if app.editor.is_none() => {
             app.categories = State {
@@ -98,14 +100,16 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
                 return reorder(app, id, target);
             }
         }
-        Action::Saved(result) => {
+        Action::Saved(result) | Action::Reordered(result) => {
             app.categories.saving = false;
             match result {
                 Ok(()) => {
                     app.categories.error.clear();
-                    app.categories.editing = None;
-                    app.categories.name.clear();
-                    return Task::batch([app.refresh(), app.load_quick(false)]);
+                    if fields_saved {
+                        app.categories.editing = None;
+                        app.categories.name.clear();
+                    }
+                    return app.refresh();
                 }
                 Err(e) => app.categories.error = e,
             }
@@ -135,7 +139,7 @@ fn reorder(app: &mut App, id: String, index: usize) -> Task<Message> {
         return worker::job(
             store,
             move |s| s.reorder_categories(&expected, &order),
-            |r| msg(Action::Saved(r)),
+            |r| msg(Action::Reordered(r)),
         );
     }
     Task::none()

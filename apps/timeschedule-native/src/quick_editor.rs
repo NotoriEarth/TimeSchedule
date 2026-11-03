@@ -132,7 +132,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
     let page = &app.calendar.quick;
     for item in page.items.iter().filter(|i| !i.completed) {
-        list = list.push(crate::calendar_ui::item_view(app, item, 570.0, 14.0, true));
+        list = list.push(crate::calendar_ui::item_view(app, item, 14.0, true));
     }
     if page.completed > 0 {
         list = list.push(
@@ -150,7 +150,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
         if app.calendar.show_completed {
             for item in &app.calendar.completed_page.items {
-                list = list.push(crate::calendar_ui::item_view(app, item, 570.0, 14.0, true));
+                list = list.push(crate::calendar_ui::item_view(app, item, 14.0, true));
             }
             if app.calendar.completed_loading {
                 list = list.push(text("완료 항목 불러오는 중…").size(12));
