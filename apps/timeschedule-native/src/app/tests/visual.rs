@@ -522,6 +522,29 @@ fn category_drag_stale_save_preserves_drafts_and_external_categories() {
         app.store.as_ref().unwrap().list_categories().unwrap(),
         external
     );
+    assert_eq!(
+        app.snapshot.categories, external,
+        "a rejected reorder must reload the latest categories without losing the draft"
+    );
+    let refreshed: Vec<_> = external.iter().map(|c| c.id.clone()).collect();
+    let retry_order: Vec<_> = refreshed.iter().rev().cloned().collect();
+    run_message(
+        &mut app,
+        msg(Action::Reorder {
+            expected: refreshed,
+            order: retry_order.clone(),
+        }),
+    );
+    assert!(app.categories.error.is_empty());
+    assert_eq!(app.categories.name, "미저장 분류 이름");
+    assert_eq!(
+        app.snapshot
+            .categories
+            .iter()
+            .map(|c| c.id.clone())
+            .collect::<Vec<_>>(),
+        retry_order
+    );
 }
 
 #[test]

@@ -260,6 +260,42 @@ fn reversal_and_second_drag_keep_id_and_visual_position() {
 }
 
 #[test]
+fn held_second_press_freezes_landing_and_release_or_cancel_stays_continuous() {
+    for finish in 0..3 {
+        let mut h = Harness::new(&["A", "B", "C"], false);
+        h.press(83.);
+        h.move_to(40.);
+        assert!(reorder(&h.release()).is_empty());
+        let at_press = h.y("B");
+        h.press(at_press + 25.);
+        h.frame(75);
+        assert!(
+            (h.y("B") - at_press).abs() < 0.1,
+            "a held row must stop landing at press: {at_press} -> {}",
+            h.y("B")
+        );
+        if finish == 0 {
+            h.move_to(at_press + 29.);
+            assert!((h.y("B") - at_press - 4.).abs() < 0.1);
+        }
+        let before_finish = h.y("B");
+        let messages = if finish == 2 {
+            h.event(Event::Window(iced::window::Event::Unfocused)).0
+        } else {
+            h.release()
+        };
+        assert!(reorder(&messages).is_empty());
+        assert!(
+            (h.y("B") - before_finish).abs() < 0.1,
+            "release/cancel must start at the held position"
+        );
+        h.frame(150);
+        assert!((h.y("B") - 58.).abs() < 0.1);
+        assert_eq!(h.frame(16), iced::window::RedrawRequest::Wait);
+    }
+}
+
+#[test]
 fn scroll_and_edge_drag_preserve_target_coordinates() {
     let ids = ["A", "B", "C", "D", "E", "F", "G", "H"];
     let mut h = Harness::new(&ids, true);

@@ -116,7 +116,15 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
                     }
                     return app.refresh();
                 }
-                Err(e) => app.categories.error = e,
+                Err(e) => {
+                    app.categories.error = e;
+                    if !fields_saved {
+                        // A rejected compare-and-swap leaves storage untouched.
+                        // Reload its latest order so retry can succeed, while
+                        // preserving the user's name/color draft and the error.
+                        return app.refresh();
+                    }
+                }
             }
         }
         _ => {}

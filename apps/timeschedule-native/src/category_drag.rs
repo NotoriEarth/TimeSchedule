@@ -82,11 +82,7 @@ impl State {
         self.rows.iter().map(|r| r.id.clone()).collect()
     }
     fn y(&self, i: usize) -> f32 {
-        if let Some(d) = self
-            .drag
-            .as_ref()
-            .filter(|d| d.moved && d.id == self.rows[i].id)
-        {
+        if let Some(d) = self.drag.as_ref().filter(|d| d.id == self.rows[i].id) {
             d.top
         } else {
             self.rows[i].y.interpolate_with(|v| v, self.now)
@@ -104,10 +100,8 @@ impl State {
     }
     fn cancel(&mut self) {
         if let Some(drag) = self.drag.take() {
-            if drag.moved {
-                if let Some(row) = self.rows.iter_mut().find(|r| r.id == drag.id) {
-                    row.y = motion(drag.top);
-                }
+            if let Some(row) = self.rows.iter_mut().find(|r| r.id == drag.id) {
+                row.y = motion(drag.top);
             }
             self.targets(&self.ids());
         }
@@ -140,8 +134,7 @@ impl State {
     }
     fn animating(&self) -> bool {
         self.rows.iter().any(|r| {
-            !self.drag.as_ref().is_some_and(|d| d.moved && d.id == r.id)
-                && r.y.is_animating(self.now)
+            !self.drag.as_ref().is_some_and(|d| d.id == r.id) && r.y.is_animating(self.now)
         })
     }
 }
@@ -329,10 +322,8 @@ impl Widget<Message, Theme, Renderer> for CategoryList<'_> {
                 let order = state.preview();
                 let drag = state.drag.take().unwrap();
                 let expected = state.ids();
-                if drag.moved {
-                    if let Some(row) = state.rows.iter_mut().find(|r| r.id == drag.id) {
-                        row.y = motion(drag.top);
-                    }
+                if let Some(row) = state.rows.iter_mut().find(|r| r.id == drag.id) {
+                    row.y = motion(drag.top);
                 }
                 if drag.moved && pointer.is_some() && order != expected {
                     state.targets(&order);
