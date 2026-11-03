@@ -358,7 +358,10 @@ pub fn day_items<'a>(
     let Some(day) = day else {
         return space().into();
     };
-    let mut items = Column::new().spacing(0);
+    let mut items = Column::new().spacing(0).height(height);
+    // Reserve the footer's actual line height. A fixed 18px budget used to
+    // hide the first two-line record even when it and the footer both fit.
+    let footer_height = size * 1.3;
     let mut used = 0.0;
     let mut shown = 0;
     for (index, item) in day.items.iter().enumerate() {
@@ -370,7 +373,7 @@ pub fn day_items<'a>(
             };
         let reserve =
             if day.completed > 0 || day.total.saturating_sub(day.completed) > index as u32 + 1 {
-                18.0
+                footer_height
             } else {
                 0.0
             };
@@ -385,18 +388,23 @@ pub fn day_items<'a>(
         .total
         .saturating_sub(day.completed)
         .saturating_sub(shown);
-    if height - used >= 16.0 && (pending > 0 || day.completed > 0) {
+    if height - used >= footer_height && (pending > 0 || day.completed > 0) {
         let caption = match (pending, day.completed) {
             (0, n) => format!("완료 {n}개"),
             (n, 0) => format!("+{n}개 더"),
             (n, c) => format!("+{n} · 완료 {c}개"),
         };
         if let Ok(date) = day.date.parse() {
-            items = items.push(
-                button(text(crate::text_layout::fit_label(&caption, width - 4.0, size)).size(size))
-                    .padding(0)
-                    .style(theme::text_button)
-                    .on_press(Message::WidgetDate(date)),
+            items = items.push(space().height(Length::Fill)).push(
+                button(
+                    text(crate::text_layout::fit_label(&caption, width - 4.0, size))
+                        .size(size)
+                        .line_height(text::LineHeight::Relative(1.3)),
+                )
+                .padding(0)
+                .height(footer_height)
+                .style(theme::text_button)
+                .on_press(Message::WidgetDate(date)),
             )
         }
     }

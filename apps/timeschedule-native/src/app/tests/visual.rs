@@ -60,6 +60,200 @@ fn diary_calendar_displays_project_and_task_title() {
     assert!(labels.iter().any(|s| s == "TS"));
 }
 
+fn overflowing_calendar_fixture(count: usize) -> App {
+    let mut app = calendar_record_fixture();
+    for index in 1..count {
+        let mut form = Form::new(
+            Kind::Entry,
+            app.selected.to_string(),
+            Some(app.snapshot.projects[0].id.clone()),
+        );
+        form.title = format!("기록{index}");
+        form.save(app.store.as_ref().unwrap()).unwrap();
+    }
+    app.snapshot = worker::snapshot(app.store.as_ref().unwrap(), &app.scope()).unwrap();
+    app
+}
+
+fn calendar_text_bounds(mut element: Element<'_, Message>, size: Size) -> Vec<(String, Rectangle)> {
+    #[derive(Default)]
+    struct Labels(Vec<(String, Rectangle)>);
+    impl iced::advanced::widget::Operation for Labels {
+        fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation)) {
+            visit(self);
+        }
+        fn text(&mut self, _: Option<&iced::advanced::widget::Id>, bounds: Rectangle, value: &str) {
+            self.0.push((value.to_owned(), bounds));
+        }
+    }
+    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, size),
+    );
+    let mut probe = Labels::default();
+    element
+        .as_widget_mut()
+        .operate(&mut tree, layout::Layout::new(&node), &renderer, &mut probe);
+    probe.0
+}
+
+#[test]
+fn calendar_overflow_shows_record_before_more_in_short_cell() {
+    let mut app = overflowing_calendar_fixture(3);
+    app.preferences.widget.line_gap = 0;
+    let day = app
+        .snapshot
+        .days
+        .iter()
+        .find(|d| d.date == app.selected.to_string())
+        .unwrap();
+    for quick in [false, true] {
+        let labels = calendar_text_bounds(
+            crate::calendar_ui::day_items(&app, Some(day), 180., 52., 11., quick),
+            Size::new(180., 52.),
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|(s, _)| day.items.iter().any(|i| &i.title == s)),
+            "a complete two-line record fits before the footer: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|(s, _)| s == "+2개 더"),
+            "only two records remain hidden: {labels:?}"
+        );
+    }
+}
+
+#[test]
+fn calendar_overflow_footer_uses_bottom_edge_and_disappears_when_all_fit() {
+    let mut app = overflowing_calendar_fixture(5);
+    app.preferences.widget.line_gap = 0;
+    let day = app
+        .snapshot
+        .days
+        .iter()
+        .find(|d| d.date == app.selected.to_string())
+        .unwrap();
+    for quick in [false, true] {
+        let labels = calendar_text_bounds(
+            crate::calendar_ui::day_items(&app, Some(day), 180., 160., 11., quick),
+            Size::new(180., 160.),
+        );
+        let footer = labels
+            .iter()
+            .find(|(s, _)| s == "+2개 더")
+            .expect("three whole records fit, leaving two hidden")
+            .1;
+        assert!(
+            (footer.y + footer.height - 160.).abs() < 1.,
+            "footer must sit at the bottom, not immediately after the rows: {footer:?}"
+        );
+        let expanded = calendar_texts(
+            crate::calendar_ui::day_items(&app, Some(day), 180., 220., 11., quick),
+            Size::new(180., 220.),
+        );
+        assert!(!expanded.iter().any(|s| s.ends_with("개 더")));
+        for item in &day.items {
+            assert!(expanded.contains(&item.title));
+        }
+    }
+}
+
+#[test]
+fn calendar_overflow_default_diary_and_widget_show_content_before_more() {
+    let app = overflowing_calendar_fixture(3);
+    for (view, size, right) in [
+        (
+            crate::views::view(&app, app.manager),
+            Size::new(1160., 820.),
+            870.,
+        ),
+        (
+            crate::desktop_widget::view(&app),
+            Size::new(960., 640.),
+            960.,
+        ),
+    ] {
+        let labels = calendar_text_bounds(view, size);
+        let footer = labels
+            .iter()
+            .find(|(s, b)| s == "+2개 더" && b.x < right)
+            .expect("one record and two hidden records in the calendar cell")
+            .1;
+        assert!(
+            labels
+                .iter()
+                .any(|(s, b)| (s.starts_with("기록") || s == "연동기록")
+                    && b.x < right
+                    && b.y < footer.y
+                    && b.y > footer.y - 55.),
+            "show a task title before the footer, not only a count: {labels:?}"
+        );
+    }
+}
+
+#[test]
+fn calendar_overflow_large_font_footer_stays_inside_cell() {
+    let mut app = overflowing_calendar_fixture(3);
+    app.preferences.widget.line_gap = 0;
+    let day = app
+        .snapshot
+        .days
+        .iter()
+        .find(|d| d.date == app.selected.to_string())
+        .unwrap();
+    let labels = calendar_text_bounds(
+        crate::calendar_ui::day_items(&app, Some(day), 240., 165., 24., true),
+        Size::new(240., 165.),
+    );
+    assert!(labels.iter().any(|(s, _)| s == "+2개 더"));
+    for (_, bounds) in labels {
+        assert!(bounds.y + bounds.height <= 165.1);
+    }
+}
+
+#[test]
+#[ignore = "manual native overflow previews"]
+fn render_calendar_overflow_previews() {
+    let output = PathBuf::from(std::env::var_os("TIMESCHEDULE_PREVIEW_DIR").unwrap());
+    std::fs::create_dir_all(&output).unwrap();
+    let mut app = overflowing_calendar_fixture(3);
+    for (name, widget, size) in [
+        ("diary", false, Size::new(1160., 820.)),
+        ("diary-tall", false, Size::new(1160., 1280.)),
+        ("widget", true, Size::new(960., 640.)),
+        ("widget-tall", true, Size::new(960., 1100.)),
+    ] {
+        app.manager_size = size;
+        let mut element = if widget {
+            crate::desktop_widget::view(&app)
+        } else {
+            crate::views::view(&app, app.manager)
+        };
+        let mut renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        render_scaled_frame(
+            &app,
+            &mut element,
+            &mut tree,
+            &node,
+            &mut renderer,
+            size,
+            &output.join(format!("{name}.png")),
+            1.,
+        );
+    }
+}
+
 fn run_message(app: &mut App, message: Message) {
     use iced::futures::StreamExt;
     let runtime = tokio::runtime::Builder::new_current_thread()
