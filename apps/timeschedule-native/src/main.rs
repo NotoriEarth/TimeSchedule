@@ -6,6 +6,9 @@ mod editor;
 mod frozen;
 mod icons;
 mod mcp;
+mod mcp_connection;
+mod mcp_setup;
+mod mcp_setup_ui;
 mod month_jump;
 #[cfg(all(test, windows))]
 mod native_alpha_tests;
@@ -27,6 +30,9 @@ use iced::Font;
 pub static DPI_INIT_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn main() {
+    if let Some(code) = mcp_connection::try_run() {
+        std::process::exit(code);
+    }
     if let Some(code) = record_cli::try_run() {
         std::process::exit(code);
     }

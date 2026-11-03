@@ -584,8 +584,10 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         title("로컬 일정 MCP"),
         text(&app.mcp_status).size(13),
         quiet("앱이 트레이에 있는 동안에도 연결됩니다. 완전 종료하면 중지됩니다."),
+        crate::mcp_setup_ui::view(&app.mcp_setup),
         title("바탕화면 위젯"),
         scrollable(text(app.widget_status_text()).size(13))
+            .id("widget-connection-status")
             .height(52)
             .width(Length::Fill)
     ]
