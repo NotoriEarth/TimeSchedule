@@ -35,6 +35,24 @@ fn fit_widget_before_attach(
     // work area at high DPI. This same path permits retry after a failed attach.
     windows::restore_position(window, x, y)
 }
+fn configure_widget_geometry(
+    window: &windows::NativeWindow,
+    prefs: &Preferences,
+) -> Result<(), String> {
+    let (x, y) = match (prefs.widget_x, prefs.widget_y) {
+        (Some(x), Some(y)) => (x, y),
+        _ => windows::position(window)?,
+    };
+    windows::configure_geometry(
+        window,
+        windows::WidgetGeometry {
+            x,
+            y,
+            width: prefs.widget.width,
+            height: prefs.widget.height,
+        },
+    )
+}
 fn widget_window_settings() -> window::Settings {
     window::Settings {
         size: Size::new(960.0, 640.0),
@@ -100,7 +118,6 @@ pub enum NativeAction {
     Recover,
     Lock(bool),
     Opacity(u8),
-    Position,
     Resize(u32, u32),
 }
 #[derive(Clone, Debug)]
@@ -181,6 +198,7 @@ pub enum Message {
     Drafted(u64, u64, Result<Form, String>),
     Native(NativeAction),
     NativeDone(NativeAction, Result<NativeReport, String>),
+    DisplayObserverReady(Result<(), String>),
     PrefsDone(Result<(), String>),
     ShowManager,
     DragWidget,
@@ -560,9 +578,7 @@ impl App {
             return Task::none();
         }
         if self.native_busy {
-            if !matches!(action, NativeAction::Position) {
-                self.native_pending = Some(action);
-            }
+            self.native_pending = Some(action);
             return Task::none();
         }
         let Some(id) = self.widget else {
@@ -582,6 +598,7 @@ impl App {
                 NativeAction::Attach => {
                     fit_widget_before_attach(&owned, &prefs)?;
                     windows::attach(&owned)?;
+                    configure_widget_geometry(&owned, &prefs)?;
                     windows::enable_per_pixel_alpha(&owned)?;
                     windows::set_locked(&owned, prefs.widget_locked)?;
                     windows::set_visible(&owned, prefs.widget_visible)?;
@@ -591,6 +608,7 @@ impl App {
                     if !windows::status(&owned)?.attached {
                         fit_widget_before_attach(&owned, &prefs)?;
                         windows::attach(&owned)?;
+                        configure_widget_geometry(&owned, &prefs)?;
                         windows::enable_per_pixel_alpha(&owned)?;
                         windows::set_locked(&owned, prefs.widget_locked)?;
                     }
@@ -605,6 +623,7 @@ impl App {
                     if !windows::status(&owned)?.attached {
                         fit_widget_before_attach(&owned, &prefs)?;
                         windows::attach(&owned)?;
+                        configure_widget_geometry(&owned, &prefs)?;
                         windows::enable_per_pixel_alpha(&owned)?;
                         windows::set_locked(&owned, prefs.widget_locked)?;
                     }
@@ -614,7 +633,6 @@ impl App {
                 }
                 NativeAction::Lock(value) => windows::set_locked(&owned, value)?,
                 NativeAction::Opacity(_) => unreachable!("background opacity is a UI preference"),
-                NativeAction::Position => {}
                 NativeAction::Resize(width, height) => {
                     windows::resize_logical(&owned, width, height)?
                 }
@@ -632,9 +650,7 @@ impl App {
                 opacity: info.opacity_percent,
                 visible,
                 position,
-                size: if info.attached
-                    && matches!(action, NativeAction::Resize(..) | NativeAction::Lock(true))
-                {
+                size: if info.attached {
                     windows::logical_size(&owned).ok().flatten()
                 } else {
                     None
@@ -728,7 +744,44 @@ impl App {
         ])
         .chain(window::gain_focus(self.manager))
     }
+    fn apply_geometry_event(&mut self, event: windows::GeometryEvent) {
+        self.widget_ui.actual_size =
+            Size::new(event.actual_size.0 as f32, event.actual_size.1 as f32);
+        let recovered = self.widget_ui.geometry_error.is_some() && event.error.is_none();
+        self.widget_ui.geometry_error = event
+            .error
+            .map(|error| format!("위젯 화면 보정 실패: {error}"));
+        if recovered {
+            self.desktop_message = "위젯 화면 보정 완료 · 현재 작업 영역에 맞게 표시합니다.".into();
+        }
+        if let Some(p) = event.preferred {
+            let before = (
+                self.preferences.widget_x,
+                self.preferences.widget_y,
+                self.preferences.widget.width,
+                self.preferences.widget.height,
+            );
+            let after = (Some(p.x), Some(p.y), p.width, p.height);
+            if before != after {
+                self.preferences.widget_x = Some(p.x);
+                self.preferences.widget_y = Some(p.y);
+                self.preferences.widget.width = p.width;
+                self.preferences.widget.height = p.height;
+                self.widget_ui.width = p.width.to_string();
+                self.widget_ui.height = p.height.to_string();
+                self.widget_ui.save_due = Some(std::time::Instant::now());
+            }
+        }
+    }
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Queue-only drain: no desktop query, busy transition or task launch.
+        // Do this before Quit/Lock too, so a just-finished move cannot be lost.
+        for event in windows::take_geometry_events() {
+            if self.widget.is_some() {
+                self.apply_geometry_event(event);
+            }
+        }
+
         if let Message::CloseWindow(id) | Message::EscapeWindow(id) = &message {
             if self
                 .widget_ui
@@ -759,6 +812,7 @@ impl App {
                     | Message::RecordsDue
                     | Message::RecordsDrained(_)
                     | Message::NativeDone(..)
+                    | Message::DisplayObserverReady(..)
                     | Message::PrefsDone(_)
                     | Message::Loaded(..)
                     | Message::SearchDone(..)
@@ -835,27 +889,29 @@ impl App {
             Message::Resized(id, size) if id == self.manager => self.manager_size = size,
             Message::Resized(id, size) if Some(id) == self.widget => {
                 self.widget_ui.actual_size = size;
-                // Iced reports logical client dimensions. Capture the last
-                // user resize immediately; debounce disk writes, not the data.
-                // Locked monitor recovery must not replace the preferred size.
-                let (width, height) = (size.width.round() as u32, size.height.round() as u32);
-                if self.widget_attached
-                    && !self.preferences.widget_locked
-                    && (320..=3840).contains(&width)
-                    && (220..=2160).contains(&height)
-                    && (width, height)
-                        != (
-                            self.preferences.widget.width,
-                            self.preferences.widget.height,
-                        )
-                {
-                    self.preferences.widget.width = width;
-                    self.preferences.widget.height = height;
-                    self.widget_ui.save_due =
-                        Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
+                // Native move-end notifications alone update authored geometry.
+                // Iced resize events also describe temporary automatic corrections.
+            }
+            Message::Ready(id) => {
+                self.log(&format!("manager ready {id:?}"));
+                return window::run(id, |window| {
+                    let handle = window.window_handle().map_err(|e| e.to_string())?;
+                    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
+                        return Err("Windows 전용 화면 알림입니다.".into());
+                    };
+                    let owned = unsafe { windows::NativeWindow::iced_widget(raw.hwnd.get()) };
+                    windows::observe_display_changes(&owned)
+                })
+                .map(Message::DisplayObserverReady);
+            }
+            Message::DisplayObserverReady(result) => {
+                self.widget_ui.display_observer_error = result
+                    .err()
+                    .map(|error| format!("화면 변경 알림 연결 실패: {error}"));
+                if let Some(error) = &self.widget_ui.display_observer_error {
+                    self.log(error);
                 }
             }
-            Message::Ready(id) => self.log(&format!("manager ready {id:?}")),
             Message::WidgetReady(id) => {
                 self.log(&format!("widget ready {id:?}"));
                 return self.native(NativeAction::Attach);
@@ -952,9 +1008,6 @@ impl App {
                     .is_some_and(|due| due <= std::time::Instant::now())
                 {
                     tasks.push(self.save_preferences());
-                }
-                if self.ticks % 2 == 0 && !self.native_busy && self.widget.is_some() {
-                    tasks.push(self.native(NativeAction::Position));
                 }
                 return Task::batch(tasks);
             }
@@ -1436,12 +1489,10 @@ impl App {
                 let mut save = Task::none();
                 match result {
                     Ok(report) => {
-                        if !matches!(action, NativeAction::Position) {
-                            self.log(&format!(
-                                "widget action={action:?} attached={} visible={:?} position={:?}",
-                                report.attached, report.visible, report.position
-                            ));
-                        }
+                        self.log(&format!(
+                            "widget action={action:?} attached={} visible={:?} position={:?}",
+                            report.attached, report.visible, report.position
+                        ));
                         let before = (
                             self.preferences.widget_x,
                             self.preferences.widget_y,
@@ -1452,6 +1503,7 @@ impl App {
                             self.preferences.widget.height,
                         );
                         self.desktop_message = report.message;
+                        self.widget_ui.native_error = None;
                         self.widget_attached = report.attached;
                         if report.attached {
                             self.preferences.widget_locked = report.locked;
@@ -1462,17 +1514,15 @@ impl App {
                         if let Some(value) = report.visible {
                             self.preferences.widget_visible = value;
                         }
-                        if let Some((x, y)) = report.position {
-                            self.preferences.widget_x = Some(x);
-                            self.preferences.widget_y = Some(y);
-                        }
                         if let Some((width, height)) = report.size {
-                            self.preferences.widget.width = width.clamp(320, 3840);
-                            self.preferences.widget.height = height.clamp(220, 2160);
-                            if matches!(action, NativeAction::Resize(..)) {
-                                self.widget_ui.width = self.preferences.widget.width.to_string();
-                                self.widget_ui.height = self.preferences.widget.height.to_string();
-                            }
+                            self.widget_ui.actual_size = Size::new(width as f32, height as f32);
+                        }
+                        if let NativeAction::Resize(width, height) = action {
+                            // Save the requested logical dimensions, never a work-area clamp.
+                            self.preferences.widget.width = width;
+                            self.preferences.widget.height = height;
+                            self.widget_ui.width = width.to_string();
+                            self.widget_ui.height = height.to_string();
                         }
                         let after = (
                             self.preferences.widget_x,
@@ -1488,11 +1538,9 @@ impl App {
                         }
                     }
                     Err(e) => {
-                        self.desktop_message = e.clone();
-                        if !matches!(action, NativeAction::Position) {
-                            self.error = format!("바탕화면 위젯: {e}");
-                            self.log(&self.error);
-                        }
+                        let error = format!("바탕화면 위젯: {e}");
+                        self.log(&error);
+                        self.widget_ui.native_error = Some(error);
                     }
                 }
                 if let Some(next) = self.native_pending.take() {
@@ -2109,6 +2157,110 @@ mod tests {
         assert!(app.update(Message::ResizeWidget).units() > 0);
     }
     #[test]
+    fn automatic_reports_preserve_authored_preferences_on_disk_and_restart() {
+        let mut app = fixture();
+        app.widget = Some(window::Id::unique());
+        app.preferences.widget_x = Some(-1400);
+        app.preferences.widget_y = Some(75);
+        app.preferences.widget.width = 1100;
+        app.preferences.widget.height = 750;
+        let directory =
+            std::env::temp_dir().join(format!("timeschedule-geometry-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        for locked in [false, true] {
+            app.preferences.widget_locked = locked;
+            let preferred = app.preferences.clone();
+            for action in [
+                NativeAction::Attach,
+                NativeAction::Show,
+                NativeAction::Recover,
+                NativeAction::Lock(locked),
+            ] {
+                let _ = app.update(Message::NativeDone(
+                    action,
+                    Ok(NativeReport {
+                        attached: true,
+                        message: "temporary small display".into(),
+                        locked,
+                        opacity: None,
+                        visible: None,
+                        position: Some((0, 0)),
+                        size: Some((500, 350)),
+                    }),
+                ));
+                app.apply_geometry_event(windows::GeometryEvent {
+                    preferred: None,
+                    actual_size: (500, 350),
+                    error: None,
+                });
+                assert_eq!(app.preferences, preferred);
+                assert!(app.widget_ui.save_due.is_none());
+                preferences::save(&directory, &app.preferences).unwrap();
+                assert_eq!(preferences::load(&directory).unwrap(), preferred);
+            }
+        }
+        let geometry = windows::WidgetGeometry {
+            x: -1200,
+            y: 80,
+            width: 900,
+            height: 600,
+        };
+        let event = windows::GeometryEvent {
+            preferred: Some(geometry),
+            actual_size: (500, 350),
+            error: None,
+        };
+        app.apply_geometry_event(event.clone());
+        assert!(app.widget_ui.save_due.is_some());
+        app.widget_ui.save_due = None;
+        app.apply_geometry_event(event);
+        assert!(
+            app.widget_ui.save_due.is_none(),
+            "duplicate final geometry must not write twice"
+        );
+        preferences::save(&directory, &app.preferences).unwrap();
+        let restarted = preferences::load(&directory).unwrap();
+        assert_eq!(
+            (
+                restarted.widget_x,
+                restarted.widget_y,
+                restarted.widget.width,
+                restarted.widget.height
+            ),
+            (Some(-1200), Some(80), 900, 600)
+        );
+        std::fs::remove_file(directory.join("preferences.json")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+    #[test]
+    fn idle_ticks_do_not_query_widget_or_show_native_busy() {
+        let mut app = fixture();
+        app.widget = Some(window::Id::unique());
+        app.widget_attached = true;
+        for _ in 0..120 {
+            let _ = app.update(Message::Tick);
+            assert!(
+                !app.native_busy,
+                "idle ticks must not invoke native position work"
+            );
+        }
+    }
+    #[test]
+    fn automatic_resize_does_not_replace_saved_preference() {
+        let mut app = fixture();
+        let id = window::Id::unique();
+        app.widget = Some(id);
+        app.widget_attached = true;
+        app.preferences.widget_locked = false;
+        let expected = (app.preferences.widget.width, app.preferences.widget.height);
+        let _ = app.update(Message::Resized(id, Size::new(500., 350.)));
+        assert_eq!(
+            (app.preferences.widget.width, app.preferences.widget.height),
+            expected
+        );
+        assert_eq!(app.widget_ui.actual_size, Size::new(500., 350.));
+    }
+    #[test]
     fn final_resize_is_saved_before_immediate_lock_or_quit() {
         let mut app = fixture();
         let id = window::Id::unique();
@@ -2116,6 +2268,16 @@ mod tests {
         app.widget_attached = true;
         app.preferences.widget_locked = false;
         let _ = app.update(Message::Resized(id, Size::new(740., 480.)));
+        app.apply_geometry_event(windows::GeometryEvent {
+            preferred: Some(windows::WidgetGeometry {
+                x: 30,
+                y: 40,
+                width: 740,
+                height: 480,
+            }),
+            actual_size: (740, 480),
+            error: None,
+        });
         assert_eq!(
             (app.preferences.widget.width, app.preferences.widget.height),
             (740, 480)
@@ -2140,6 +2302,16 @@ mod tests {
         );
         app.preferences.widget_locked = false;
         let _ = app.update(Message::Resized(id, Size::new(760., 490.)));
+        app.apply_geometry_event(windows::GeometryEvent {
+            preferred: Some(windows::WidgetGeometry {
+                x: 30,
+                y: 40,
+                width: 760,
+                height: 490,
+            }),
+            actual_size: (760, 490),
+            error: None,
+        });
         let _ = app.update(Message::Quit);
         assert!(
             app.quit_when_idle,

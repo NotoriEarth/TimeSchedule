@@ -3,6 +3,528 @@ use super::*;
 use iced::advanced::{graphics::Viewport, layout, mouse, renderer, widget::Tree, Renderer};
 use iced::{Point, Rectangle};
 
+#[derive(Default)]
+struct SettingsProbe {
+    set_scroll: Option<f32>,
+    set_scroll_index: usize,
+    texts: Vec<String>,
+    scrolls: Vec<(Rectangle, Rectangle, iced::Vector)>,
+    controls: Vec<(String, Rectangle)>,
+}
+impl iced::advanced::widget::Operation for SettingsProbe {
+    fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation)) {
+        visit(self);
+    }
+    fn scrollable(
+        &mut self,
+        _: Option<&iced::advanced::widget::Id>,
+        bounds: Rectangle,
+        content: Rectangle,
+        translation: iced::Vector,
+        state: &mut dyn iced::advanced::widget::operation::Scrollable,
+    ) {
+        if self.scrolls.len() == self.set_scroll_index {
+            if let Some(y) = self.set_scroll {
+                state.scroll_to(iced::widget::scrollable::AbsoluteOffset {
+                    x: None,
+                    y: Some(y),
+                });
+            }
+        }
+        self.scrolls.push((bounds, content, translation));
+    }
+    fn text(&mut self, _: Option<&iced::advanced::widget::Id>, bounds: Rectangle, value: &str) {
+        self.texts.push(value.to_owned());
+        if [
+            "위젯 숨기기",
+            "위젯 표시",
+            "위젯 위치 복구",
+            "잠금 해제",
+            "크기와 표시 기간",
+            "크기 적용",
+            "글꼴과 간격",
+        ]
+        .contains(&value)
+            || value.starts_with("배경 불투명도")
+        {
+            self.controls.push((value.to_owned(), bounds));
+        }
+    }
+}
+
+fn render_settings_frame(
+    app: &App,
+    element: &mut Element<'_, Message>,
+    tree: &mut Tree,
+    node: &layout::Node,
+    renderer: &mut iced::Renderer,
+    size: Size,
+    output: &std::path::Path,
+) {
+    let bounds = Rectangle::new(Point::ORIGIN, size);
+    renderer.reset(bounds);
+    element.as_widget_mut().update(
+        tree,
+        &iced::Event::Window(window::Event::RedrawRequested(std::time::Instant::now())),
+        layout::Layout::new(&node),
+        mouse::Cursor::Unavailable,
+        renderer,
+        &mut iced::advanced::clipboard::Null,
+        &mut iced::advanced::Shell::new(&mut Vec::new()),
+        &bounds,
+    );
+    element.as_widget().draw(
+        tree,
+        renderer,
+        &app.theme(app.manager),
+        &renderer::Style {
+            text_color: crate::theme::palette(app.preferences.theme).text,
+        },
+        layout::Layout::new(&node),
+        mouse::Cursor::Unavailable,
+        &bounds,
+    );
+    let mut pixels = tiny_skia::Pixmap::new(size.width as u32, size.height as u32).unwrap();
+    renderer.draw(
+        &mut pixels.as_mut(),
+        &mut tiny_skia::Mask::new(size.width as u32, size.height as u32).unwrap(),
+        &Viewport::with_physical_size(Size::new(size.width as u32, size.height as u32), 1.),
+        &[bounds],
+        crate::theme::palette(app.preferences.theme).background,
+    );
+    let mut rgba = pixels.data().to_vec();
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    let file = std::fs::File::create(output).unwrap();
+    let mut encoder = png::Encoder::new(
+        std::io::BufWriter::new(file),
+        size.width as u32,
+        size.height as u32,
+    );
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&rgba)
+        .unwrap();
+}
+
+#[test]
+fn settings_retained_layout_is_stable_across_native_busy_transitions() {
+    // Keep the real scrollable tree alive across each change, as Iced does.
+    // Removing the native controls while busy must fail this geometry check.
+    for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+        for size in [Size::new(620., 480.), Size::new(1160., 820.)] {
+            let mut app = fixture();
+            app.preferences.theme = mode;
+            let mut renderer =
+                iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+            let mut tree = Tree::empty();
+            let mut baseline = None;
+            let mut scroll_baseline = None;
+            let mut status_baseline = None;
+            let mut controls_baseline = None;
+            for (frame, busy) in [false, true, false, true, false].into_iter().enumerate() {
+                app.native_busy = busy;
+                app.desktop_message = if frame < 3 {
+                    "바탕화면 부모 연결 확인 (WorkerW). 위젯이 작업 영역 안에 표시됩니다.".into()
+                } else {
+                    "위젯 화면 보정 실패: 바탕화면 호스트가 변경되었습니다.\n화면 연결을 확인한 다음 위젯 위치 복구를 선택하세요.\n연결 상태가 복구될 때까지 사용자 선호 위치와 크기를 보존합니다.\n추가 오류 내용도 이 영역 안에서 스크롤해 확인할 수 있습니다.".into()
+                };
+                let mut element = crate::views::settings(&app);
+                tree.diff(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                fn geometry(node: &layout::Node, parent: Point, out: &mut Vec<(f32, f32, f32)>) {
+                    let b = node.bounds();
+                    let p = Point::new(parent.x + b.x, parent.y + b.y);
+                    // Text widths may change with the status, but every target,
+                    // vertical position, height and scroll-content extent must remain.
+                    out.push((p.x, p.y, b.height));
+                    for child in node.children() {
+                        geometry(child, p, out);
+                    }
+                }
+                let mut positions = Vec::new();
+                geometry(&node, Point::ORIGIN, &mut positions);
+                if let Some(expected) = &baseline {
+                    if frame < 3 {
+                        assert_eq!(
+                            &positions, expected,
+                            "settings jumped: {mode:?} {size:?} busy={busy}"
+                        );
+                    }
+                } else {
+                    baseline = Some(positions);
+                }
+                if frame == 0 {
+                    let mut set = SettingsProbe {
+                        set_scroll: Some(460.),
+                        ..Default::default()
+                    };
+                    element.as_widget_mut().operate(
+                        &mut tree,
+                        layout::Layout::new(&node),
+                        &renderer,
+                        &mut set,
+                    );
+                }
+                let mut probe = SettingsProbe::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    layout::Layout::new(&node),
+                    &renderer,
+                    &mut probe,
+                );
+                assert!(
+                    probe.scrolls[0].2.y > 0.,
+                    "fixture must be scrolled to the widget section"
+                );
+                assert!(
+                    probe.controls.len() >= 6,
+                    "real native controls must remain mounted"
+                );
+                if let Some(expected) = &scroll_baseline {
+                    assert_eq!(
+                        &probe.scrolls[0], expected,
+                        "scroll state changed on frame{frame}"
+                    );
+                } else {
+                    scroll_baseline = Some(probe.scrolls[0]);
+                }
+                if let Some(expected) = &status_baseline {
+                    assert_eq!(
+                        &probe.scrolls[1].0, expected,
+                        "status viewport must retain its width and position too"
+                    );
+                } else {
+                    status_baseline = Some(probe.scrolls[1].0);
+                }
+                if let Some(expected) = &controls_baseline {
+                    assert_eq!(&probe.controls, expected, "control targets changed");
+                } else {
+                    controls_baseline = Some(probe.controls);
+                }
+
+                assert_eq!(
+                    probe.scrolls[1].0.height, 52.,
+                    "status viewport keeps its height"
+                );
+                if frame >= 3 {
+                    assert!(
+                        probe.scrolls[1].1.height > 52.,
+                        "long errors remain scrollable"
+                    );
+                }
+                if size.width == 620. && frame < 4 {
+                    if let Some(output) = std::env::var_os("TIMESCHEDULE_SETTINGS_PREVIEW_DIR") {
+                        let output = PathBuf::from(output);
+                        std::fs::create_dir_all(&output).unwrap();
+                        render_settings_frame(
+                            &app,
+                            &mut element,
+                            &mut tree,
+                            &node,
+                            &mut renderer,
+                            size,
+                            &output.join(format!("settings-{mode:?}-{frame}.png")),
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn full_settings_shell_keeps_layout_through_real_native_errors_and_recovery() {
+    for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+        for size in [Size::new(800., 620.), Size::new(1160., 820.)] {
+            for source in ["geometry", "native", "observer"] {
+                for unrelated in ["", "다이어리 저장 실패: 별도 오류 fixture"] {
+                    let mut app = fixture();
+                    app.page = Page::Settings;
+                    app.manager_size = size;
+                    app.preferences.theme = mode;
+                    app.widget = Some(window::Id::unique());
+                    app.widget_attached = true;
+                    app.desktop_message = "바탕화면 정상 연결 fixture".into();
+                    app.error = unrelated.into();
+                    let mut renderer =
+                        iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+                    let mut tree = Tree::empty();
+                    let mut baseline = None;
+                    for (frame, failed) in [false, true, false, true, false].into_iter().enumerate()
+                    {
+                        let failure =
+                            format!("{source} 오류 fixture\n줄바꿈이 있는 실제 실패 알림");
+                        match source {
+                            "geometry" => app.apply_geometry_event(windows::GeometryEvent {
+                                preferred: None,
+                                actual_size: (960, 640),
+                                error: failed.then_some(failure.clone()),
+                            }),
+                            "native" => {
+                                let _ = app.update(Message::NativeDone(
+                                    NativeAction::Recover,
+                                    if failed {
+                                        Err(failure.clone())
+                                    } else {
+                                        Ok(NativeReport {
+                                            attached: true,
+                                            message: "바탕화면 정상 연결 fixture".into(),
+                                            locked: true,
+                                            opacity: None,
+                                            visible: None,
+                                            position: None,
+                                            size: None,
+                                        })
+                                    },
+                                ));
+                            }
+                            _ => {
+                                let _ = app.update(Message::DisplayObserverReady(if failed {
+                                    Err(failure.clone())
+                                } else {
+                                    Ok(())
+                                }));
+                            }
+                        }
+                        // Full manager view includes the shell's error banner.
+                        // Testing settings() alone cannot see this regression.
+                        let mut element = app.view(app.manager);
+                        tree.diff(element.as_widget());
+                        let node = element.as_widget_mut().layout(
+                            &mut tree,
+                            &renderer,
+                            &layout::Limits::new(Size::ZERO, size),
+                        );
+                        if frame == 0 {
+                            let mut set = SettingsProbe {
+                                set_scroll: Some(460.),
+                                set_scroll_index: 1,
+                                ..Default::default()
+                            };
+                            element.as_widget_mut().operate(
+                                &mut tree,
+                                layout::Layout::new(&node),
+                                &renderer,
+                                &mut set,
+                            );
+                        }
+                        let mut probe = SettingsProbe::default();
+                        element.as_widget_mut().operate(
+                            &mut tree,
+                            layout::Layout::new(&node),
+                            &renderer,
+                            &mut probe,
+                        );
+                        assert_eq!(
+                            probe.scrolls.len(),
+                            3,
+                            "sidebar, settings and fixed status must remain mounted"
+                        );
+                        if size.width == 800.
+                            && source == "geometry"
+                            && unrelated.is_empty()
+                            && frame < 3
+                        {
+                            if let Some(output) =
+                                std::env::var_os("TIMESCHEDULE_FULL_SETTINGS_PREVIEW_DIR")
+                            {
+                                let output = PathBuf::from(output);
+                                std::fs::create_dir_all(&output).unwrap();
+                                render_settings_frame(
+                                    &app,
+                                    &mut element,
+                                    &mut tree,
+                                    &node,
+                                    &mut renderer,
+                                    size,
+                                    &output.join(format!("full-settings-{mode:?}-{frame}.png")),
+                                );
+                            }
+                        }
+                        let actual = (probe.scrolls[1], probe.scrolls[2].0, probe.controls);
+                        if let Some(expected) = &baseline {
+                            assert_eq!(
+                                &actual, expected,
+                                "full shell jumped: {mode:?} {size:?} {source} frame{frame}"
+                            );
+                        } else {
+                            baseline = Some(actual);
+                        }
+                        assert_eq!(
+                            app.error, unrelated,
+                            "native events must preserve unrelated application errors"
+                        );
+                        if !unrelated.is_empty() {
+                            assert!(
+                                probe.texts.iter().any(|text| text.contains(unrelated)),
+                                "do not hide unrelated failures"
+                            );
+                        }
+                        assert_eq!(probe.texts.iter().any(|text| text.contains(&failure)), failed,
+                            "failure must be visible only until its own recovery: {source} frame{frame}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_error_sources_clear_independently_and_remain_visible_outside_settings() {
+    let mut app = fixture();
+    app.error = "다이어리 저장 오류 fixture".into();
+    let _ = app.update(Message::NativeDone(
+        NativeAction::Recover,
+        Err("native fixture failure".into()),
+    ));
+    let _ = app.update(Message::DisplayObserverReady(Err(
+        "observer fixture failure".into(),
+    )));
+    app.apply_geometry_event(windows::GeometryEvent {
+        preferred: None,
+        actual_size: (960, 640),
+        error: Some("geometry fixture failure".into()),
+    });
+    let visible_text = |app: &App| {
+        let size = Size::new(1160., 820.);
+        let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut element = app.view(app.manager);
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let mut probe = SettingsProbe::default();
+        element.as_widget_mut().operate(
+            &mut tree,
+            layout::Layout::new(&node),
+            &renderer,
+            &mut probe,
+        );
+        probe.texts.join("\n")
+    };
+    let all = visible_text(&app);
+    for message in [
+        "다이어리 저장 오류 fixture",
+        "native fixture failure",
+        "observer fixture failure",
+        "geometry fixture failure",
+    ] {
+        assert!(all.contains(message));
+    }
+    app.apply_geometry_event(windows::GeometryEvent {
+        preferred: None,
+        actual_size: (960, 640),
+        error: None,
+    });
+    let recovered = visible_text(&app);
+    assert!(!recovered.contains("geometry fixture failure"));
+    for message in [
+        "다이어리 저장 오류 fixture",
+        "native fixture failure",
+        "observer fixture failure",
+    ] {
+        assert!(recovered.contains(message));
+    }
+    let _ = app.update(Message::DisplayObserverReady(Ok(())));
+    let recovered = visible_text(&app);
+    assert!(!recovered.contains("observer fixture failure"));
+    assert!(recovered.contains("native fixture failure"));
+    assert_eq!(app.error, "다이어리 저장 오류 fixture");
+}
+
+#[test]
+fn settings_search_keeps_native_errors_visible_until_settings_returns() {
+    for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+        for source in ["geometry", "native", "observer"] {
+            let mut app = fixture();
+            app.page = Page::Settings;
+            app.preferences.theme = mode;
+            app.error = "별도 저장 오류 fixture".into();
+            let size = Size::new(1160., 820.);
+            let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+            let mut tree = Tree::empty();
+            let mut inspect = |app: &App| {
+                let mut element = app.view(app.manager);
+                tree.diff(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                let mut probe = SettingsProbe::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    layout::Layout::new(&node),
+                    &renderer,
+                    &mut probe,
+                );
+                probe
+            };
+            let _ = app.update(Message::Search("실제 검색 전환 fixture".into()));
+            assert!(app.searching);
+            let error = format!("{source} search failure fixture");
+            match source {
+                "geometry" => app.apply_geometry_event(windows::GeometryEvent {
+                    preferred: None,
+                    actual_size: (960, 640),
+                    error: Some(error.clone()),
+                }),
+                "native" => {
+                    let _ = app.update(Message::NativeDone(
+                        NativeAction::Recover,
+                        Err(error.clone()),
+                    ));
+                }
+                _ => {
+                    let _ = app.update(Message::DisplayObserverReady(Err(error.clone())));
+                }
+            }
+            for searching in [true, false] {
+                if !searching {
+                    let _ = app.update(Message::SearchDone(app.search_generation, Ok(Vec::new())));
+                }
+                let probe = inspect(&app);
+                assert!(probe.texts.iter().any(|text| text == "검색 결과"));
+                assert!(
+                    probe.controls.is_empty(),
+                    "the fixed settings status is not rendered during search"
+                );
+                assert_eq!(probe.texts.iter().filter(|text| text.contains(&error)).count(), 1,
+                    "native failure disappeared during Settings search: {mode:?} {source} searching={searching}");
+                assert!(probe
+                    .texts
+                    .iter()
+                    .any(|text| text.contains("별도 저장 오류 fixture")));
+            }
+            for empty in ["", "   "] {
+                let _ = app.update(Message::Search(empty.into()));
+                let probe = inspect(&app);
+                assert!(!probe.texts.iter().any(|text| text == "검색 결과"));
+                assert!(
+                    !probe.controls.is_empty(),
+                    "clearing search restores settings"
+                );
+                assert_eq!(probe.scrolls.last().unwrap().0.height, 52.);
+                assert_eq!(probe.texts.iter().filter(|text| text.contains(&error)).count(), 1,
+                    "returning to settings must use its fixed status once, without a duplicate banner");
+                assert_eq!(app.error, "별도 저장 오류 fixture");
+                assert!(probe.texts.iter().any(|text| text.contains(&app.error)));
+            }
+        }
+    }
+}
+
 #[test]
 fn diary_and_widget_headings_have_separate_year_and_month_targets() {
     for diary in [false, true] {

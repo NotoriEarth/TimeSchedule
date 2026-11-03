@@ -1,10 +1,12 @@
 # TimeSchedule
 
-## 최신 앱: TimeSchedule 0.9.0
+## 최신 앱: TimeSchedule 0.9.1
 
 대표 실행 파일은 **`artifacts/TimeSchedule.exe`** 하나입니다. Rust/Iced로 화면을 만들며 실행에 WebView/JavaScript 런타임이 필요하지 않습니다. 앱 설정·창 제목과 Windows 파일 속성에서 버전을 확인할 수 있습니다. [버전 규칙과 업데이트 이력](CHANGELOG.md)을 참고하세요.
 
-0.9.0은 앱 실행 중 Codex와 Claude Code가 함께 쓰는 인증된 로컬 일정 MCP를 제공합니다. 일정 목록·상세·추가·부분 수정을 같은 DB에 반영하며 앱·위젯·빠른 일정 목록을 갱신합니다. 작성 중인 초안은 유지하고 오래된 저장은 충돌로 거절합니다. 연결 방법과 실제 검증 범위는 [로컬 MCP 안내](docs/local-mcp.md)를 참고하세요.
+0.9.1은 설정 버튼·슬라이더 배치를 유지하고, 위젯 이동 종료와 화면 변경 알림을 중심으로 위치·크기를 처리합니다. 화면 변화는 200ms 동안 합쳐 보정하고 보조 점검은 30초마다 실행합니다. 임시 보정은 사용자 선호 위치·크기를 덮어쓰지 않습니다. [검증 범위와 테스트 방법](docs/widget-layout-events-verification.md)을 참고하세요.
+
+0.9.0에서 추가한 기능은 앱 실행 중 Codex와 Claude Code가 함께 쓰는 인증된 로컬 일정 MCP를 제공합니다. 일정 목록·상세·추가·부분 수정을 같은 DB에 반영하며 앱·위젯·빠른 일정 목록을 갱신합니다. 작성 중인 초안은 유지하고 오래된 저장은 충돌로 거절합니다. 연결 방법과 실제 검증 범위는 [로컬 MCP 안내](docs/local-mcp.md)를 참고하세요.
 
 [자동 기록 안내](docs/project-records.md)를 참고하세요. 0.8.1은 Git에 실제 개발 변경이 있는 작업만 기록하며 검색·견적 조사·탐색·설명과 문서만 작성한 작업은 제외합니다. [0.8.0 후속 검증](docs/offline-project-records-verification.md), [초기 0.8.0 검증](docs/project-records-verification.md), [0.7.0 검증](docs/release-0.7.0-verification.md)은 당시 결과로 보존합니다.
 
