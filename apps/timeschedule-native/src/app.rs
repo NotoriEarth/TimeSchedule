@@ -132,6 +132,7 @@ pub struct NativeReport {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    McpSetup(crate::mcp_setup_ui::Action),
     WidgetSetting(crate::widget_settings::Change),
     Jump(crate::month_jump::JumpMessage),
     ResizeWidget,
@@ -222,6 +223,7 @@ pub struct App {
     _mcp: Option<crate::mcp::LocalMcp>,
     mcp_changed: Arc<std::sync::atomic::AtomicBool>,
     pub mcp_status: String,
+    pub mcp_setup: crate::mcp_setup_ui::State,
     pub data_dir: PathBuf,
     pub preferences: Preferences,
     pub snapshot: Snapshot,
@@ -356,6 +358,7 @@ impl App {
             _mcp: mcp,
             mcp_changed,
             mcp_status,
+            mcp_setup: Default::default(),
             data_dir,
             preferences: prefs,
             snapshot: Snapshot::default(),
@@ -728,7 +731,7 @@ impl App {
             self.quit_when_idle = true;
             return self.save_preferences();
         }
-        if self.busy || self.prefs_saving || self.native_busy {
+        if self.busy || self.prefs_saving || self.native_busy || self.mcp_setup.busy {
             self.quit_when_idle = true;
             self.notice = "진행 중인 저장·Git·설정 작업을 마친 뒤 종료합니다.".into();
             return Task::none();
@@ -812,6 +815,7 @@ impl App {
                     | Message::RecordsDue
                     | Message::RecordsDrained(_)
                     | Message::NativeDone(..)
+                    | Message::McpSetup(crate::mcp_setup_ui::Action::Finished(_))
                     | Message::DisplayObserverReady(..)
                     | Message::PrefsDone(_)
                     | Message::Loaded(..)
@@ -830,6 +834,9 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::McpSetup(action) => {
+                return self.mcp_setup.update(action, self.data_dir.clone())
+            }
             Message::RecordsDue => {
                 self.records_due = true;
                 return self.poll_record_inbox();
@@ -957,7 +964,12 @@ impl App {
                 }
             }
             Message::Tick => {
-                if self.quit_when_idle && !self.busy && !self.prefs_saving && !self.native_busy {
+                if self.quit_when_idle
+                    && !self.busy
+                    && !self.prefs_saving
+                    && !self.native_busy
+                    && !self.mcp_setup.busy
+                {
                     self.quit_when_idle = false;
                     return self.request_close(CloseIntent::Application);
                 }
@@ -1625,6 +1637,7 @@ mod tests {
             _mcp: None,
             mcp_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_status: String::new(),
+            mcp_setup: Default::default(),
             data_dir: PathBuf::new(),
             preferences: Preferences::default(),
             snapshot: Snapshot::default(),
@@ -2654,6 +2667,22 @@ mod tests {
         let _ = app.exit_when_idle();
         assert!(app.quit_when_idle);
         app.busy = false;
+        let _ = app.update(Message::Tick);
+        assert!(!app.quit_when_idle);
+    }
+
+    #[test]
+    fn quit_waits_for_mcp_config_work_to_complete() {
+        let mut app = fixture();
+        app.mcp_setup.busy = true;
+        let _ = app.update(Message::Quit);
+        assert!(app.quit_when_idle);
+        let _ = app.update(Message::Tick);
+        assert!(app.quit_when_idle);
+        let _ = app.update(Message::McpSetup(crate::mcp_setup_ui::Action::Finished(
+            Ok(crate::mcp_setup_ui::Outcome::Status("done".into())),
+        )));
+        assert!(!app.mcp_setup.busy);
         let _ = app.update(Message::Tick);
         assert!(!app.quit_when_idle);
     }

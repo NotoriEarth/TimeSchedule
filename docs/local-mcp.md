@@ -1,6 +1,27 @@
-# 로컬 일정 MCP (0.9.0)
+# 로컬 일정 MCP (0.10.0)
 
-TimeSchedule을 실행하면 같은 Windows PC의 Codex와 Claude Code가 공통 일정 도구를 사용할 수 있다. 앱의 SQLite에 직접 저장하며 앱·위젯·열린 빠른 일정 목록에 다음 500ms 갱신 시점부터 반영한다. 저장 중인 작업이나 UI 부하에 따라 화면 반영은 늦어질 수 있다. 모델 실행·외부 전송·Space 호출은 MCP 자체에 포함되지 않는다.
+TimeSchedule을 실행하면 같은 Windows PC의 Codex·Claude Code·Claude Desktop이 공통 일정 도구를 사용할 수 있다. 앱의 SQLite에 직접 저장하며 앱·위젯·열린 빠른 일정 목록에 다음 500ms 갱신 시점부터 반영한다. 저장 중인 작업이나 UI 부하에 따라 화면 반영은 늦어질 수 있다. 모델 실행·외부 전송·Space 호출은 MCP 자체에 포함되지 않는다.
+
+## 설정에서 연결하기 (권장)
+
+1. 대표 EXE를 실행하고 **설정 → 로컬 일정 MCP → AI 연결 도우미**로 이동한다.
+2. Codex, Claude Code, Claude Desktop 중 사용할 앱을 선택한다. `경로 찾기`로 설정 위치를 찾거나 실제 설정 파일의 절대 경로를 입력한다. 이 기능은 AI 앱을 설치하지 않는다.
+3. `등록 미리보기`에서 대상 파일, 추가/갱신 여부, 서버 주소와 인증 방법을 확인한다.
+4. `등록 적용`을 누른다. 같은 Windows 사용자의 전체 프로젝트에서 쓰는 `timeschedule` 연결을 등록한다. 다른 서버와 기존 도구 제한·활성화 여부는 보존한다.
+5. AI 앱에서 연결을 다시 불러오거나 앱을 재시작한 뒤 `timeschedule` 도구를 확인한다. 클라이언트의 신뢰·도구 사용 승인은 해당 앱에서 처리한다.
+6. TimeSchedule의 `연결 검사`는 서버 초기화·인증·도구 4개와 등록 설정을 검사한다. 개인 일정 조회·추가·수정이나 모델 호출은 하지 않는다. AI 앱이 설정을 실제로 불러왔는지는 해당 앱에서도 확인한다.
+
+Codex는 `%USERPROFILE%\.codex\config.toml` 또는 `CODEX_HOME`, Claude Code는 `%USERPROFILE%\.claude.json` 또는 `CLAUDE_CONFIG_DIR`의 `.claude.json`을 사용한다. Claude Desktop은 `%APPDATA%\Claude\claude_desktop_config.json`과 Store 설치의 `Packages\Claude_*\LocalCache\Roaming\Claude`를 탐지한다. 후보가 여러 개면 임의로 선택하지 않는다. Claude Desktop의 설정 → Developer → Edit Config에서 실제 경로를 확인한다.
+
+Codex·Claude Code는 최신 버전의 `http_headers_helper` / `headersHelper`를 사용한다. 연결 시 숨겨진 PowerShell이 같은 EXE의 `--mcp-auth-headers`를 실행하고 바로 종료한다. 설정에 토큰 값을 넣지 않으며 사용자 환경변수에도 저장하지 않는다. 이전에 수동으로 저장한 환경변수는 자동 삭제하지 않는다. Claude Desktop은 같은 EXE의 `--mcp-stdio`를 실행하여 인증된 로컬 HTTP로 중계한다. 연결 중 작은 중계 프로세스 하나가 대기하며 일정 DB나 두 번째 GUI를 열지 않는다. 앱이 완전히 종료되면 도구 호출은 실패한다.
+
+같은 이름의 프로젝트 설정이나 관리자가 정한 제한이 사용자 설정보다 우선할 수 있다. 등록이 정상이더라도 AI 앱에서 꺼진 연결·상위 정책·프로젝트별 중복 항목은 별도로 확인한다. 설정 도우미는 이 제한을 해제하지 않는다.
+
+기존 파일은 `.timeschedule-UUID.bak` 이름으로 **같은 접근 권한**을 적용해 백업한다. 미리보기 이후 변경과 사용 중인 파일은 거절한다. 기존 파일을 잠근 상태에서 저장하므로 다른 쓰기·교체·부분 읽기를 막으며 저장 오류 시 원본 복원을 시도한다. 저장 중 프로세스 강제 종료나 전원 차단까지 파일 자체의 원자성을 보장하지는 않는다. 이 경우 같은 폴더의 백업으로 복원할 수 있다. 새 파일은 같은 폴더에서 원자적으로 공개하며 하드 링크를 지원하지 않는 파일시스템에서는 자동 등록을 거절한다.
+
+새 PC에서는 앱 실행 → 새 로컬 인증정보 생성 → 연결 도우미 등록 순서로 사용한다. Git 소스에는 실행 파일·일정 DB·인증정보가 포함되지 않는다. 기존 `mcp-token.dpapi`는 다른 Windows 계정/PC의 자격증명으로 복사하지 않는다. 일정·다이어리 백업 복원은 MCP 연결 등록과 별개다.
+
+공식 등록 규약: [Codex](https://learn.chatgpt.com/docs/extend/mcp?surface=cli#streamable-http-servers), [Claude Code](https://code.claude.com/docs/en/mcp#use-dynamic-headers-for-custom-authentication), [Claude Desktop 로컬 설정](https://modelcontextprotocol.io/docs/develop/connect-local-servers).
 
 ## 실행 상태
 
@@ -10,7 +31,9 @@ TimeSchedule을 실행하면 같은 Windows PC의 Codex와 Claude Code가 공통
 - `TIMESCHEDULE_MCP_PORT`는 포트를 바꾼다. `TIMESCHEDULE_MCP_DISABLED=1`이면 시작하지 않는다. 환경변수를 바꾼 뒤 앱을 재시작해야 한다.
 - 기본 데이터 폴더는 `%LOCALAPPDATA%\com.timeschedule.personal.native-experiment`. `TIMESCHEDULE_DATA_DIR`로 분리할 수 있다. 저장소에서 시험할 때는 `.cache/` 아래의 fixture 폴더를 사용한다.
 
-## 인증 준비
+## 기존 수동 연결: 인증 준비
+
+아래는 이전 환경변수 방식의 수동 연결 안내다. 새 연결에는 위 설정 도우미를 권장한다.
 
 최초 실행 시 데이터 폴더의 `mcp-token.dpapi`에 244비트 이상의 난수 토큰을 Windows CurrentUser DPAPI로 암호화해 보관한다. 같은 Windows 계정에서 다음 명령을 실행하면 복호화한 토큰을 현재 PowerShell 프로세스의 `TIMESCHEDULE_MCP_TOKEN`에 넣는다. 토큰 자체는 출력하지 않는다. `mcp-status.json`에는 주소·PID·버전만 들어간다.
 
@@ -99,6 +122,24 @@ Claude Code의 `/mcp`에서 연결 상태와 네 도구를 확인한다. 처음 
 - 목록은 최대 366일·100개. `truncated=true`이면 날짜 범위를 좁힌다. 메모는 상세 조회로 읽는다. 제목은 200자, 메모는 20,000자.
 - 이미 시작한 저장 작업은 요청 연결이 끊겨도 완료될 수 있다. 완전 종료 시 HTTP 요청에 최대 1초, 저장소 작업 정리에 최대 5초를 기다린다. 불완전한 헤더/본문을 보낸 클라이언트가 종료를 무한히 붙잡지 못한다. 응답 없는 쓰기는 재실행 전에 저장 결과를 확인한다.
 
-## 검증 범위
+## 0.10.0 검증 범위 (2026-11-03)
+
+- Workspace 테스트 **150개 통과 / 4개 기본 제외**. 기본 제외는 자식 프로세스 fixture, 성능 측정, 이미지 출력, release EXE 통합 테스트이며 아래 통합 테스트는 따로 실행해 통과했다.
+- Codex CLI 0.163.0이 격리된 설정의 `http_headers_helper`를 인식함을 확인했다. 실제 사용자 Codex 설정은 변경하지 않았다.
+- 실제 release EXE를 자식 프로세스로 실행해 인증 헤더 JSON과 Claude Desktop 형식의 stdio 설정으로 초기화·도구 목록·격리된 일정 생성 왕복을 확인했다. 한글·공백·작은따옴표·`&`·`%PATH%`가 포함된 데이터 경로로 검증했다. 서버 종료 후 검사 실패도 확인했다.
+- 파일 변경 충돌·다른 서버 보존·동일 등록 무변경·JSON 형식 차이·기존 작성자 파일 잠금·토큰 미생성·비밀값 없는 Debug 출력·앱 종료 대기를 확인했다. 원본이 현재 사용자만 FullControl인 경우 백업도 정확히 그 접근 규칙만 갖고 상속이 차단되는지 Windows에서 확인했다.
+- 밝은/어두운 테마, 800×620·1160×820 크기의 실제 Iced 레이아웃에서 대기·작업 중·성공·실패 동안 버튼 위치와 바깥 스크롤을 비교하고 이미지를 확인했다. 기존 배율별 스크롤 픽셀 검사도 통과했다.
+- release EXE는 8,619,008바이트로 0.9.2의 8,235,008바이트보다 384,000바이트 증가했다. 중계 프로세스 한 개를 초기화/도구 호출 후 2초 관찰했을 때 작업집합 8,531,968바이트, 전용 메모리 1,814,528바이트, CPU 누적 증가 0초였다. 단일 짧은 표본이며 UI 앱 전체의 RAM/CPU 비교나 장시간·다중 클라이언트·전력 보장은 아니다. 연결 때만 사용하는 PowerShell의 순간 메모리는 포함하지 않는다.
+- 독립 코드 검토 후 동시 설정 저장과 백업 접근 권한을 보강하고 재검토했다. 실제 사용자의 세 AI 앱에서 재시작·신뢰 승인·도구 호출까지의 확인은 사용자 테스트 대상이다. 사용자 전역 설정과 개인 일정은 검증에 사용하지 않았다.
+
+```powershell
+. scripts/toolchain.ps1
+cargo test --workspace --locked --offline
+cargo build -p timeschedule-native --release --locked --offline
+$env:TIMESCHEDULE_MCP_TEST_EXE = (Resolve-Path target/release/timeschedule-native.exe).Path
+cargo test -p timeschedule-native release_connection_helper_and_desktop_bridge_round_trip --locked --offline -- --ignored --nocapture
+```
+
+## 0.9.0 당시 검증 범위
 
 자동 검증에는 공통 저장소 왕복·범위/개수 제한·두 작성자의 동시 수정·부분 수정·메모 생략·오래된 GUI 초안 거절, 실제 TCP의 인증/Origin/Host/초기화/도구 호출/큰 본문/종료/포트 충돌, DPAPI 재사용, 앱 갱신 시 초안 보존을 포함한다. 설정 스크립트도 분리된 fixture로 확인한다. 실제 Codex/Claude Code 제품 연결과 사용자 화면 테스트, 유휴 추가 작업집합 20MiB·CPU 1코어 평균 0.1% 이내 목표는 별도 실측/사용자 확인 결과를 따른다. 목표 수치를 보장하지 않는다.
