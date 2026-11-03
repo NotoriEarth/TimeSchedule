@@ -1,5 +1,7 @@
 # 2단계 · 프로젝트 기록 가독성과 공통 수정 구현 계획
 
+> **실행 계획 재작성 필요:** 최신 [날짜 항목 분류 논의](../specs/2026-11-03-calendar-categories-discussion.md)에서 일정·할 일 통합과 사용자 분류가 추가됐다. 아래는 그 이전의 실행 초안이며 그대로 구현하지 않는다. 사용자 요청대로 현재 프로젝트 구조와 새 분류를 먼저 정리한 후 데이터 보존·입력 통합·분류 관리·공통 표시/수정으로 작업을 재분해한다.
+
 > **For agentic workers:** Use `superpowers:executing-plans` in the current session after the user approves this plan; request one independent whole-change review. Steps use checkbox syntax. Do not begin product implementation from this document without the user's go-ahead.
 
 **Goal:** 기본 두 줄 기록을 다이어리·위젯에 표시하되 미완료 일정 → 할 일 → 기록의 공간 우선순위를 적용하고, 상세·수정을 같은 원본으로 연결한다.
