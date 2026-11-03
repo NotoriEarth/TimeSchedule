@@ -12,6 +12,7 @@ struct SettingsProbe {
     set_scroll_index: usize,
     texts: Vec<String>,
     scrolls: Vec<(Rectangle, Rectangle, iced::Vector)>,
+    widget_status: Option<usize>,
     controls: Vec<(String, Rectangle)>,
 }
 impl iced::advanced::widget::Operation for SettingsProbe {
@@ -20,12 +21,15 @@ impl iced::advanced::widget::Operation for SettingsProbe {
     }
     fn scrollable(
         &mut self,
-        _: Option<&iced::advanced::widget::Id>,
+        id: Option<&iced::advanced::widget::Id>,
         bounds: Rectangle,
         content: Rectangle,
         translation: iced::Vector,
         state: &mut dyn iced::advanced::widget::operation::Scrollable,
     ) {
+        if id == Some(&iced::advanced::widget::Id::new("widget-connection-status")) {
+            self.widget_status = Some(self.scrolls.len());
+        }
         if self.scrolls.len() == self.set_scroll_index {
             if let Some(y) = self.set_scroll {
                 state.scroll_to(iced::widget::scrollable::AbsoluteOffset {
@@ -46,6 +50,9 @@ impl iced::advanced::widget::Operation for SettingsProbe {
             "크기와 표시 기간",
             "크기 적용",
             "글꼴과 간격",
+            "등록 미리보기",
+            "등록 적용",
+            "연결 검사",
         ]
         .contains(&value)
             || value.starts_with("배경 불투명도")
@@ -112,6 +119,81 @@ fn render_settings_frame(
         .unwrap()
         .write_image_data(&rgba)
         .unwrap();
+}
+
+#[test]
+fn mcp_assistant_keeps_controls_and_outer_scroll_fixed_during_results() {
+    for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+        for size in [Size::new(800., 620.), Size::new(1160., 820.)] {
+            let mut app = fixture();
+            app.page = Page::Settings;
+            app.mcp_setup.client = crate::mcp_setup::Client::ChatGptDesktop;
+            app.preferences.theme = mode;
+            let mut renderer =
+                iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+            let mut tree = Tree::empty();
+            let mut baseline = None;
+            for (frame, status) in [
+                "",
+                "확인 중…",
+                "서버 연결·인증 정상\n등록 설정 일치",
+                "연결 실패\n긴 오류 설명\n원본 파일은 보존했습니다.\n다시 확인하세요.",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                app.mcp_setup.busy = frame == 1;
+                app.mcp_setup.status = status.into();
+                let mut element = app.view(app.manager);
+                tree.diff(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                if frame == 0 {
+                    let mut set = SettingsProbe {
+                        set_scroll: Some(280.),
+                        set_scroll_index: 1,
+                        ..Default::default()
+                    };
+                    element.as_widget_mut().operate(
+                        &mut tree,
+                        layout::Layout::new(&node),
+                        &renderer,
+                        &mut set,
+                    );
+                }
+                let mut probe = SettingsProbe::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    layout::Layout::new(&node),
+                    &renderer,
+                    &mut probe,
+                );
+                let bounds: Vec<_> = probe.scrolls.iter().map(|s| s.0).collect();
+                let actual = (probe.scrolls[1], bounds, probe.controls);
+                if let Some(expected) = &baseline {
+                    assert_eq!(&actual, expected, "MCP operation moved settings controls");
+                } else {
+                    baseline = Some(actual);
+                }
+                if let Some(output) = std::env::var_os("TIMESCHEDULE_MCP_SETUP_PREVIEW_DIR") {
+                    let output = PathBuf::from(output);
+                    std::fs::create_dir_all(&output).unwrap();
+                    render_settings_frame(
+                        &app,
+                        &mut element,
+                        &mut tree,
+                        &node,
+                        &mut renderer,
+                        size,
+                        &output.join(format!("mcp-{mode:?}-{}-{frame}.png", size.width)),
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -202,11 +284,12 @@ fn settings_retained_layout_is_stable_across_native_busy_transitions() {
                 }
                 if let Some(expected) = &status_baseline {
                     assert_eq!(
-                        &probe.scrolls[1].0, expected,
+                        &probe.scrolls[probe.widget_status.unwrap()].0,
+                        expected,
                         "status viewport must retain its width and position too"
                     );
                 } else {
-                    status_baseline = Some(probe.scrolls[1].0);
+                    status_baseline = Some(probe.scrolls[probe.widget_status.unwrap()].0);
                 }
                 if let Some(expected) = &controls_baseline {
                     assert_eq!(&probe.controls, expected, "control targets changed");
@@ -215,12 +298,13 @@ fn settings_retained_layout_is_stable_across_native_busy_transitions() {
                 }
 
                 assert_eq!(
-                    probe.scrolls[1].0.height, 52.,
+                    probe.scrolls[probe.widget_status.unwrap()].0.height,
+                    52.,
                     "status viewport keeps its height"
                 );
                 if frame >= 3 {
                     assert!(
-                        probe.scrolls[1].1.height > 52.,
+                        probe.scrolls[probe.widget_status.unwrap()].1.height > 52.,
                         "long errors remain scrollable"
                     );
                 }
@@ -329,7 +413,7 @@ fn full_settings_shell_keeps_layout_through_real_native_errors_and_recovery() {
                         );
                         assert_eq!(
                             probe.scrolls.len(),
-                            3,
+                            5,
                             "sidebar, settings and fixed status must remain mounted"
                         );
                         if size.width == 800.
@@ -353,7 +437,11 @@ fn full_settings_shell_keeps_layout_through_real_native_errors_and_recovery() {
                                 );
                             }
                         }
-                        let actual = (probe.scrolls[1], probe.scrolls[2].0, probe.controls);
+                        let actual = (
+                            probe.scrolls[1],
+                            probe.scrolls[probe.widget_status.unwrap()].0,
+                            probe.controls,
+                        );
                         if let Some(expected) = &baseline {
                             assert_eq!(
                                 &actual, expected,

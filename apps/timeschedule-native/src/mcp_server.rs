@@ -197,19 +197,7 @@ async fn protect(State(guard): State<Arc<Guard>>, request: Request<Body>, next: 
 pub(super) fn token(dir: &Path) -> Result<String, String> {
     let path = dir.join("mcp-token.dpapi");
     if path.exists() {
-        let mut encrypted = Vec::new();
-        fs::File::open(path)
-            .and_then(|file| file.take(16 * 1024 + 1).read_to_end(&mut encrypted))
-            .map_err(|_| "MCP 인증 파일 읽기 실패")?;
-        if encrypted.len() > 16 * 1024 {
-            return Err("MCP 인증 파일 크기가 잘못되었습니다.".into());
-        }
-        let plain = protect_token(&encrypted, false)?;
-        let value = String::from_utf8(plain).map_err(|_| "MCP 인증 파일 형식 오류")?;
-        if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err("MCP 인증 파일 형식 오류".into());
-        }
-        return Ok(value);
+        return read_token(dir);
     }
     let value = format!(
         "{}{}",
@@ -230,6 +218,23 @@ pub(super) fn token(dir: &Path) -> Result<String, String> {
         drop(file);
         let _ = fs::remove_file(path);
         return Err("MCP 인증 파일 저장 실패".into());
+    }
+    Ok(value)
+}
+
+pub(crate) fn read_token(dir: &Path) -> Result<String, String> {
+    let path = dir.join("mcp-token.dpapi");
+    let mut encrypted = Vec::new();
+    fs::File::open(path)
+        .and_then(|file| file.take(16 * 1024 + 1).read_to_end(&mut encrypted))
+        .map_err(|_| "MCP 인증 파일 읽기 실패")?;
+    if encrypted.len() > 16 * 1024 {
+        return Err("MCP 인증 파일 크기가 잘못되었습니다.".into());
+    }
+    let plain = protect_token(&encrypted, false)?;
+    let value = String::from_utf8(plain).map_err(|_| "MCP 인증 파일 형식 오류")?;
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("MCP 인증 파일 형식 오류".into());
     }
     Ok(value)
 }
@@ -295,6 +300,187 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     const TOKEN: &str = "fixture-only-secret-not-a-real-credential";
+    #[test]
+    #[ignore = "requires freshly built release EXE in TIMESCHEDULE_MCP_TEST_EXE; isolated client/process integration"]
+    fn release_connection_helper_and_desktop_bridge_round_trip() {
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        let exe = std::path::PathBuf::from(
+            std::env::var_os("TIMESCHEDULE_MCP_TEST_EXE").expect("release EXE path required"),
+        );
+        assert!(exe.is_absolute() && exe.is_file());
+        let dir = std::env::temp_dir().join(format!(
+            "TimeSchedule 한글 & user's %PATH% {}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Arc::new(Storage::open(":memory:").unwrap());
+        let changed = Arc::new(AtomicBool::new(false));
+        let server =
+            Server::start(store.clone(), changed.clone(), 0, token(&dir).unwrap()).unwrap();
+        let endpoint = format!("http://{}/mcp", server.address);
+        std::fs::write(
+            dir.join("mcp-status.json"),
+            json!({"endpoint":endpoint}).to_string(),
+        )
+        .unwrap();
+        let helper = crate::mcp_setup::helper_command(&exe, &dir).unwrap();
+        let mut parts = helper.split_whitespace();
+        let header_output = Command::new(parts.next().unwrap())
+            .args(parts)
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(
+            header_output.status.success(),
+            "header process failed (credential output omitted)"
+        );
+        let headers: Value =
+            serde_json::from_slice(&header_output.stdout).expect("helper must output JSON only");
+        assert!(headers["Authorization"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("Bearer ") && s.len() == 71));
+
+        // A deliberately restricted file in an ordinary temp directory proves
+        // that backups retain per-file protection rather than parent inheritance.
+        let config = dir.join("desktop.json");
+        std::fs::write(&config, "{\"fixtureSecret\":\"not-a-real-secret\"}").unwrap();
+        let escaped = config.to_string_lossy().replace('\'', "''");
+        let acl_script = format!("$ErrorActionPreference='Stop'; $p='{escaped}'; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[IO.File]::GetAccessControl($p); $acl.SetAccessRuleProtection($true,$false); $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','Allow')); [IO.File]::SetAccessControl($p,$acl)");
+        assert!(Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &acl_script])
+            .creation_flags(0x08000000)
+            .status()
+            .unwrap()
+            .success());
+        let plan = crate::mcp_setup::prepare(
+            crate::mcp_setup::Client::ClaudeDesktop,
+            &config,
+            &exe,
+            &dir,
+            &endpoint,
+        )
+        .unwrap();
+        let backup = crate::mcp_setup::apply(&plan).unwrap().unwrap();
+        let escaped_backup = backup.to_string_lossy().replace('\'', "''");
+        let acl_check = format!("$ErrorActionPreference='Stop'; $b=[IO.File]::GetAccessControl('{escaped_backup}'); $rules=$b.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]); $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; if (!$b.AreAccessRulesProtected -or $rules.Count -ne 1 -or $rules[0].IdentityReference -ne $sid -or $rules[0].FileSystemRights -ne 'FullControl' -or $rules[0].AccessControlType -ne 'Allow' -or $rules[0].IsInherited) {{ exit 1 }}");
+        assert!(Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &acl_check])
+            .creation_flags(0x08000000)
+            .status()
+            .unwrap()
+            .success());
+        let value: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        let entry = &value["mcpServers"]["timeschedule"];
+        let mut bridge = Command::new(entry["command"].as_str().unwrap())
+            .args(
+                entry["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|a| a.as_str().unwrap()),
+            )
+            .creation_flags(0x08000000)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/list\",\"params\":{}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"tools/call\",\"params\":{\"name\":\"calendar_create\",\"arguments\":{\"title\":\"isolated bridge fixture\",\"date\":\"2026-11-03\"}}}\n"
+        );
+        bridge
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        // Sample the owned bridge while waiting for stdin, not a user process.
+        let sample = format!("$p=[Diagnostics.Process]::GetProcessById({}); $c=$p.TotalProcessorTime.TotalSeconds; [Threading.Thread]::Sleep(2000); $p.Refresh(); [pscustomobject]@{{workingSetBytes=$p.WorkingSet64;privateBytes=$p.PrivateMemorySize64;idleCpuSeconds=($p.TotalProcessorTime.TotalSeconds-$c);sampleSeconds=2}} | ConvertTo-Json -Compress", bridge.id());
+        let memory = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &sample])
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap();
+        assert!(memory.status.success());
+        println!(
+            "BRIDGE_RESOURCE {}",
+            String::from_utf8_lossy(&memory.stdout).trim()
+        );
+        drop(bridge.stdin.take());
+        let output = bridge.wait_with_output().unwrap();
+        assert!(output.status.success(), "bridge process failed");
+        let replies: Vec<Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(replies.len(), 3);
+        assert_eq!(replies[0]["result"]["serverInfo"]["name"], "TimeSchedule");
+        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 4);
+        assert_ne!(replies[2]["result"]["isError"], true);
+        assert!(changed.load(Ordering::Acquire));
+        assert_eq!(
+            store
+                .list_event_headers_limited("2026-11-03", "2026-11-03", 10)
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        drop(server);
+        assert!(crate::mcp_connection::probe(&dir).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn setup_probe_uses_authenticated_real_server_without_schedule_mutations() {
+        let dir = std::env::temp_dir().join(format!("timeschedule-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let changed = Arc::new(AtomicBool::new(false));
+        let server = Server::start(
+            Arc::new(Storage::open(":memory:").unwrap()),
+            changed.clone(),
+            0,
+            token(&dir).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("mcp-status.json"),
+            json!({"endpoint":format!("http://{}/mcp", server.address)}).to_string(),
+        )
+        .unwrap();
+        assert!(crate::mcp_connection::probe(&dir).unwrap().contains("4"));
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/list\",\"params\":{}}\n"
+        );
+        let mut output = Vec::new();
+        crate::mcp_connection::bridge(&dir, std::io::Cursor::new(input), &mut output).unwrap();
+        let replies: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(
+            replies.len(),
+            2,
+            "notifications must not produce stdout replies"
+        );
+        assert_eq!(replies[0]["id"], 11);
+        assert_eq!(replies[0]["result"]["serverInfo"]["name"], "TimeSchedule");
+        assert_eq!(replies[1]["id"], 12);
+        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 4);
+        assert!(!changed.load(Ordering::Acquire));
+        std::fs::remove_file(dir.join("mcp-token.dpapi")).unwrap();
+        assert!(crate::mcp_connection::probe(&dir).is_err());
+        assert!(!dir.join("mcp-token.dpapi").exists());
+        drop(server);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     fn request(address: SocketAddr, method: &str, headers: &str, body: &str) -> (u16, String) {
         let mut socket = std::net::TcpStream::connect(address).unwrap();
         socket
