@@ -201,6 +201,9 @@ pub struct App {
     pub quick_loading: bool,
     pub editor_in_quick: bool,
     pub store: Option<Arc<Storage>>,
+    _mcp: Option<crate::mcp::LocalMcp>,
+    mcp_changed: Arc<std::sync::atomic::AtomicBool>,
+    pub mcp_status: String,
     pub data_dir: PathBuf,
     pub preferences: Preferences,
     pub snapshot: Snapshot,
@@ -289,6 +292,19 @@ impl App {
         } else {
             None
         };
+        let mcp_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mcp, mcp_status) = if let Some(store) = store.clone() {
+            match crate::mcp::LocalMcp::start(store, mcp_changed.clone(), &data_dir) {
+                Ok(Some(server)) => {
+                    let status = server.status.clone();
+                    (Some(server), status)
+                }
+                Ok(None) => (None, "꺼짐 · TIMESCHEDULE_MCP_DISABLED=1".into()),
+                Err(error) => (None, format!("시작하지 못함 · {error}")),
+            }
+        } else {
+            (None, "꺼짐 · 데이터 저장소를 사용할 수 없습니다.".into())
+        };
         let tray = match NativeTray::new() {
             Ok(t) => Some(t),
             Err(e) => {
@@ -319,6 +335,9 @@ impl App {
             quick_loading: false,
             editor_in_quick: false,
             store,
+            _mcp: mcp,
+            mcp_changed,
+            mcp_status,
             data_dir,
             preferences: prefs,
             snapshot: Snapshot::default(),
@@ -905,6 +924,22 @@ impl App {
                     };
                 }
                 let mut tasks = vec![self.widget_today_changed()];
+                if self
+                    ._mcp
+                    .as_ref()
+                    .is_some_and(|server| !server.is_running())
+                {
+                    self.mcp_status = "중지됨 · 앱을 다시 시작하면 연결을 재시도합니다.".into();
+                }
+                if self
+                    .mcp_changed
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    tasks.push(self.refresh());
+                    tasks.push(self.load_quick(false));
+                    self.notice =
+                        "외부 도구의 일정 변경을 반영했습니다. 작성 중인 초안은 유지됩니다.".into();
+                }
                 if self.ticks % 120 == 0 {
                     self.records_due = true;
                 }
@@ -1539,6 +1574,9 @@ mod tests {
             quick_loading: false,
             editor_in_quick: false,
             store: Some(Arc::new(Storage::open(":memory:").unwrap())),
+            _mcp: None,
+            mcp_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            mcp_status: String::new(),
             data_dir: PathBuf::new(),
             preferences: Preferences::default(),
             snapshot: Snapshot::default(),
@@ -1581,6 +1619,25 @@ mod tests {
             quit_when_idle: false,
             native_pending: None,
         }
+    }
+
+    #[test]
+    fn external_calendar_refresh_preserves_open_draft_and_refreshes_quick_list() {
+        let mut app = fixture();
+        app.widget_ui.today = Local::now().date_naive();
+        app.quick_window = Some(window::Id::unique());
+        app.quick_date = Some(app.selected);
+        let _ = app.update(Message::New(Kind::Event, None));
+        let _ = app.update(Message::Field(Field::Title("내 초안".into())));
+        let draft = app.editor.as_ref().unwrap().form.clone();
+        let view = app.view_generation;
+        let quick = app.quick_generation;
+        app.mcp_changed
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = app.update(Message::Tick);
+        assert_eq!(app.view_generation, view + 1);
+        assert_eq!(app.quick_generation, quick + 1);
+        assert_eq!(app.editor.as_ref().unwrap().form, draft);
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod desktop_widget;
 mod editor;
 mod frozen;
 mod icons;
+mod mcp;
 mod month_jump;
 #[cfg(all(test, windows))]
 mod native_alpha_tests;

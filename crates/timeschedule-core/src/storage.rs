@@ -81,6 +81,44 @@ pub struct Storage {
 }
 
 impl Storage {
+    pub fn get_event(&self, id: &str) -> Result<CalendarEvent, String> {
+        validate_id(id)?;
+        self.connection()?.query_row(
+            "SELECT id,title,date,start_time,end_time,all_day,notes,color,completed,updated_at FROM events WHERE id=?1",
+            [id], event_from_row,
+        ).map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => "Event not found.".into(),
+            other => database_error(other),
+        })
+    }
+
+    /// Bounded external queries never materialize full event notes or an unbounded result.
+    pub fn list_event_headers_limited(
+        &self,
+        from: &str,
+        to: &str,
+        limit: usize,
+    ) -> Result<(Vec<CalendarEvent>, bool), String> {
+        validate_date(from)?;
+        validate_date(to)?;
+        let start = NaiveDate::parse_from_str(from, "%Y-%m-%d").map_err(|_| "Invalid date")?;
+        let end = NaiveDate::parse_from_str(to, "%Y-%m-%d").map_err(|_| "Invalid date")?;
+        if !(0..=365).contains(&(end - start).num_days()) || !(1..=100).contains(&limit) {
+            return Err("Use a range of at most 366 days and a limit from 1 to 100.".into());
+        }
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id,title,date,start_time,end_time,all_day,'',color,completed,updated_at FROM events WHERE date>=?1 AND date<=?2 ORDER BY date,all_day DESC,start_time,id LIMIT ?3"
+        ).map_err(database_error)?;
+        let mut events = statement
+            .query_map(params![from, to, limit + 1], event_from_row)
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        let truncated = events.len() > limit;
+        events.truncate(limit);
+        Ok((events, truncated))
+    }
     /// The caller creates the application's data directory before opening this file.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let mut connection = Connection::open(path)
@@ -132,7 +170,16 @@ impl Storage {
         Ok(events)
     }
 
-    pub fn save_event(&self, mut input: EventInput) -> Result<CalendarEvent, String> {
+    pub fn save_event(&self, input: EventInput) -> Result<CalendarEvent, String> {
+        self.save_event_if_unchanged(input, None)
+    }
+
+    /// The comparison and write share the SQLite lock/transaction, including other connections.
+    pub fn save_event_if_unchanged(
+        &self,
+        mut input: EventInput,
+        expected: Option<&str>,
+    ) -> Result<CalendarEvent, String> {
         input.title = validated_title(&input.title)?;
         validate_date(&input.date)?;
         validate_text(&input.notes, "Event notes", MAX_TEXT_LENGTH)?;
@@ -158,6 +205,28 @@ impl Storage {
             }
         }
         let updating = input.id.is_some();
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let previous: Option<String> = if let Some(id) = &input.id {
+            validate_id(id)?;
+            Some(
+                transaction
+                    .query_row("SELECT updated_at FROM events WHERE id=?1", [id], |row| {
+                        row.get(0)
+                    })
+                    .map_err(|error| match error {
+                        rusqlite::Error::QueryReturnedNoRows => "Event not found.".into(),
+                        other => database_error(other),
+                    })?,
+            )
+        } else {
+            None
+        };
+        if expected.is_some() && expected != previous.as_deref() {
+            return Err("Event conflict: the event changed. Reload its detail before saving; your draft was preserved.".into());
+        }
         let event = CalendarEvent {
             id: record_id(input.id)?,
             title: input.title,
@@ -168,9 +237,8 @@ impl Storage {
             notes: input.notes,
             color: input.color,
             completed: input.completed,
-            updated_at: timestamp(),
+            updated_at: next_event_timestamp(previous.as_deref()),
         };
-        let connection = self.connection()?;
         let sql = if updating {
             "UPDATE events SET title = ?2, date = ?3, start_time = ?4, end_time = ?5,
              all_day = ?6, notes = ?7, color = ?8, completed = ?9, updated_at = ?10 WHERE id = ?1"
@@ -178,7 +246,7 @@ impl Storage {
             "INSERT INTO events (id, title, date, start_time, end_time, all_day, notes, color, completed, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
         };
-        let changed = connection
+        let changed = transaction
             .execute(
                 sql,
                 params![
@@ -196,6 +264,7 @@ impl Storage {
             )
             .map_err(database_error)?;
         require_changed(changed, "Event")?;
+        transaction.commit().map_err(database_error)?;
         Ok(event)
     }
 
@@ -207,14 +276,23 @@ impl Storage {
     /// never overwrite the full event or a newer edit to its other fields.
     pub fn set_event_completed(&self, id: &str, completed: bool) -> Result<(), String> {
         validate_id(id)?;
-        let changed = self
-            .connection()?
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let previous: String = transaction
+            .query_row("SELECT updated_at FROM events WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .map_err(database_error)?;
+        let changed = transaction
             .execute(
                 "UPDATE events SET completed = ?2, updated_at = ?3 WHERE id = ?1",
-                params![id, completed, timestamp()],
+                params![id, completed, next_event_timestamp(Some(&previous))],
             )
             .map_err(database_error)?;
-        require_changed(changed, "Event")
+        require_changed(changed, "Event")?;
+        transaction.commit().map_err(database_error)
     }
 
     pub fn list_tasks(&self) -> Result<Vec<Task>, String> {
@@ -512,6 +590,15 @@ pub(crate) fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+fn next_event_timestamp(previous: Option<&str>) -> String {
+    let now = Utc::now();
+    let next = previous
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc) + chrono::Duration::milliseconds(1));
+    next.map_or(now, |next| now.max(next))
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
 pub(crate) fn require_changed(changed: usize, kind: &str) -> Result<(), String> {
     if changed == 0 {
         Err(format!(
@@ -563,6 +650,85 @@ fn note_from_row(row: &Row<'_>) -> rusqlite::Result<Note> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guarded_event_save_rejects_stale_versions_and_retains_newer_content() {
+        let store = Storage::open(":memory:").unwrap();
+        let first = store.save_event(event_on("2026-11-02")).unwrap();
+        let mut change = event_on("2026-11-02");
+        change.id = Some(first.id.clone());
+        change.notes = "new notes".into();
+        let second = store
+            .save_event_if_unchanged(change.clone(), Some(&first.updated_at))
+            .unwrap();
+        assert_ne!(first.updated_at, second.updated_at);
+        change.title = "stale writer".into();
+        assert!(store
+            .save_event_if_unchanged(change, Some(&first.updated_at))
+            .unwrap_err()
+            .contains("conflict"));
+        assert_eq!(store.get_event(&first.id).unwrap(), second);
+        store.set_event_completed(&first.id, true).unwrap();
+        assert_ne!(
+            store.get_event(&first.id).unwrap().updated_at,
+            second.updated_at
+        );
+    }
+
+    #[test]
+    fn bounded_event_headers_limit_in_database_and_reject_large_ranges() {
+        let store = Storage::open(":memory:").unwrap();
+        for _ in 0..4 {
+            store.save_event(event_on("2026-11-02")).unwrap();
+        }
+        let (events, truncated) = store
+            .list_event_headers_limited("2026-11-02", "2026-11-02", 2)
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(truncated);
+        assert!(events.iter().all(|event| event.notes.is_empty()));
+        assert!(store
+            .list_event_headers_limited("2026-01-01", "2027-01-02", 10)
+            .is_err());
+        assert!(store
+            .list_event_headers_limited("2026-11-02", "2026-11-01", 10)
+            .is_err());
+        assert!(store
+            .list_event_headers_limited("2026-11-02", "2026-11-02", 101)
+            .is_err());
+    }
+
+    #[test]
+    fn concurrent_calendar_writers_allow_only_one_matching_revision() {
+        use std::sync::{Arc, Barrier};
+        let store = Arc::new(Storage::open(":memory:").unwrap());
+        let event = store.save_event(event_on("2026-11-02")).unwrap();
+        let barrier = Arc::new(Barrier::new(3));
+        let threads: Vec<_> = (0..2)
+            .map(|n| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                let event = event.clone();
+                std::thread::spawn(move || {
+                    let mut input = event_on("2026-11-02");
+                    input.id = Some(event.id);
+                    input.title = format!("writer {n}");
+                    barrier.wait();
+                    store.save_event_if_unchanged(input, Some(&event.updated_at))
+                })
+            })
+            .collect();
+        barrier.wait();
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .all(|error| error.contains("conflict")));
+    }
     use std::fs;
     use std::path::PathBuf;
 
