@@ -462,14 +462,6 @@ impl App {
             window::close_events().map(Message::WindowClosed),
             iced::time::every(std::time::Duration::from_millis(500)).map(|_| Message::Tick),
             iced::event::listen_with(|event, status, id| {
-                if matches!(
-                    event,
-                    iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
-                        iced::mouse::Button::Left
-                    ))
-                ) {
-                    return Some(crate::category_ui::msg(crate::category_ui::Action::Drop));
-                }
                 if let iced::Event::Window(window::Event::Resized(size)) = &event {
                     return Some(Message::Resized(id, *size));
                 }

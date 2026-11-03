@@ -2,6 +2,7 @@
 mod app;
 mod calendar_ui;
 mod calendar_viewport;
+mod category_drag;
 mod category_ui;
 mod desktop_widget;
 mod editor;

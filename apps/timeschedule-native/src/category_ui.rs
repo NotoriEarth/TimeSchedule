@@ -3,7 +3,7 @@ use crate::{
     theme, worker,
 };
 use iced::widget::{
-    button, column, container, mouse_area, row, scrollable, space, text, text_input,
+    button, column, container, responsive, row, scrollable, space, text, text_input,
 };
 use iced::{Element, Length, Task};
 #[derive(Default)]
@@ -12,7 +12,7 @@ pub struct State {
     pub editing: Option<String>,
     pub name: String,
     pub color: String,
-    pub drag: Option<(String, usize)>,
+    pub pending_order: Option<Vec<String>>,
     pub saving: bool,
     pub error: String,
 }
@@ -25,9 +25,11 @@ pub enum Action {
     Name(String),
     Color(String),
     Save,
-    Drag(String),
-    Over(usize),
-    Drop,
+    Reorder {
+        expected: Vec<String>,
+        order: Vec<String>,
+    },
+    Scroll(f32),
     Move(String, i32),
     Saved(Result<(), String>),
     Reordered(Result<(), String>),
@@ -77,20 +79,14 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
                 );
             }
         }
-        Action::Drag(id) => {
-            if let Some(i) = app.snapshot.categories.iter().position(|c| c.id == id) {
-                app.categories.drag = Some((id, i));
-            }
+        Action::Reorder { expected, order } if app.categories.open && !app.loading => {
+            return commit_order(app, expected, order)
         }
-        Action::Over(i) => {
-            if let Some((_, index)) = &mut app.categories.drag {
-                *index = i;
-            }
-        }
-        Action::Drop => {
-            if let Some((id, index)) = app.categories.drag.take() {
-                return reorder(app, id, index);
-            }
+        Action::Scroll(y) if app.categories.open && !app.loading => {
+            return iced::widget::operation::scroll_by(
+                crate::category_drag::SCROLL_ID,
+                iced::widget::operation::AbsoluteOffset { x: 0., y },
+            )
         }
         Action::Move(id, delta) => {
             if let Some(i) = app.snapshot.categories.iter().position(|c| c.id == id) {
@@ -102,8 +98,17 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
         }
         Action::Saved(result) | Action::Reordered(result) => {
             app.categories.saving = false;
+            let pending = app.categories.pending_order.take();
             match result {
                 Ok(()) => {
+                    if let Some(order) = pending {
+                        app.snapshot.categories.sort_by_key(|c| {
+                            order
+                                .iter()
+                                .position(|id| *id == c.id)
+                                .unwrap_or(usize::MAX)
+                        });
+                    }
                     app.categories.error.clear();
                     if fields_saved {
                         app.categories.editing = None;
@@ -134,8 +139,29 @@ fn reorder(app: &mut App, id: String, index: usize) -> Task<Message> {
     let mut order = expected.clone();
     order.remove(from);
     order.insert(index.min(order.len()), id);
+    commit_order(app, expected, order)
+}
+fn commit_order(app: &mut App, expected: Vec<String>, order: Vec<String>) -> Task<Message> {
+    let current: Vec<_> = app
+        .snapshot
+        .categories
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    let mut sorted = order.clone();
+    sorted.sort();
+    sorted.dedup();
+    if expected != current
+        || expected == order
+        || sorted.len() != expected.len()
+        || sorted.iter().any(|id| !expected.contains(id))
+    {
+        return Task::none();
+    }
     if let Some(store) = app.store.clone() {
         app.categories.saving = true;
+        app.categories.error.clear();
+        app.categories.pending_order = Some(order.clone());
         return worker::job(
             store,
             move |s| s.reorder_categories(&expected, &order),
@@ -146,57 +172,71 @@ fn reorder(app: &mut App, id: String, index: usize) -> Task<Message> {
 }
 pub fn view(app: &App) -> Element<'_, Message> {
     let state = &app.categories;
-    let mut rows = column![
+    let instructions = column![
         text("위에서부터 날짜 칸에 먼저 표시됩니다.").size(13),
         text("손잡이를 드래그하거나 ↑ ↓ 버튼으로 순서를 바꾸세요.")
             .size(12)
             .style(theme::muted)
     ]
     .spacing(8);
-    for (i, c) in app.snapshot.categories.iter().enumerate() {
+    let mut ordered: Vec<_> = app.snapshot.categories.iter().collect();
+    if let Some(order) = &state.pending_order {
+        ordered.sort_by_key(|c| {
+            order
+                .iter()
+                .position(|id| *id == c.id)
+                .unwrap_or(usize::MAX)
+        });
+    }
+    let mut rows = Vec::new();
+    let enabled = !state.saving && !app.loading;
+    for (i, c) in ordered.into_iter().enumerate() {
         let ink = crate::calendar_ui::color(app, &c.id);
-        let target = state.drag.as_ref().is_some_and(|(_, n)| *n == i);
-        let handle = mouse_area(container(text("⠿").size(20)).padding([7, 12]))
-            .on_press(msg(Action::Drag(c.id.clone())))
-            .interaction(iced::mouse::Interaction::Grab);
+        let handle = container(text("⠿").size(20)).padding([7, 12]);
+        let name = responsive(move |bounds| {
+            text(crate::text_layout::fit_label(&c.name, bounds.width, 16.))
+                .size(16)
+                .wrapping(text::Wrapping::None)
+                .into()
+        })
+        .height(21)
+        .width(Length::Fill);
         let line = row![
             handle,
             text(format!("{}", i + 1)).size(12),
             container(space().width(12).height(12))
                 .style(move |_| container::Style::default().background(ink)),
-            button(text(&c.name))
+            button(name)
                 .width(Length::Fill)
                 .style(theme::text_button)
-                .on_press(msg(Action::Edit(c.id.clone()))),
-            button("↑").on_press_maybe((i > 0).then(|| msg(Action::Move(c.id.clone(), -1)))),
+                .on_press_maybe(enabled.then(|| msg(Action::Edit(c.id.clone())))),
+            button("↑")
+                .on_press_maybe((enabled && i > 0).then(|| msg(Action::Move(c.id.clone(), -1)))),
             button("↓").on_press_maybe(
-                (i + 1 < app.snapshot.categories.len()).then(|| msg(Action::Move(c.id.clone(), 1)))
+                (enabled && i + 1 < app.snapshot.categories.len())
+                    .then(|| msg(Action::Move(c.id.clone(), 1)))
             )
         ]
         .spacing(8)
         .align_y(iced::Alignment::Center);
-        rows = rows.push(
-            mouse_area(
-                container(line)
-                    .padding(5)
-                    .width(Length::Fill)
-                    .style(move |t| {
-                        let mut style = theme::surface(t);
-                        style.border = iced::Border {
-                            color: if target {
-                                theme::colors(t).accent
-                            } else {
-                                theme::colors(t).line
-                            },
-                            width: if target { 2.0 } else { 1.0 },
-                            radius: 5.0.into(),
-                        };
-                        style
-                    }),
-            )
-            .on_enter(msg(Action::Over(i)))
-            .on_release(msg(Action::Drop)),
-        );
+        rows.push((
+            c.id.clone(),
+            container(line)
+                .padding(5)
+                .width(Length::Fill)
+                .height(crate::category_drag::ROW_HEIGHT)
+                .clip(true)
+                .style(move |t| {
+                    let mut style = theme::surface(t);
+                    style.border = iced::Border {
+                        color: theme::colors(t).line,
+                        width: 1.0,
+                        radius: 5.0.into(),
+                    };
+                    style
+                })
+                .into(),
+        ));
     }
     let mut swatches = row![].spacing(6);
     for value in [
@@ -245,7 +285,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
             space().width(Length::Fill),
             button("닫기").on_press_maybe((!state.saving).then_some(msg(Action::Close)))
         ],
-        scrollable(rows).height(Length::Fill),
+        instructions,
+        scrollable(crate::category_drag::list(rows, enabled))
+            .id(crate::category_drag::SCROLL_ID)
+            .height(Length::Fill),
         fields
     ]
     .spacing(16)

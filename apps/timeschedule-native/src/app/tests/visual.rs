@@ -387,19 +387,230 @@ fn category_drag_writes_only_on_drop_and_refreshes_both_surfaces() {
     let mut app = calendar_record_fixture();
     let before = app.store.as_ref().unwrap().list_categories().unwrap();
     run_message(&mut app, msg(Action::Open));
-    run_message(&mut app, msg(Action::Drag(before[1].id.clone())));
-    run_message(&mut app, msg(Action::Over(0)));
     assert_eq!(
         app.store.as_ref().unwrap().list_categories().unwrap(),
         before
     );
-    run_message(&mut app, msg(Action::Drop));
+    run_message(
+        &mut app,
+        msg(Action::Reorder {
+            expected: before.iter().map(|c| c.id.clone()).collect(),
+            order: before.iter().rev().map(|c| c.id.clone()).collect(),
+        }),
+    );
     assert_eq!(app.snapshot.categories[0].id, before[1].id);
     run_message(&mut app, msg(Action::Name("운동".into())));
     run_message(&mut app, msg(Action::Color("#123ABC".into())));
     run_message(&mut app, msg(Action::Save));
     assert_eq!(app.snapshot.categories.last().unwrap().name, "운동");
     assert_eq!(app.snapshot.categories.last().unwrap().color, "#123ABC");
+}
+
+#[test]
+fn category_drag_handle_follows_pointer_before_any_save() {
+    use crate::category_ui::{msg, Action};
+    let mut app = calendar_record_fixture();
+    run_message(&mut app, msg(Action::Open));
+    let before = app.store.as_ref().unwrap().list_categories().unwrap();
+    let size = Size::new(520., 650.);
+    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+    let mut tree = Tree::empty();
+    let initial = calendar_text_bounds(crate::category_ui::view(&app), size);
+    let handle = initial
+        .iter()
+        .filter(|(s, _)| s == "⠿")
+        .nth(1)
+        .unwrap()
+        .1
+        .center();
+    let start = initial.iter().find(|(s, _)| s == "기록").unwrap().1.y;
+    for (event, point) in [
+        (mouse::Event::ButtonPressed(mouse::Button::Left), handle),
+        (
+            mouse::Event::CursorMoved {
+                position: handle - iced::Vector::new(0., 20.),
+            },
+            handle - iced::Vector::new(0., 20.),
+        ),
+    ] {
+        let messages = {
+            let mut element = crate::category_ui::view(&app);
+            tree.diff(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            let mut messages = Vec::new();
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(event),
+                layout::Layout::new(&node),
+                mouse::Cursor::Available(point),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &Rectangle::new(Point::ORIGIN, size),
+            );
+            messages
+        };
+        for message in messages {
+            run_message(&mut app, message);
+        }
+    }
+    let mut element = crate::category_ui::view(&app);
+    tree.diff(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, size),
+    );
+    let mut probe = CategoryPositionProbe::default();
+    element
+        .as_widget_mut()
+        .operate(&mut tree, layout::Layout::new(&node), &renderer, &mut probe);
+    let moved = probe.0.iter().find(|(s, _)| s == "기록").unwrap().1.y;
+    assert!(
+        (moved - (start - 20.)).abs() < 0.5,
+        "grabbed row should follow cursor immediately: {start} -> {moved}"
+    );
+    assert_eq!(
+        app.store.as_ref().unwrap().list_categories().unwrap(),
+        before
+    );
+}
+
+#[derive(Default)]
+struct CategoryPositionProbe(Vec<(String, Rectangle)>);
+impl iced::advanced::widget::Operation for CategoryPositionProbe {
+    fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation)) {
+        visit(self);
+    }
+    fn text(&mut self, _: Option<&iced::advanced::widget::Id>, bounds: Rectangle, value: &str) {
+        self.0.push((value.into(), bounds));
+    }
+}
+
+#[test]
+fn category_drag_stale_save_preserves_drafts_and_external_categories() {
+    use crate::category_ui::{msg, Action};
+    let mut app = calendar_record_fixture();
+    run_message(&mut app, msg(Action::Open));
+    let expected: Vec<_> = app
+        .snapshot
+        .categories
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    run_message(&mut app, msg(Action::Edit(expected[0].clone())));
+    run_message(&mut app, msg(Action::Name("미저장 분류 이름".into())));
+    let store = app.store.as_ref().unwrap();
+    store.save_category(None, "외부 추가", "#123456").unwrap();
+    let external = store.list_categories().unwrap();
+    run_message(
+        &mut app,
+        msg(Action::Reorder {
+            expected: expected.clone(),
+            order: expected.iter().rev().cloned().collect(),
+        }),
+    );
+    assert!(!app.categories.error.is_empty());
+    assert!(app.categories.pending_order.is_none());
+    assert!(!app.categories.saving);
+    assert_eq!(app.categories.name, "미저장 분류 이름");
+    assert_eq!(
+        app.store.as_ref().unwrap().list_categories().unwrap(),
+        external
+    );
+}
+
+#[test]
+#[ignore = "manual native category drag animation frames"]
+fn render_category_drag_motion_previews() {
+    use crate::category_ui::{msg, Action};
+    let output = PathBuf::from(std::env::var_os("TIMESCHEDULE_PREVIEW_DIR").unwrap());
+    std::fs::create_dir_all(&output).unwrap();
+    for size in [Size::new(800., 620.), Size::new(1160., 820.)] {
+        let mut app = calendar_record_fixture();
+        app.manager_size = size;
+        app.store
+            .as_ref()
+            .unwrap()
+            .save_category(None, "학습 일지와 기타 프로젝트 기록", "#D9AD65")
+            .unwrap();
+        app.snapshot = worker::snapshot(app.store.as_ref().unwrap(), &app.scope()).unwrap();
+        run_message(&mut app, msg(Action::Open));
+        let mut tree = Tree::empty();
+        let mut renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut point = Point::ORIGIN;
+        let mut target = Point::ORIGIN;
+        let mut time = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        for stage in 0..6 {
+            let messages = {
+                let mut element = crate::views::view(&app, app.manager);
+                tree.diff(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                if stage == 0 {
+                    let mut probe = CategoryPositionProbe::default();
+                    element.as_widget_mut().operate(
+                        &mut tree,
+                        layout::Layout::new(&node),
+                        &renderer,
+                        &mut probe,
+                    );
+                    let handles: Vec<_> = probe
+                        .0
+                        .iter()
+                        .filter(|(s, _)| s == "⠿")
+                        .map(|(_, b)| b.center())
+                        .collect();
+                    point = handles[1];
+                    target = handles[0] - iced::Vector::new(0., 6.);
+                }
+                let event = match stage {
+                    1 => iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                    2 => {
+                        point = target;
+                        iced::Event::Mouse(mouse::Event::CursorMoved { position: point })
+                    }
+                    4 => iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                    _ => {
+                        time += std::time::Duration::from_millis(if stage == 5 { 150 } else { 75 });
+                        iced::Event::Window(window::Event::RedrawRequested(time))
+                    }
+                };
+                let mut messages = Vec::new();
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &event,
+                    layout::Layout::new(&node),
+                    mouse::Cursor::Available(point),
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut iced::advanced::Shell::new(&mut messages),
+                    &Rectangle::new(Point::ORIGIN, size),
+                );
+                render_scaled_frame(
+                    &app,
+                    &mut element,
+                    &mut tree,
+                    &node,
+                    &mut renderer,
+                    size,
+                    &output.join(format!("category-{}-{stage}.png", size.width as u32)),
+                    1.,
+                );
+                messages
+            };
+            for message in messages {
+                run_message(&mut app, message);
+            }
+        }
+    }
 }
 
 #[test]
