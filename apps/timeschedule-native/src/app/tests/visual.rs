@@ -382,6 +382,135 @@ fn calendar_routes_create_edit_move_complete_and_delete_the_same_source() {
 }
 
 #[test]
+fn category_add_button_saves_the_entered_name_and_color() {
+    use crate::category_ui::{msg, Action};
+    let mut app = calendar_record_fixture();
+    run_message(&mut app, msg(Action::Open));
+    run_message(&mut app, msg(Action::Name("운동".into())));
+    run_message(&mut app, msg(Action::Color("#123ABC".into())));
+    click_category_control(&mut app, "+ 추가");
+    let saved = app.store.as_ref().unwrap().list_categories().unwrap();
+    assert!(
+        saved
+            .iter()
+            .any(|c| c.name == "운동" && c.color == "#123ABC"),
+        "clicking Add after entering a name must save it; draft={:?}, error={:?}",
+        app.categories.name,
+        app.categories.error
+    );
+    assert_eq!(app.snapshot.categories, saved);
+    run_message(&mut app, msg(Action::Name("운동".into())));
+    click_category_control(&mut app, "+ 추가");
+    assert!(!app.categories.error.is_empty());
+    assert_eq!(
+        app.categories.name, "운동",
+        "rejected name must remain editable"
+    );
+    assert_eq!(app.snapshot.categories, saved);
+}
+
+#[test]
+fn category_save_button_reaches_the_store_from_the_real_modal() {
+    use crate::category_ui::{msg, Action};
+    let mut app = calendar_record_fixture();
+    run_message(&mut app, msg(Action::Open));
+    run_message(&mut app, msg(Action::Name("운동".into())));
+    run_message(&mut app, msg(Action::Color("#123ABC".into())));
+    click_category_control(&mut app, "저장");
+    assert!(app.snapshot.categories.iter().any(|c| c.name == "운동"));
+}
+
+#[test]
+fn category_edit_and_new_draft_controls_keep_existing_categories() {
+    use crate::category_ui::{msg, Action};
+    let mut app = calendar_record_fixture();
+    run_message(&mut app, msg(Action::Open));
+    let id = app.snapshot.categories[1].id.clone();
+    let count = app.snapshot.categories.len();
+    run_message(&mut app, msg(Action::Edit(id.clone())));
+    run_message(&mut app, msg(Action::Name("학습 기록".into())));
+    click_category_control(&mut app, "저장");
+    assert_eq!(app.snapshot.categories.len(), count);
+    assert_eq!(
+        app.snapshot
+            .categories
+            .iter()
+            .find(|c| c.id == id)
+            .unwrap()
+            .name,
+        "학습 기록"
+    );
+    run_message(&mut app, msg(Action::Edit(id.clone())));
+    click_category_control(&mut app, "새로 작성");
+    assert!(app.categories.editing.is_none());
+    assert!(app.categories.name.is_empty());
+    click_category_control(&mut app, "+ 추가");
+    assert!(
+        !app.categories.error.is_empty(),
+        "empty name must explain why nothing was added"
+    );
+    assert_eq!(app.snapshot.categories.len(), count);
+    run_message(&mut app, msg(Action::Name("독서".into())));
+    click_category_control(&mut app, "+ 추가");
+    assert_eq!(app.snapshot.categories.len(), count + 1);
+    assert!(app
+        .snapshot
+        .categories
+        .iter()
+        .any(|c| c.name == "독서" && c.id != id));
+}
+
+fn click_category_control(app: &mut App, label: &str) {
+    let size = Size::new(800., 620.);
+    app.manager_size = size;
+    let messages = {
+        let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut element = app.view(app.manager);
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let mut probe = CategoryPositionProbe::default();
+        element.as_widget_mut().operate(
+            &mut tree,
+            layout::Layout::new(&node),
+            &renderer,
+            &mut probe,
+        );
+        let target = probe
+            .0
+            .iter()
+            .find(|(s, _)| s == label)
+            .expect("button label")
+            .1
+            .center();
+        let mut messages = Vec::new();
+        for event in [
+            mouse::Event::ButtonPressed(mouse::Button::Left),
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(event),
+                layout::Layout::new(&node),
+                mouse::Cursor::Available(target),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &Rectangle::new(Point::ORIGIN, size),
+            );
+        }
+        messages
+    };
+    assert!(!messages.is_empty(), "button must dispatch an action");
+    for message in messages {
+        run_message(app, message);
+    }
+}
+
+#[test]
 fn category_drag_writes_only_on_drop_and_refreshes_both_surfaces() {
     use crate::category_ui::{msg, Action};
     let mut app = calendar_record_fixture();

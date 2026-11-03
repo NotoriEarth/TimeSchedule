@@ -21,7 +21,7 @@ pub enum Action {
     Open,
     Close,
     Edit(String),
-    Add,
+    NewDraft,
     Name(String),
     Color(String),
     Save,
@@ -51,10 +51,11 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
             };
         }
         Action::Close => app.categories.open = false,
-        Action::Add => {
+        Action::NewDraft => {
             app.categories.editing = None;
             app.categories.name.clear();
             app.categories.color = "#82A8D8".into();
+            app.categories.error.clear();
         }
         Action::Edit(id) => {
             if let Some(c) = app.snapshot.categories.iter().find(|c| c.id == id) {
@@ -269,7 +270,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
             })
             .size(16),
             space().width(Length::Fill),
-            button("+ 추가").on_press(msg(Action::Add))
+            button(if state.editing.is_some() {
+                "새로 작성"
+            } else {
+                "+ 추가"
+            })
+            .on_press_maybe(enabled.then(|| msg(if state.editing.is_some() {
+                Action::NewDraft
+            } else {
+                Action::Save
+            })))
         ],
         text_input("카테고리 이름", &state.name)
             .on_input(|v| msg(Action::Name(v)))
