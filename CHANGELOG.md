@@ -1,6 +1,6 @@
 # TimeSchedule 버전 이력
 
-현재 대표 앱은 **Rust/Iced 네이티브 0.10.0**이며 실행 파일은 `artifacts/TimeSchedule.exe`이다.
+현재 대표 앱은 **Rust/Iced 네이티브 0.10.1**이며 실행 파일은 `artifacts/TimeSchedule.exe`이다.
 
 ## 버전 규칙
 
@@ -10,7 +10,13 @@
 - **부 버전**: 사용자가 체감하는 기능 묶음이나 큰 화면·구조 개선에서 올리고 수정 숫자는 0으로 돌린다.
 - **수정 버전**: 기존 기능의 버그·작은 동작·배포 문제를 고칠 때 올린다.
 - 커밋·문서 정리만으로 매번 올리지 않는다. 같은 미출시 작업에 대한 후속 수정은 그 버전에 포함한다.
-- 다음 작은 수정은 `0.10.1`, 다음 주요 기능 묶음은 `0.11.0`이다. 버전 변경 시 `apps/timeschedule-native/Cargo.toml`, `Cargo.lock`, 이 이력과 README를 함께 갱신한다. 앱 표시·Windows 속성·빌드 출력 정보는 Cargo 버전을 사용한다.
+- 다음 작은 수정은 `0.10.2`, 다음 주요 기능 묶음은 `0.11.0`이다. 버전 변경 시 `apps/timeschedule-native/Cargo.toml`, `Cargo.lock`, 이 이력과 README를 함께 갱신한다. 앱 표시·Windows 속성·빌드 출력 정보는 Cargo 버전을 사용한다.
+
+## 0.10.1 · ChatGPT Desktop 연결 선택
+
+- AI 연결 도우미에 ChatGPT Desktop을 추가한다. 공식 문서의 같은 로컬 호스트 설정 공유 방식에 따라 Codex와 동일한 `config.toml`·`timeschedule` 항목·인증 도우미를 사용한다.
+- Codex와 ChatGPT Desktop을 번갈아 등록해도 같은 설정은 재작성하지 않으며 기존 도구 제한과 다른 서버를 보존한다. 미리보기에 공유 범위를 표시하고 ChatGPT의 MCP 서버 재시작 방법과 웹·클라우드 연결의 차이를 안내한다.
+- 별도 서버·상주 프로세스·주기 작업·의존성을 추가하지 않는다. 실제 ChatGPT Desktop의 설정 반영과 권한 승인은 사용자 확인 대상이다.
 
 ## 0.10.0 · 설정에서 AI 앱 MCP 연결
 

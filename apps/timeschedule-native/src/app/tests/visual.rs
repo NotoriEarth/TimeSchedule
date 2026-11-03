@@ -127,6 +127,7 @@ fn mcp_assistant_keeps_controls_and_outer_scroll_fixed_during_results() {
         for size in [Size::new(800., 620.), Size::new(1160., 820.)] {
             let mut app = fixture();
             app.page = Page::Settings;
+            app.mcp_setup.client = crate::mcp_setup::Client::ChatGptDesktop;
             app.preferences.theme = mode;
             let mut renderer =
                 iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());

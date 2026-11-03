@@ -8,14 +8,25 @@ use std::path::{Path, PathBuf};
 pub enum Client {
     #[default]
     Codex,
+    ChatGptDesktop,
     ClaudeCode,
     ClaudeDesktop,
+}
+
+impl Client {
+    pub const ALL: [Self; 4] = [
+        Self::Codex,
+        Self::ChatGptDesktop,
+        Self::ClaudeCode,
+        Self::ClaudeDesktop,
+    ];
 }
 
 impl std::fmt::Display for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Codex => "Codex",
+            Self::ChatGptDesktop => "ChatGPT Desktop",
             Self::ClaudeCode => "Claude Code",
             Self::ClaudeDesktop => "Claude Desktop",
         })
@@ -41,7 +52,7 @@ pub fn default_path(client: Client) -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .ok_or("Windows 사용자 폴더를 찾지 못했습니다. 설정 경로를 직접 입력하세요.")?;
     match client {
-        Client::Codex => Ok(std::env::var_os("CODEX_HOME")
+        Client::Codex | Client::ChatGptDesktop => Ok(std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| profile.join(".codex"))
             .join("config.toml")),
@@ -147,7 +158,9 @@ pub fn prepare(
         .trim_start_matches('\u{feff}');
     let helper = helper_command(exe, dir)?;
     let desired = match client {
-        Client::Codex => json!({"url": endpoint, "http_headers_helper":helper}),
+        Client::Codex | Client::ChatGptDesktop => {
+            json!({"url": endpoint, "http_headers_helper":helper})
+        }
         Client::ClaudeCode => json!({"type":"http", "url":endpoint, "headersHelper":helper}),
         Client::ClaudeDesktop => json!({"command":exe, "args":["--mcp-stdio", "--data-dir", dir]}),
     };
@@ -168,10 +181,10 @@ pub fn prepare(
         "headers",
         "headersHelper",
     ];
-    let (updated, exists) = if client == Client::Codex {
-        let mut doc: toml_edit::DocumentMut = source
-            .parse()
-            .map_err(|_| "Codex 설정의 TOML 형식이 잘못되었습니다. 원본은 변경하지 않았습니다.")?;
+    let (updated, exists) = if matches!(client, Client::Codex | Client::ChatGptDesktop) {
+        let mut doc: toml_edit::DocumentMut = source.parse().map_err(|_| {
+            "ChatGPT Desktop·Codex 설정의 TOML 형식이 잘못되었습니다. 원본은 변경하지 않았습니다."
+        })?;
         if doc.get("mcp_servers").is_none() {
             doc["mcp_servers"] = toml_edit::table();
         }
@@ -255,7 +268,12 @@ pub fn prepare(
     } else {
         "로컬 HTTP · 연결할 때 Windows 인증정보 사용"
     };
-    let preview = format!("{client}: {action}\n대상: {}\n서버: {endpoint}\n{transport}\n다른 서버·설정과 도구 제한은 보존합니다. 기존 파일은 같은 폴더에 백업합니다.", path.display());
+    let shared = if matches!(client, Client::Codex | Client::ChatGptDesktop) {
+        "\n같은 설정 파일을 쓰는 ChatGPT Desktop·Codex에 함께 적용됩니다."
+    } else {
+        ""
+    };
+    let preview = format!("{client}: {action}\n대상: {}\n서버: {endpoint}\n{transport}{shared}\n다른 서버·설정과 도구 제한은 보존합니다. 기존 파일은 같은 폴더에 백업합니다.", path.display());
     Ok(Plan {
         path: path.into(),
         preview,
@@ -421,6 +439,45 @@ fn write_backup(_: &Path, _: &[u8], _: &std::fs::File) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::Value;
+    #[test]
+    fn chatgpt_desktop_shares_codex_registration_without_rewriting() {
+        let chatgpt = Client::ALL
+            .into_iter()
+            .find(|client| client.to_string() == "ChatGPT Desktop")
+            .expect("ChatGPT Desktop must be selectable in the assistant");
+        assert_eq!(
+            default_path(chatgpt).unwrap(),
+            default_path(Client::Codex).unwrap()
+        );
+        for (first, second) in [(Client::Codex, chatgpt), (chatgpt, Client::Codex)] {
+            let f = Fixture::new();
+            let original = "# keep\n[mcp_servers.other]\ncommand='keep'\n[mcp_servers.timeschedule]\nenabled=false\ndisabled_tools=['calendar_create']\n";
+            let plan = f.plan(first, original);
+            apply(&plan).unwrap();
+            let bytes = std::fs::read(&plan.path).unwrap();
+            let doc: toml_edit::DocumentMut = std::str::from_utf8(&bytes).unwrap().parse().unwrap();
+            assert_eq!(doc["mcp_servers"].as_table().unwrap().len(), 2);
+            assert_eq!(
+                doc["mcp_servers"]["timeschedule"]["enabled"].as_bool(),
+                Some(false)
+            );
+            assert_eq!(
+                doc["mcp_servers"]["timeschedule"]["disabled_tools"][0].as_str(),
+                Some("calendar_create")
+            );
+            let next = prepare(
+                second,
+                &plan.path,
+                Path::new("C:\\한글 & user's %DATA%\\TimeSchedule.exe"),
+                &f.0,
+                "http://127.0.0.1:39281/mcp",
+            )
+            .unwrap();
+            assert!(next.unchanged());
+            assert_eq!(apply(&next).unwrap(), None);
+            assert_eq!(std::fs::read(&plan.path).unwrap(), bytes);
+        }
+    }
     #[test]
     fn client_json_formatting_does_not_invalidate_an_existing_registration() {
         let f = Fixture::new();

@@ -35,4 +35,10 @@
 - [x] Add failing tests for loopback validation, missing credentials and real authenticated initialize/tools/list; implement bounded probe and native header CLI.
 - [x] Add settings client selection, path detection/editing, preview, registration and check using asynchronous tasks; test state and layout transitions.
 - [x] Run workspace tests and release verification, inspect UI, measure lightweight changes and obtain independent review.
-- [ ] Update usage/version docs, build representative EXE, commit/push/PR and automatic development record according to AGENTS.md.
+- [x] Update usage/version docs, build representative EXE, commit/push/PR and automatic development record according to AGENTS.md. 0.10.0 delivered in PR #13; diary saved, Space verification pending.
+
+## Follow-up: ChatGPT Desktop (0.10.1)
+
+User requested ChatGPT Desktop as an additional selectable client. Official OpenAI documentation confirms that it shares the same local host's Codex configuration. Reuse the existing TOML registration and authentication helper; do not create a second server, separate credential store, or resident process. Show shared-configuration scope before applying and explain desktop restart versus web/cloud use. Keep the existing preview/apply/check workflow. Verify registration in both directions without duplicate entries or rewriting, preserve tool restrictions, and exercise the real settings layout with ChatGPT Desktop selected. Continue this branch/PR and hold merge for user testing.
+
+Source checked 2026-11-03: https://learn.chatgpt.com/docs/extend/mcp?surface=desktop

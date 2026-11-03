@@ -1,19 +1,21 @@
-# 로컬 일정 MCP (0.10.0)
+# 로컬 일정 MCP (0.10.1)
 
-TimeSchedule을 실행하면 같은 Windows PC의 Codex·Claude Code·Claude Desktop이 공통 일정 도구를 사용할 수 있다. 앱의 SQLite에 직접 저장하며 앱·위젯·열린 빠른 일정 목록에 다음 500ms 갱신 시점부터 반영한다. 저장 중인 작업이나 UI 부하에 따라 화면 반영은 늦어질 수 있다. 모델 실행·외부 전송·Space 호출은 MCP 자체에 포함되지 않는다.
+TimeSchedule을 실행하면 같은 Windows PC의 ChatGPT Desktop·Codex·Claude Code·Claude Desktop이 공통 일정 도구를 사용할 수 있다. 앱의 SQLite에 직접 저장하며 앱·위젯·열린 빠른 일정 목록에 다음 500ms 갱신 시점부터 반영한다. 저장 중인 작업이나 UI 부하에 따라 화면 반영은 늦어질 수 있다. 모델 실행·외부 전송·Space 호출은 MCP 자체에 포함되지 않는다.
 
 ## 설정에서 연결하기 (권장)
 
 1. 대표 EXE를 실행하고 **설정 → 로컬 일정 MCP → AI 연결 도우미**로 이동한다.
-2. Codex, Claude Code, Claude Desktop 중 사용할 앱을 선택한다. `경로 찾기`로 설정 위치를 찾거나 실제 설정 파일의 절대 경로를 입력한다. 이 기능은 AI 앱을 설치하지 않는다.
+2. ChatGPT Desktop, Codex, Claude Code, Claude Desktop 중 사용할 앱을 선택한다. `경로 찾기`로 설정 위치를 찾거나 실제 설정 파일의 절대 경로를 입력한다. 이 기능은 AI 앱을 설치하지 않는다.
 3. `등록 미리보기`에서 대상 파일, 추가/갱신 여부, 서버 주소와 인증 방법을 확인한다.
 4. `등록 적용`을 누른다. 같은 Windows 사용자의 전체 프로젝트에서 쓰는 `timeschedule` 연결을 등록한다. 다른 서버와 기존 도구 제한·활성화 여부는 보존한다.
 5. AI 앱에서 연결을 다시 불러오거나 앱을 재시작한 뒤 `timeschedule` 도구를 확인한다. 클라이언트의 신뢰·도구 사용 승인은 해당 앱에서 처리한다.
 6. TimeSchedule의 `연결 검사`는 서버 초기화·인증·도구 4개와 등록 설정을 검사한다. 개인 일정 조회·추가·수정이나 모델 호출은 하지 않는다. AI 앱이 설정을 실제로 불러왔는지는 해당 앱에서도 확인한다.
 
-Codex는 `%USERPROFILE%\.codex\config.toml` 또는 `CODEX_HOME`, Claude Code는 `%USERPROFILE%\.claude.json` 또는 `CLAUDE_CONFIG_DIR`의 `.claude.json`을 사용한다. Claude Desktop은 `%APPDATA%\Claude\claude_desktop_config.json`과 Store 설치의 `Packages\Claude_*\LocalCache\Roaming\Claude`를 탐지한다. 후보가 여러 개면 임의로 선택하지 않는다. Claude Desktop의 설정 → Developer → Edit Config에서 실제 경로를 확인한다.
+ChatGPT Desktop과 Codex는 `%USERPROFILE%\.codex\config.toml` 또는 `CODEX_HOME`의 `config.toml`, Claude Code는 `%USERPROFILE%\.claude.json` 또는 `CLAUDE_CONFIG_DIR`의 `.claude.json`을 사용한다. Claude Desktop은 `%APPDATA%\Claude\claude_desktop_config.json`과 Store 설치의 `Packages\Claude_*\LocalCache\Roaming\Claude`를 탐지한다. 후보가 여러 개면 임의로 선택하지 않는다. Claude Desktop의 설정 → Developer → Edit Config에서 실제 경로를 확인한다.
 
-Codex·Claude Code는 최신 버전의 `http_headers_helper` / `headersHelper`를 사용한다. 연결 시 숨겨진 PowerShell이 같은 EXE의 `--mcp-auth-headers`를 실행하고 바로 종료한다. 설정에 토큰 값을 넣지 않으며 사용자 환경변수에도 저장하지 않는다. 이전에 수동으로 저장한 환경변수는 자동 삭제하지 않는다. Claude Desktop은 같은 EXE의 `--mcp-stdio`를 실행하여 인증된 로컬 HTTP로 중계한다. 연결 중 작은 중계 프로세스 하나가 대기하며 일정 DB나 두 번째 GUI를 열지 않는다. 앱이 완전히 종료되면 도구 호출은 실패한다.
+ChatGPT Desktop과 Codex는 **같은 로컬 호스트의 설정 파일을 공유**한다. 둘 중 하나로 이미 등록했다면 같은 경로·실행 파일·데이터 폴더·주소의 등록은 중복 생성하거나 재작성하지 않는다. 미리보기에서 두 앱에 함께 적용되는 범위를 확인한다. ChatGPT에서 **Settings → MCP servers → Restart**로 다시 불러온 뒤 `/mcp`에서 `timeschedule`을 확인한다. 로컬 MCP를 지원하는 최신 데스크톱 앱 기준이며, ChatGPT 웹이나 클라우드 실행은 이 로컬 설정을 사용하지 않는다. 원격 호스트를 선택했다면 해당 호스트에 TimeSchedule과 연결 설정이 있어야 하며 이 PC의 `127.0.0.1`에 연결되는 것으로 해석하지 않는다.
+
+ChatGPT Desktop·Codex·Claude Code는 최신 버전의 `http_headers_helper` / `headersHelper`를 사용한다. 연결 시 숨겨진 PowerShell이 같은 EXE의 `--mcp-auth-headers`를 실행하고 바로 종료한다. 설정에 토큰 값을 넣지 않으며 사용자 환경변수에도 저장하지 않는다. 이전에 수동으로 저장한 환경변수는 자동 삭제하지 않는다. Claude Desktop은 같은 EXE의 `--mcp-stdio`를 실행하여 인증된 로컬 HTTP로 중계한다. 연결 중 작은 중계 프로세스 하나가 대기하며 일정 DB나 두 번째 GUI를 열지 않는다. 앱이 완전히 종료되면 도구 호출은 실패한다.
 
 같은 이름의 프로젝트 설정이나 관리자가 정한 제한이 사용자 설정보다 우선할 수 있다. 등록이 정상이더라도 AI 앱에서 꺼진 연결·상위 정책·프로젝트별 중복 항목은 별도로 확인한다. 설정 도우미는 이 제한을 해제하지 않는다.
 
@@ -21,7 +23,7 @@ Codex·Claude Code는 최신 버전의 `http_headers_helper` / `headersHelper`�
 
 새 PC에서는 앱 실행 → 새 로컬 인증정보 생성 → 연결 도우미 등록 순서로 사용한다. Git 소스에는 실행 파일·일정 DB·인증정보가 포함되지 않는다. 기존 `mcp-token.dpapi`는 다른 Windows 계정/PC의 자격증명으로 복사하지 않는다. 일정·다이어리 백업 복원은 MCP 연결 등록과 별개다.
 
-공식 등록 규약: [Codex](https://learn.chatgpt.com/docs/extend/mcp?surface=cli#streamable-http-servers), [Claude Code](https://code.claude.com/docs/en/mcp#use-dynamic-headers-for-custom-authentication), [Claude Desktop 로컬 설정](https://modelcontextprotocol.io/docs/develop/connect-local-servers).
+공식 등록 규약: [ChatGPT Desktop·Codex](https://learn.chatgpt.com/docs/extend/mcp?surface=desktop), [Claude Code](https://code.claude.com/docs/en/mcp#use-dynamic-headers-for-custom-authentication), [Claude Desktop 로컬 설정](https://modelcontextprotocol.io/docs/develop/connect-local-servers).
 
 ## 실행 상태
 
@@ -121,6 +123,12 @@ Claude Code의 `/mcp`에서 연결 상태와 네 도구를 확인한다. 처음 
 - 본문 128KiB, 동시 HTTP 요청 8개, 동시 저장소 작업 4개. 헤더 이후 HTTP 처리 제한 10초. 초과 요청은 413/429 또는 도구 오류를 반환한다.
 - 목록은 최대 366일·100개. `truncated=true`이면 날짜 범위를 좁힌다. 메모는 상세 조회로 읽는다. 제목은 200자, 메모는 20,000자.
 - 이미 시작한 저장 작업은 요청 연결이 끊겨도 완료될 수 있다. 완전 종료 시 HTTP 요청에 최대 1초, 저장소 작업 정리에 최대 5초를 기다린다. 불완전한 헤더/본문을 보낸 클라이언트가 종료를 무한히 붙잡지 못한다. 응답 없는 쓰기는 재실행 전에 저장 결과를 확인한다.
+
+## 0.10.1 추가 검증 (2026-11-03)
+
+- Workspace 테스트 **151개 통과 / 4개 기본 제외**. ChatGPT Desktop 선택을 포함한 실제 Iced 설정 레이아웃의 두 테마·두 화면 크기·네 가지 상태 전환을 확인하고 렌더링 이미지를 검사했다.
+- 격리된 설정 파일에서 Codex → ChatGPT Desktop 및 반대 순서로 등록해 동일 파일·서버 항목을 재사용하고 두 번째 등록이 원본 바이트를 바꾸거나 백업을 추가하지 않는지 확인했다. 기존 비활성화·도구 제한·다른 서버를 보존한다.
+- 추가 상주 프로세스·주기 작업·의존성은 없다. 사용자 ChatGPT Desktop에서 재시작·권한 승인·도구 호출은 아직 확인하지 않았으며 실제 사용자 설정은 변경하지 않았다. 아래 0.10.0 자원 측정값은 당시 표본으로, 0.10.1에서 새로 측정한 수치가 아니다.
 
 ## 0.10.0 검증 범위 (2026-11-03)
 

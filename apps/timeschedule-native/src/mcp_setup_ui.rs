@@ -127,7 +127,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
     let preview = state.preview.as_ref().map(|p| p.preview.as_str()).unwrap_or("AI 앱을 선택하고 ‘등록 미리보기’를 누르세요.\n현재 Windows 사용자에게 등록하여 여러 프로젝트에서 사용할 수 있습니다.\n앱 또는 데이터 폴더를 옮겼다면 새 위치에서 다시 등록하세요.");
     column![
         text("AI 연결 도우미").size(18),
-        pick_list([Client::Codex, Client::ClaudeCode, Client::ClaudeDesktop], Some(state.client), move |c| msg(Action::Client(c))).width(220),
+        pick_list(Client::ALL, Some(state.client), move |c| msg(Action::Client(c))).width(220),
         path,
         row![
             button("경로 찾기").padding(8).on_press_maybe(enabled.then_some(msg(Action::Detect))),
@@ -137,7 +137,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
         ].spacing(8).wrap(),
         scrollable(text(if state.status.is_empty() { "등록 전 변경 내용을 미리 확인할 수 있습니다." } else { &state.status }).size(13)).height(52).width(Length::Fill),
         scrollable(text(preview).size(13)).height(112).width(Length::Fill),
-        text("Codex·Claude Code는 최신 버전을 사용하세요. Claude Desktop은 연결 중에만 작은 중계 프로세스를 사용합니다.").size(12),
+        text("ChatGPT Desktop·Codex·Claude Code는 최신 버전을 사용하세요. Claude Desktop은 연결 중에만 작은 중계 프로세스를 사용합니다.").size(12),
+        text("ChatGPT Desktop은 Codex와 기본 설정을 공유합니다. 등록 후 ChatGPT의 설정 → MCP servers에서 Restart하세요. 웹·클라우드 연결은 별도입니다.").size(12),
         text("이 기능은 로컬 일정 연결입니다. 다른 PC로 일정·다이어리를 옮기는 기능은 별도입니다.").size(12)
     ].spacing(8).into()
 }
