@@ -11,7 +11,7 @@ use iced::widget::{
 use iced::{window, Alignment, Color, Element, Length, Theme};
 use timeschedule_core::{
     diary::{EntrySummary, SearchHit},
-    storage::{CalendarEvent, Task},
+    storage::Task,
 };
 
 pub(crate) const EDITOR_SIZE: iced::Size = iced::Size::new(650.0, 560.0);
@@ -96,6 +96,19 @@ pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
     } else {
         crate::shell::view(app)
     };
+    if app.categories.open && !quick {
+        return modal(base, crate::category_ui::view(app), None, true);
+    }
+    if app.calendar.detail.is_some() && app.calendar.detail_quick == quick {
+        return modal(
+            base,
+            crate::calendar_ui::detail_view(app),
+            Some(crate::calendar_ui::message(
+                crate::calendar_ui::Action::CloseDetail,
+            )),
+            true,
+        );
+    }
     if let Some(editor) = app.editor.as_ref().filter(|_| app.editor_in_quick == quick) {
         // This child stays at the same tree path both with and without the
         // confirmation. Retain cursor/selection/scroll and freeze its input.
@@ -173,7 +186,12 @@ pub(crate) fn actions(app: &App) -> Element<'_, Message> {
                 .push(control("‹", Message::Week(-1)))
                 .push(control("›", Message::Week(1)))
                 .push(control("월로 돌아가기", Message::Navigate(Page::Month)))
-                .push(control("주간 근거 요약", Message::Draft(false)));
+                .push(control("주간 근거 요약", Message::Draft(false)))
+                .push(control(
+                    "카테고리",
+                    crate::category_ui::msg(crate::category_ui::Action::Open),
+                ))
+                .push(control("+ 일정", Message::New(Kind::Event, None)));
         }
         Page::Projects => {
             actions = actions
@@ -192,7 +210,12 @@ pub(crate) fn actions(app: &App) -> Element<'_, Message> {
             }
         }
         Page::Records => actions = actions.push(control("+ 기록", Message::New(Kind::Entry, None))),
-        Page::Tasks => actions = actions.push(control("+ 할 일", Message::New(Kind::Task, None))),
+        Page::Tasks => {
+            actions = actions.push(control(
+                "+ 일정",
+                Message::New(Kind::Task, Some(String::new())),
+            ))
+        }
         Page::Notes => actions = actions.push(control("+ 메모", Message::New(Kind::Note, None))),
         Page::Settings => {}
     }
@@ -242,29 +265,18 @@ pub(crate) fn week(app: &App) -> Element<'_, Message> {
 fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
     let key = date.to_string();
     let mut items = Column::new().spacing(8);
-    for event in app.snapshot.events.iter().filter(|e| e.date == key) {
-        items = items.push(event_card(app, event));
-    }
-    for entry in app.snapshot.entries.iter().filter(|e| e.date == key) {
-        items = items.push(entry_card(app, entry));
-    }
-    for task in app
-        .snapshot
-        .tasks
-        .iter()
-        .filter(|t| t.date.as_deref() == Some(key.as_str()))
-    {
-        items = items.push(task_card(app, task));
-    }
-    if !app.snapshot.events.iter().any(|e| e.date == key)
-        && !app.snapshot.entries.iter().any(|e| e.date == key)
-        && !app
-            .snapshot
-            .tasks
-            .iter()
-            .any(|t| t.date.as_deref() == Some(key.as_str()))
-    {
-        items = items.push(quiet("오늘의 작은 기록을\n남겨 보세요."));
+    if let Some(day) = app.snapshot.days.iter().find(|d| d.date == key) {
+        for item in &day.items {
+            items = items.push(crate::calendar_ui::item_view(app, item, 230.0, 13.0, false));
+        }
+        if day.completed > 0 || day.total > day.items.len() as u32 {
+            items = items.push(control(
+                format!("전체 {}개 · 완료 {}개", day.total, day.completed),
+                Message::WidgetDate(date),
+            ));
+        }
+    } else {
+        items = items.push(quiet("오늘의 작은 기록을 남겨 보세요."));
     }
     let header = row![
         text(format!("{}", date.day())).size(25),
@@ -306,53 +318,6 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
     .on_press(Message::SelectDay(date))
     .on_double_click(Message::New(Kind::Event, Some(key)))
     .into()
-}
-pub(crate) fn event_card<'a>(app: &'a App, event: &'a CalendarEvent) -> Element<'a, Message> {
-    let expanded = app.expanded_events.contains(&event.id);
-    let mut contents = column![button(
-        column![
-            text(format!(
-                "{}{}",
-                if event.completed {
-                    "✓ "
-                } else {
-                    if expanded {
-                        "− "
-                    } else {
-                        "+ "
-                    }
-                },
-                event.title
-            ))
-            .size(13),
-            quiet(if event.all_day {
-                "종일".into()
-            } else {
-                format!(
-                    "{}–{}",
-                    event.start_time.as_deref().unwrap_or(""),
-                    event.end_time.as_deref().unwrap_or("")
-                )
-            })
-        ]
-        .spacing(3)
-    )
-    .style(theme::text_button)
-    .width(Length::Fill)
-    .on_press(Message::ToggleEvent(event.id.clone()))]
-    .spacing(8);
-    if expanded {
-        contents = contents.push(text(&event.notes).size(13)).push(control(
-            "일정 수정",
-            Message::EditForm(Form::event(event.clone())),
-        ));
-    }
-    let category = event.color.clone();
-    container(contents)
-        .padding(10)
-        .width(Length::Fill)
-        .style(move |t| theme::event_surface(t, &category))
-        .into()
 }
 pub(crate) fn entry_card<'a>(app: &'a App, entry: &'a EntrySummary) -> Element<'a, Message> {
     let expanded = app.expanded.contains(&entry.id);
@@ -507,13 +472,11 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
         .into()
 }
 pub(crate) fn tasks(app: &App) -> Element<'_, Message> {
-    let mut c = column![quiet(format!(
-        "{} / {}개 완료",
-        app.snapshot.tasks.iter().filter(|t| t.completed).count(),
-        app.snapshot.tasks.len()
-    ))]
+    let mut c = column![quiet(
+        "날짜를 정하면 다이어리와 위젯의 해당 날짜에 함께 표시됩니다."
+    )]
     .spacing(10);
-    for task in &app.snapshot.tasks {
+    for task in app.snapshot.tasks.iter().filter(|t| t.date.is_none()) {
         c = c.push(paper(task_card(app, task)));
     }
     scrollable(c).height(Length::Fill).into()
@@ -684,6 +647,22 @@ fn editor_view(app: &App) -> Element<'_, Message> {
     ]
     .spacing(5)]
     .spacing(12);
+    {
+        let editor = text_editor(&e.content)
+            .id("editor-body")
+            .height(140)
+            .placeholder("생각과 기록을 자유롭게 적어 보세요.")
+            .on_action(Message::Body)
+            .key_binding(editor_binding);
+        fields = fields
+            .push(quiet(if form.kind == Kind::Project {
+                "프로젝트 설명"
+            } else {
+                "본문"
+            }))
+            .push(editor)
+            .push(quiet("Ctrl+Z / Ctrl+Y · 최근 편집 32회 복원"));
+    }
     if matches!(form.kind, Kind::Entry | Kind::Event | Kind::Task) {
         fields = fields.push(input(
             if form.kind == Kind::Task {
@@ -693,6 +672,40 @@ fn editor_view(app: &App) -> Element<'_, Message> {
             },
             &form.date,
             Field::Date,
+        ));
+    }
+    if form.kind == Kind::Entry {
+        let choices: Vec<_> = app
+            .snapshot
+            .categories
+            .iter()
+            .filter(|c| c.id != timeschedule_core::calendar::SCHEDULE_CATEGORY)
+            .map(|c| ProjectChoice {
+                id: Some(c.id.clone()),
+                title: c.name.clone(),
+            })
+            .collect();
+        let selected = choices
+            .iter()
+            .find(|c| c.id.as_deref() == Some(&form.category_id))
+            .cloned();
+        fields = fields.push(column![
+            quiet("카테고리"),
+            pick_list(choices, selected, |c| Message::Field(Field::Category(
+                c.id.unwrap()
+            )))
+        ]);
+        fields = fields.push(input(
+            "짧은 작업명 (달력 표시용, 선택)",
+            &form.short_title,
+            Field::ShortTitle,
+        ));
+    }
+    if form.kind == Kind::Project {
+        fields = fields.push(input(
+            "짧은 프로젝트명 (달력 표시용, 선택)",
+            &form.project_short_name,
+            Field::ProjectShortName,
         ));
     }
     if form.kind == Kind::Entry {
@@ -729,7 +742,7 @@ fn editor_view(app: &App) -> Element<'_, Message> {
             .spacing(10),
         );
     }
-    if form.kind == Kind::Event {
+    if matches!(form.kind, Kind::Event | Kind::Task) {
         fields = fields.push(
             checkbox(form.all_day)
                 .label("하루 종일")
@@ -744,14 +757,6 @@ fn editor_view(app: &App) -> Element<'_, Message> {
                 .spacing(10),
             );
         }
-        let colors = ["세이지", "블루", "앰버", "로즈"];
-        let values = ["sage", "blue", "amber", "rose"];
-        let selected = colors[values.iter().position(|v| *v == form.color).unwrap_or(0)];
-        fields = fields.push(pick_list(colors, Some(selected), move |label| {
-            Message::Field(Field::Color(
-                values[colors.iter().position(|x| *x == label).unwrap()].into(),
-            ))
-        }));
     }
     if matches!(form.kind, Kind::Event | Kind::Task) {
         fields = fields.push(
@@ -759,22 +764,6 @@ fn editor_view(app: &App) -> Element<'_, Message> {
                 .label("완료")
                 .on_toggle(|v| Message::Field(Field::Completed(v))),
         );
-    }
-    if form.kind != Kind::Task {
-        let editor = text_editor(&e.content)
-            .id("editor-body")
-            .height(220)
-            .placeholder("생각과 기록을 자유롭게 적어 보세요.")
-            .on_action(Message::Body)
-            .key_binding(editor_binding);
-        fields = fields
-            .push(quiet(if form.kind == Kind::Project {
-                "프로젝트 설명"
-            } else {
-                "본문"
-            }))
-            .push(editor)
-            .push(quiet("Ctrl+Z / Ctrl+Y · 최근 편집 32회 복원"));
     }
     if form.kind == Kind::Entry {
         fields = fields.push(input(

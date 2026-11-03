@@ -129,7 +129,7 @@ fn project_row(row: &Row<'_>) -> rusqlite::Result<Project> {
         updated_at: row.get(4)?,
     })
 }
-fn entry_row(row: &Row<'_>) -> rusqlite::Result<Entry> {
+pub(crate) fn entry_row(row: &Row<'_>) -> rusqlite::Result<Entry> {
     Ok(Entry {
         id: row.get(0)?,
         project_id: row.get(1)?,

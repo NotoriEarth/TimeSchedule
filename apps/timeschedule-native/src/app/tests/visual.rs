@@ -3,6 +3,289 @@ use super::*;
 use iced::advanced::{graphics::Viewport, layout, mouse, renderer, widget::Tree, Renderer};
 use iced::{Point, Rectangle};
 
+fn calendar_record_fixture() -> App {
+    let mut app = fixture();
+    app.preferences.widget.rolling = false;
+    let store = app.store.as_ref().unwrap();
+    let project = store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: None,
+            title: "TS".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap();
+    let mut form = Form::new(Kind::Entry, app.selected.to_string(), Some(project.id));
+    form.title = "연동기록".into();
+    form.body = "양쪽에서 열어야 할 원문".into();
+    form.save(store).unwrap();
+    app.snapshot = worker::snapshot(store, &app.scope()).unwrap();
+    app
+}
+
+fn calendar_texts(mut element: Element<'_, Message>, size: Size) -> Vec<String> {
+    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, size),
+    );
+    let mut probe = SettingsProbe::default();
+    element
+        .as_widget_mut()
+        .operate(&mut tree, layout::Layout::new(&node), &renderer, &mut probe);
+    probe.texts
+}
+
+#[test]
+fn widget_displays_record_written_in_diary() {
+    let app = calendar_record_fixture();
+    let labels = calendar_texts(crate::desktop_widget::view(&app), Size::new(960., 640.));
+    assert!(
+        labels.iter().any(|s| s == "연동기록"),
+        "widget missing saved record: {labels:?}"
+    );
+    assert!(labels.iter().any(|s| s == "TS"));
+}
+
+#[test]
+fn diary_calendar_displays_project_and_task_title() {
+    let app = calendar_record_fixture();
+    let labels = calendar_texts(crate::shell::calendar(&app), Size::new(1200., 1200.));
+    assert!(
+        labels.iter().any(|s| s == "연동기록"),
+        "diary only displays record count: {labels:?}"
+    );
+    assert!(labels.iter().any(|s| s == "TS"));
+}
+
+fn run_message(app: &mut App, message: Message) {
+    use iced::futures::StreamExt;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut pending = std::collections::VecDeque::from([app.update(message)]);
+            while let Some(task) = pending.pop_front() {
+                if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                    while let Some(action) = stream.next().await {
+                        if let iced_runtime::Action::Output(message) = action {
+                            pending.push_back(app.update(message));
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("native task must finish");
+    });
+}
+
+#[test]
+fn calendar_routes_create_edit_move_complete_and_delete_the_same_source() {
+    use crate::calendar_ui::{message, Action};
+    use timeschedule_core::calendar::CalendarSource;
+    let mut app = fixture();
+    app.preferences.widget.rolling = false;
+    app.quick_date = Some(app.selected);
+    app.quick_window = Some(window::Id::unique());
+    run_message(&mut app, message(Action::New(Kind::Entry, true)));
+    assert!(app.editor_in_quick);
+    run_message(
+        &mut app,
+        Message::Field(Field::Title("위젯에서 만든 기록".into())),
+    );
+    app.editor.as_mut().unwrap().form.body = "같은 원문".into();
+    run_message(&mut app, Message::Save);
+    let item = app
+        .snapshot
+        .days
+        .iter()
+        .flat_map(|d| &d.items)
+        .find(|i| i.title == "위젯에서 만든 기록")
+        .unwrap()
+        .clone();
+    assert!(app
+        .snapshot
+        .widget_days
+        .iter()
+        .flat_map(|d| &d.items)
+        .any(|i| i.id == item.id));
+    run_message(
+        &mut app,
+        message(Action::Open(CalendarSource::Entry, item.id.clone(), false)),
+    );
+    assert_eq!(app.calendar.detail.as_ref().unwrap().body, "같은 원문");
+    run_message(&mut app, message(Action::EditDetail));
+    assert!(!app.editor_in_quick);
+    let moved = (app.selected + Duration::days(1)).to_string();
+    run_message(&mut app, Message::Field(Field::Date(moved.clone())));
+    run_message(
+        &mut app,
+        Message::Field(Field::Title("다이어리 수정".into())),
+    );
+    run_message(&mut app, Message::Save);
+    assert_eq!(
+        app.store
+            .as_ref()
+            .unwrap()
+            .get_entry(&item.id)
+            .unwrap()
+            .date,
+        moved
+    );
+    assert!(app
+        .snapshot
+        .widget_days
+        .iter()
+        .find(|d| d.date == moved)
+        .unwrap()
+        .items
+        .iter()
+        .any(|i| i.id == item.id && i.title == "다이어리 수정"));
+    run_message(
+        &mut app,
+        message(Action::Open(CalendarSource::Entry, item.id.clone(), true)),
+    );
+    run_message(&mut app, message(Action::EditDetail));
+    run_message(&mut app, Message::Delete);
+    run_message(&mut app, Message::ConfirmDelete);
+    assert!(app.store.as_ref().unwrap().get_entry(&item.id).is_err());
+    assert!(!app
+        .snapshot
+        .days
+        .iter()
+        .flat_map(|d| &d.items)
+        .any(|i| i.id == item.id));
+    run_message(&mut app, message(Action::New(Kind::Event, false)));
+    run_message(&mut app, Message::Field(Field::Title("공통 일정".into())));
+    run_message(&mut app, Message::Save);
+    let id = app
+        .snapshot
+        .days
+        .iter()
+        .flat_map(|d| &d.items)
+        .find(|i| i.title == "공통 일정")
+        .unwrap()
+        .id
+        .clone();
+    run_message(
+        &mut app,
+        message(Action::Completed(CalendarSource::Event, id, true)),
+    );
+    assert_eq!(
+        app.snapshot
+            .widget_days
+            .iter()
+            .find(|d| d.date == moved)
+            .unwrap()
+            .completed,
+        1
+    );
+}
+
+#[test]
+fn category_drag_writes_only_on_drop_and_refreshes_both_surfaces() {
+    use crate::category_ui::{msg, Action};
+    let mut app = calendar_record_fixture();
+    let before = app.store.as_ref().unwrap().list_categories().unwrap();
+    run_message(&mut app, msg(Action::Open));
+    run_message(&mut app, msg(Action::Drag(before[1].id.clone())));
+    run_message(&mut app, msg(Action::Over(0)));
+    assert_eq!(
+        app.store.as_ref().unwrap().list_categories().unwrap(),
+        before
+    );
+    run_message(&mut app, msg(Action::Drop));
+    assert_eq!(app.snapshot.categories[0].id, before[1].id);
+    run_message(&mut app, msg(Action::Name("운동".into())));
+    run_message(&mut app, msg(Action::Color("#123ABC".into())));
+    run_message(&mut app, msg(Action::Save));
+    assert_eq!(app.snapshot.categories.last().unwrap().name, "운동");
+    assert_eq!(app.snapshot.categories.last().unwrap().color, "#123ABC");
+}
+
+#[test]
+fn clicking_widget_record_opens_its_day_before_loading_detail() {
+    use crate::calendar_ui::{message, Action};
+    let mut app = calendar_record_fixture();
+    let item = app
+        .snapshot
+        .widget_days
+        .iter()
+        .flat_map(|d| &d.items)
+        .next()
+        .unwrap()
+        .clone();
+    assert!(app.quick_window.is_none());
+    let _ = app.update(message(Action::Open(item.source, item.id, true)));
+    assert!(app.quick_window.is_some());
+    assert_eq!(app.quick_date.unwrap().to_string(), item.date);
+}
+
+#[test]
+#[ignore = "manual category/calendar native renderer previews"]
+fn render_calendar_category_previews() {
+    let output = PathBuf::from(std::env::var_os("TIMESCHEDULE_PREVIEW_DIR").unwrap());
+    std::fs::create_dir_all(&output).unwrap();
+    let mut app = calendar_record_fixture();
+    for (i, title) in ["회의 준비", "견적 정리"].iter().enumerate() {
+        let mut f = Form::new(Kind::Event, app.selected.to_string(), None);
+        f.title = title.to_string();
+        f.completed = i == 1;
+        f.save(app.store.as_ref().unwrap()).unwrap();
+    }
+    app.snapshot = worker::snapshot(app.store.as_ref().unwrap(), &app.scope()).unwrap();
+    for (name, kind, size) in [
+        ("diary-wide", 0, Size::new(1160., 820.)),
+        ("diary-small", 0, Size::new(800., 620.)),
+        ("widget", 1, Size::new(960., 640.)),
+        ("categories", 2, Size::new(800., 620.)),
+        ("record-editor", 3, Size::new(800., 620.)),
+    ] {
+        for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+            app.preferences.theme = mode;
+            app.manager_size = size;
+            app.categories.open = kind == 2;
+            app.editor = None;
+            if kind == 2 {
+                app.categories.color = "#82A8D8".into();
+            }
+            if kind == 3 {
+                app.editor = Some(Editor::new(
+                    Form::new(Kind::Entry, app.selected.to_string(), None),
+                    1,
+                ));
+            }
+            let mut element = if kind == 1 {
+                crate::desktop_widget::view(&app)
+            } else {
+                crate::views::view(&app, app.manager)
+            };
+            let mut renderer =
+                iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            render_settings_frame(
+                &app,
+                &mut element,
+                &mut tree,
+                &node,
+                &mut renderer,
+                size,
+                &output.join(format!("{name}-{mode:?}.png")),
+            );
+        }
+    }
+}
+
 #[path = "scroll_latency.rs"]
 mod scroll_latency;
 
@@ -744,9 +1027,10 @@ fn widget_checkbox_clicks_do_not_open_a_day_but_double_click_does() {
             dispatch(click(false), points[0], &mut messages);
         }
         assert!(
-            busy || messages
-                .iter()
-                .any(|m| matches!(m, Message::CompleteWidgetEvent(_, true)))
+            busy || messages.iter().any(|m| matches!(
+                m,
+                Message::Calendar(crate::calendar_ui::Action::Completed(_, _, true))
+            ))
         );
         assert!(!messages.iter().any(|m| matches!(m, Message::WidgetDate(_))));
         messages.clear();
@@ -900,7 +1184,7 @@ fn render_theme_previews() {
     let jump_id = window::Id::unique();
     app.quick_window = Some(quick);
     app.quick_date = Some(app.selected);
-    app.quick_events = store
+    let quick_events = store
         .list_events(&app.selected.to_string(), &app.selected.to_string())
         .unwrap();
     for (name, mode, size) in [
@@ -1065,7 +1349,7 @@ fn render_theme_previews() {
         app.editor = None;
         app.editor_in_quick = false;
         if (name.starts_with("quick-") && name != "quick-list") || name == "diary-editor" {
-            let mut editor = Editor::new(Form::event(app.quick_events[0].clone()), 1);
+            let mut editor = Editor::new(Form::event(quick_events[0].clone()), 1);
             editor.form.title.push_str(" 수정 중");
             if name == "quick-confirm-small" {
                 editor.request_close(CloseIntent::Quick);
@@ -1255,7 +1539,7 @@ fn diary_week_event_controls_do_not_trigger_date_creation() {
                 &mut tree,
                 &iced::Event::Mouse(event),
                 layout::Layout::new(&node),
-                mouse::Cursor::Available(Point::new(280., 120.)),
+                mouse::Cursor::Available(Point::new(310., 91.)),
                 &renderer,
                 &mut iced::advanced::clipboard::Null,
                 &mut iced::advanced::Shell::new(&mut messages),
@@ -1266,7 +1550,7 @@ fn diary_week_event_controls_do_not_trigger_date_creation() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::ToggleEvent(_))),
+            .any(|m| matches!(m, Message::Calendar(crate::calendar_ui::Action::Open(..)))),
         "{messages:?}"
     );
     assert!(!messages.iter().any(|m| matches!(m, Message::New(..))));
@@ -1475,4 +1759,14 @@ fn picker_grid_and_expanded_date_entry_fit_minimum_window() {
             check(&node, Point::ORIGIN);
         }
     }
+}
+
+#[test]
+fn weekend_overrides_do_not_recolor_categories() {
+    let mut app = calendar_record_fixture();
+    let id = app.snapshot.categories[0].id.clone();
+    let before = crate::calendar_ui::color(&app, &id);
+    app.preferences.widget.dark.sunday = Some("#FFFF00".into());
+    app.preferences.widget.dark.saturday = Some("#00FF00".into());
+    assert_eq!(crate::calendar_ui::color(&app, &id), before);
 }

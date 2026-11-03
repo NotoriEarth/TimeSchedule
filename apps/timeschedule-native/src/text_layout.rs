@@ -1,4 +1,5 @@
 use iced::widget::text;
+use unicode_segmentation::UnicodeSegmentation;
 
 // Measure with the same font/shaping as the rendered chip. Character counts
 // alone do not bound mixed Korean/Latin titles, especially at minimum width.
@@ -36,7 +37,10 @@ pub fn fit_label_with_font(content: &str, width: f32, size: f32, font: iced::Fon
     if text_width_with_font("…", size, font) > width {
         return String::new();
     }
-    let boundaries: Vec<_> = content.char_indices().map(|(index, _)| index).collect();
+    let boundaries: Vec<_> = content
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .collect();
     let (mut low, mut high) = (0, boundaries.len());
     while low < high {
         let mid = (low + high + 1) / 2;

@@ -14,7 +14,7 @@ use std::{
 use timeschedule_core::{
     dates::{calendar_days, shift_month, week_after_sunday, week_containing},
     diary::{Entry, EntrySummary, ImportResult, SearchHit},
-    storage::{CalendarEvent, Storage},
+    storage::Storage,
 };
 use timeschedule_desktop::{
     paths::{self, InstanceLock},
@@ -90,7 +90,7 @@ impl Page {
             Self::Week => "주간 다이어리",
             Self::Projects => "프로젝트",
             Self::Records => "기록 보관함",
-            Self::Tasks => "할 일",
+            Self::Tasks => "날짜 미정",
             Self::Notes => "메모",
             Self::Settings => "설정",
         }
@@ -98,6 +98,9 @@ impl Page {
 }
 #[derive(Clone, Debug)]
 pub enum Field {
+    Category(String),
+    ShortTitle(String),
+    ProjectShortName(String),
     Title(String),
     Date(String),
     Project(Option<String>),
@@ -106,7 +109,7 @@ pub enum Field {
     Repo(String),
     Start(String),
     End(String),
-    Color(String),
+
     AllDay(bool),
     Completed(bool),
 }
@@ -132,6 +135,8 @@ pub struct NativeReport {
 }
 #[derive(Clone, Debug)]
 pub enum Message {
+    Calendar(crate::calendar_ui::Action),
+    Category(crate::category_ui::Action),
     McpSetup(crate::mcp_setup_ui::Action),
     WidgetSetting(crate::widget_settings::Change),
     Jump(crate::month_jump::JumpMessage),
@@ -157,9 +162,7 @@ pub enum Message {
     WidgetDate(NaiveDate),
     QuickReady(window::Id),
     PopupPositioned(window::Id, window::Id, Result<(), String>),
-    QuickLoaded(u64, bool, Result<Vec<CalendarEvent>, String>),
-    QuickEdit(Option<String>),
-    CompleteWidgetEvent(String, bool),
+
     Project(Option<String>),
     New(Kind, Option<String>),
     EditForm(Form),
@@ -171,7 +174,7 @@ pub enum Message {
     MoreLoaded(u64, Result<Vec<EntrySummary>, String>),
     ToggleEntry(String),
     EntryLoaded(u64, String, Result<Entry, String>),
-    ToggleEvent(String),
+
     Source(String),
     SourceDone(Result<(), String>),
     Field(Field),
@@ -208,6 +211,8 @@ pub enum Message {
 }
 
 pub struct App {
+    pub calendar: crate::calendar_ui::State,
+    pub categories: crate::category_ui::State,
     pub widget_ui: crate::widget_settings::State,
     pub manager: window::Id,
     pub manager_size: Size,
@@ -215,7 +220,7 @@ pub struct App {
     pub quick_window: Option<window::Id>,
     pub placing_popups: HashMap<window::Id, window::Id>,
     pub quick_date: Option<NaiveDate>,
-    pub quick_events: Vec<CalendarEvent>,
+
     pub quick_generation: u64,
     pub quick_loading: bool,
     pub editor_in_quick: bool,
@@ -235,7 +240,7 @@ pub struct App {
     pub hovered_week: Option<NaiveDate>,
     pub project: Option<String>,
     pub expanded: HashSet<String>,
-    pub expanded_events: HashSet<String>,
+
     record_sync: crate::record_sync::Runner,
     pub bodies: HashMap<String, Entry>,
     pub entry_errors: HashMap<String, String>,
@@ -344,13 +349,15 @@ impl App {
         }
         let mut app = Self {
             widget_ui: crate::widget_settings::State::new(&prefs, today),
+            calendar: Default::default(),
+            categories: Default::default(),
             manager,
             manager_size: Size::new(1160.0, 820.0),
             widget: None,
             quick_window: None,
             placing_popups: HashMap::new(),
             quick_date: None,
-            quick_events: Vec::new(),
+
             quick_generation: 0,
             quick_loading: false,
             editor_in_quick: false,
@@ -370,7 +377,7 @@ impl App {
             hovered_week: None,
             project: None,
             expanded: HashSet::new(),
-            expanded_events: HashSet::new(),
+
             record_sync: crate::record_sync::Runner::default(),
             bodies: HashMap::new(),
             entry_errors: HashMap::new(),
@@ -455,6 +462,14 @@ impl App {
             window::close_events().map(Message::WindowClosed),
             iced::time::every(std::time::Duration::from_millis(500)).map(|_| Message::Tick),
             iced::event::listen_with(|event, status, id| {
+                if matches!(
+                    event,
+                    iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                        iced::mouse::Button::Left
+                    ))
+                ) {
+                    return Some(crate::category_ui::msg(crate::category_ui::Action::Drop));
+                }
                 if let iced::Event::Window(window::Event::Resized(size)) = &event {
                     return Some(Message::Resized(id, *size));
                 }
@@ -514,6 +529,8 @@ impl App {
         }
     }
     pub fn refresh(&mut self) -> Task<Message> {
+        self.calendar.detail = None;
+        self.calendar.generation += 1;
         self.view_generation += 1;
         let generation = self.view_generation;
         self.expanded.clear();
@@ -795,6 +812,17 @@ impl App {
                 return self.jump_message(crate::month_jump::JumpMessage::Cancel);
             }
         }
+        if let Message::EscapeWindow(id) = &message {
+            if self.categories.open && *id == self.manager {
+                return crate::category_ui::update(self, crate::category_ui::Action::Close);
+            }
+            if self.calendar.detail.is_some()
+                && ((*id == self.manager && !self.calendar.detail_quick)
+                    || (Some(*id) == self.quick_window && self.calendar.detail_quick))
+            {
+                return crate::calendar_ui::update(self, crate::calendar_ui::Action::CloseDetail);
+            }
+        }
         // Background completions are allowed during modals; all unrelated user edits are blocked.
         if self
             .editor
@@ -807,7 +835,7 @@ impl App {
                     | Message::ConfirmDelete
                     | Message::Escape
                     | Message::EscapeWindow(_)
-                    | Message::QuickLoaded(..)
+                    | Message::Calendar(crate::calendar_ui::Action::QuickPage(..))
                     | Message::QuickReady(_)
                     | Message::PopupPositioned(..)
                     | Message::Jump(crate::month_jump::JumpMessage::Ready(_))
@@ -834,6 +862,8 @@ impl App {
             return Task::none();
         }
         match message {
+            Message::Calendar(action) => return crate::calendar_ui::update(self, action),
+            Message::Category(action) => return crate::category_ui::update(self, action),
             Message::McpSetup(action) => {
                 return self.mcp_setup.update(action, self.data_dir.clone())
             }
@@ -934,7 +964,7 @@ impl App {
                     self.quick_date = None;
                     self.quick_generation += 1;
                     self.quick_loading = false;
-                    self.quick_events.clear();
+
                     if self.editor_in_quick {
                         self.editor_in_quick = false;
                         return self.show_manager();
@@ -1090,41 +1120,6 @@ impl App {
             Message::QuickReady(id) if Some(id) == self.quick_window => {
                 return self.place_popup(self.widget.unwrap_or(self.manager), id);
             }
-            Message::QuickLoaded(g, initial, result)
-                if g == self.quick_generation && self.quick_window.is_some() =>
-            {
-                self.quick_loading = false;
-                match result {
-                    Ok(events) => {
-                        self.quick_events = events;
-                        if initial && self.editor.is_none() {
-                            let id = (self.quick_events.len() == 1)
-                                .then(|| self.quick_events[0].id.clone());
-                            if self.quick_events.len() <= 1 {
-                                return self.edit_quick(id);
-                            }
-                        }
-                    }
-                    Err(e) => self.error = e,
-                }
-            }
-            Message::QuickEdit(id) => return self.edit_quick(id),
-            Message::CompleteWidgetEvent(id, completed)
-                if !self.busy && !self.loading && self.editor.is_none() =>
-            {
-                if !self.snapshot.widget_events.iter().any(|e| e.id == id) {
-                    return Task::none();
-                }
-                if let Some(store) = self.store.clone() {
-                    self.busy = true;
-                    self.error.clear();
-                    return worker::job(
-                        store,
-                        move |s| s.set_event_completed(&id, completed),
-                        Message::MutationDone,
-                    );
-                }
-            }
             Message::Project(id) if self.editor.is_none() => {
                 self.project = id;
                 self.page = Page::Projects;
@@ -1148,7 +1143,22 @@ impl App {
                 }
                 return self.open_form(form);
             }
-            Message::EditForm(form) => return self.open_form(form),
+            Message::EditForm(form) if !self.busy && !self.loading => {
+                if form.id.is_some() && !form.hydrated && self.editor.is_none() {
+                    if let Some(store) = self.store.clone() {
+                        self.editor_generation += 1;
+                        let eg = self.editor_generation;
+                        let vg = self.view_generation;
+                        return worker::job(
+                            store,
+                            move |s| worker::hydrate_form(s, form),
+                            move |r| Message::FormLoaded(vg, eg, r),
+                        );
+                    }
+                } else {
+                    return self.open_form(form);
+                }
+            }
             Message::FetchForm(hit) if self.editor.is_none() => {
                 let Some(store) = self.store.clone() else {
                     return Task::none();
@@ -1158,7 +1168,7 @@ impl App {
                 let vg = self.view_generation;
                 return worker::job(
                     store,
-                    move |s| worker::fetch_form(s, &hit),
+                    move |s| worker::fetch_form(s, &hit).and_then(|f| worker::hydrate_form(s, f)),
                     move |r| Message::FormLoaded(vg, eg, r),
                 );
             }
@@ -1184,7 +1194,7 @@ impl App {
                         self.log(&format!(
                             "snapshot generation={generation} entries={} events={} projects={}",
                             snapshot.entries.len(),
-                            snapshot.events.len(),
+                            snapshot.days.iter().map(|d| d.total).sum::<u32>(),
                             snapshot.projects.len()
                         ));
                         self.more = snapshot.entries.len() == 200;
@@ -1250,11 +1260,6 @@ impl App {
                     self.entry_errors.insert(id, e);
                 }
             },
-            Message::ToggleEvent(id) if self.editor.is_none() => {
-                if !self.expanded_events.insert(id.clone()) {
-                    self.expanded_events.remove(&id);
-                }
-            }
             Message::Source(url) => {
                 return Task::perform(
                     async move {
@@ -1272,6 +1277,9 @@ impl App {
                 if let Some(e) = self.editor.as_mut().filter(|e| !e.saving) {
                     match field {
                         Field::Title(v) => e.form.title = v,
+                        Field::Category(v) => e.form.category_id = v,
+                        Field::ShortTitle(v) => e.form.short_title = v,
+                        Field::ProjectShortName(v) => e.form.project_short_name = v,
                         Field::Date(v) => e.form.date = v,
                         Field::Project(v) => e.form.project_id = v,
                         Field::EntryKind(v) => e.form.entry_kind = v,
@@ -1279,7 +1287,7 @@ impl App {
                         Field::Repo(v) => e.form.repo_path = v,
                         Field::Start(v) => e.form.start = v,
                         Field::End(v) => e.form.end = v,
-                        Field::Color(v) => e.form.color = v,
+
                         Field::AllDay(v) => e.form.all_day = v,
                         Field::Completed(v) => e.form.completed = v,
                     }
@@ -1362,7 +1370,7 @@ impl App {
                 match result {
                     Ok(()) => {
                         if let Some(editor) = &self.editor {
-                            if matches!(editor.form.kind, Kind::Event | Kind::Entry) {
+                            if matches!(editor.form.kind, Kind::Event | Kind::Entry | Kind::Task) {
                                 if let Ok(date) =
                                     NaiveDate::parse_from_str(&editor.form.date, "%Y-%m-%d")
                                 {
@@ -1387,13 +1395,22 @@ impl App {
             }
             Message::ToggleTask(id) if !self.busy && self.editor.is_none() => {
                 if let Some(t) = self.snapshot.tasks.iter().find(|t| t.id == id) {
-                    let mut form = Form::task(t.clone());
-                    form.completed = !form.completed;
+                    let completed = !t.completed;
                     let Some(store) = self.store.clone() else {
                         return Task::none();
                     };
                     self.busy = true;
-                    return worker::job(store, move |s| form.save(s), Message::MutationDone);
+                    return worker::job(
+                        store,
+                        move |s| {
+                            s.set_calendar_completed(
+                                timeschedule_core::calendar::CalendarSource::Task,
+                                &id,
+                                completed,
+                            )
+                        },
+                        Message::MutationDone,
+                    );
                 }
             }
             Message::MutationDone(result) => {
@@ -1623,13 +1640,15 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
         App {
             widget_ui: crate::widget_settings::State::new(&Preferences::default(), date),
+            calendar: Default::default(),
+            categories: Default::default(),
             manager: window::Id::unique(),
             manager_size: Size::new(1160.0, 820.0),
             widget: None,
             quick_window: None,
             placing_popups: HashMap::new(),
             quick_date: None,
-            quick_events: Vec::new(),
+
             quick_generation: 0,
             quick_loading: false,
             editor_in_quick: false,
@@ -1649,7 +1668,7 @@ mod tests {
             hovered_week: None,
             project: None,
             expanded: HashSet::new(),
-            expanded_events: HashSet::new(),
+
             record_sync: crate::record_sync::Runner::default(),
             bodies: HashMap::new(),
             entry_errors: HashMap::new(),
@@ -2029,10 +2048,15 @@ mod tests {
             .unwrap();
         let _ = app.update(Message::WidgetDate(date));
         let window = app.quick_window;
-        let _ = app.update(Message::QuickLoaded(
-            app.quick_generation,
-            true,
-            Ok(events.clone()),
+        let loaded =
+            worker::hydrate_form(app.store.as_ref().unwrap(), Form::event(events[0].clone()))
+                .unwrap();
+        app.quick_loading = false;
+        let _ = app.update(crate::calendar_ui::message(
+            crate::calendar_ui::Action::Detail(app.calendar.generation, true, Ok(loaded)),
+        ));
+        let _ = app.update(crate::calendar_ui::message(
+            crate::calendar_ui::Action::EditDetail,
         ));
         assert!(app.editor_in_quick);
         assert_eq!(app.editor.as_ref().unwrap().form.body, original.body);
@@ -2068,7 +2092,9 @@ mod tests {
         let _ = app.update(Message::WidgetDate(date));
         let id = app.quick_window.unwrap();
         let g = app.quick_generation;
-        let _ = app.update(Message::QuickLoaded(g, true, Ok(vec![])));
+        let _ = app.update(crate::calendar_ui::message(
+            crate::calendar_ui::Action::QuickPage(g, true, Ok(Default::default())),
+        ));
         let _ = app.update(Message::Field(Field::Title("한글 초안".into())));
         let _ = app.update(Message::Composition(id, true));
         let _ = app.update(Message::CloseWindow(id));
@@ -2088,7 +2114,9 @@ mod tests {
         let _ = app.update(Message::CloseWindow(id));
         let _ = app.update(Message::Discard);
         assert!(app.quick_window.is_none());
-        let _ = app.update(Message::QuickLoaded(g, true, Ok(vec![])));
+        let _ = app.update(crate::calendar_ui::message(
+            crate::calendar_ui::Action::QuickPage(g, true, Ok(Default::default())),
+        ));
         assert!(app.editor.is_none());
     }
 
@@ -2142,7 +2170,8 @@ mod tests {
             .list_events(&form.date, &form.date)
             .unwrap()
             .remove(0);
-        let _ = app.update(Message::EditForm(Form::event(event)));
+        let form = worker::hydrate_form(app.store.as_ref().unwrap(), Form::event(event)).unwrap();
+        let _ = app.update(Message::EditForm(form));
         assert!(app.editor.as_ref().unwrap().form.completed);
     }
     #[test]

@@ -1,9 +1,10 @@
 use crate::editor::{Form, Kind};
 use std::sync::Arc;
 use timeschedule_core::{
+    calendar::{CalendarDay, Category},
     diary::{EntrySummary, Project, SearchHit},
     evidence::{evidence_draft, Evidence},
-    storage::{CalendarEvent, Note, Storage, Task},
+    storage::{Note, Storage, Task},
 };
 
 #[derive(Clone, Debug)]
@@ -19,24 +20,87 @@ pub struct Scope {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
+    pub days: Vec<CalendarDay>,
+    pub widget_days: Vec<CalendarDay>,
+    pub categories: Vec<Category>,
     pub projects: Vec<Project>,
-    pub events: Vec<CalendarEvent>,
-    pub widget_events: Vec<CalendarEvent>,
-    pub today_events: Vec<CalendarEvent>,
+    pub today: CalendarDay,
     pub tasks: Vec<Task>,
     pub notes: Vec<Note>,
     pub entries: Vec<EntrySummary>,
 }
 pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
+    let days = store.calendar_days(&scope.event_from, &scope.event_to)?;
+    let widget_days = if scope.event_from == scope.widget_from && scope.event_to == scope.widget_to
+    {
+        days.clone()
+    } else {
+        store.calendar_days(&scope.widget_from, &scope.widget_to)?
+    };
+    let today = if let Some(day) = days
+        .iter()
+        .chain(&widget_days)
+        .find(|d| d.date == scope.today)
+    {
+        day.clone()
+    } else if (scope.today >= scope.event_from && scope.today <= scope.event_to)
+        || (scope.today >= scope.widget_from && scope.today <= scope.widget_to)
+    {
+        CalendarDay {
+            date: scope.today.clone(),
+            ..Default::default()
+        }
+    } else {
+        store
+            .calendar_days(&scope.today, &scope.today)?
+            .pop()
+            .unwrap_or_default()
+    };
     Ok(Snapshot {
+        days,
+        widget_days,
+        today,
+        categories: store.list_categories()?,
         projects: store.list_projects()?,
-        events: store.list_events(&scope.event_from, &scope.event_to)?,
-        widget_events: store.list_event_headers(&scope.widget_from, &scope.widget_to)?,
-        today_events: store.list_event_headers(&scope.today, &scope.today)?,
         tasks: store.list_tasks()?,
         notes: store.list_note_headers()?,
         entries: store.list_entries(&scope.from, &scope.to, scope.project.as_deref(), 0)?,
     })
+}
+pub fn hydrate_form(store: &Storage, mut form: Form) -> Result<Form, String> {
+    if let Some(id) = form.id.clone() {
+        match form.kind {
+            Kind::Entry => {
+                let value = store.calendar_entry(&id)?;
+                form = Form::entry(value.entry.clone());
+                form.category_id = value.display.category_id.clone();
+                form.short_title = value.display.short_title.clone();
+                form.entry_version = Some(value);
+            }
+            Kind::Task => {
+                let value = store.task_edit(&id)?;
+                form = Form::task(value.task.clone());
+                form.body = value.details.body.clone();
+                form.all_day = value.details.all_day;
+                form.start = value
+                    .details
+                    .start_time
+                    .clone()
+                    .unwrap_or_else(|| "09:00".into());
+                form.end = value
+                    .details
+                    .end_time
+                    .clone()
+                    .unwrap_or_else(|| "10:00".into());
+                form.task_version = Some(value);
+            }
+            Kind::Project => form.project_short_name = store.project_short_name(&id)?,
+            Kind::Event => form = Form::event(store.get_event(&id)?),
+            Kind::Note => {}
+        }
+    }
+    form.hydrated = true;
+    Ok(form)
 }
 pub fn fetch_form(store: &Storage, hit: &SearchHit) -> Result<Form, String> {
     match hit.kind.as_str() {
@@ -302,8 +366,12 @@ mod tests {
         task.completed = true;
         task.save(&store).unwrap();
         let snapshot = snapshot(&store, &scope()).unwrap();
-        assert_eq!(snapshot.events[0].notes, "일정 원문");
-        assert!(snapshot.widget_events[0].notes.is_empty());
+        assert!(snapshot
+            .days
+            .iter()
+            .flat_map(|d| &d.items)
+            .any(|i| i.title == "검증 일정"));
+        assert_eq!(snapshot.days[0].total, snapshot.widget_days[0].total);
         assert!(snapshot.notes[0].body.is_empty());
         let generated = draft(&store, &scope(), "2026-10-29".into(), false, true).unwrap();
         assert!(generated.body.contains("실패를 재현한 로그"));
@@ -344,10 +412,9 @@ mod tests {
         scope.event_from = "2027-01-01".into();
         scope.event_to = "2027-01-31".into();
         let result = snapshot(&store, &scope).unwrap();
-        assert!(result.widget_events.is_empty());
-        assert!(result.events.is_empty());
-        assert_eq!(result.today_events.len(), 1);
-        assert_eq!(result.today_events[0].title, "오늘 일정");
-        assert!(result.today_events[0].notes.is_empty());
+        assert!(result.widget_days.is_empty());
+        assert!(result.days.is_empty());
+        assert_eq!(result.today.total, 1);
+        assert_eq!(result.today.items[0].title, "오늘 일정");
     }
 }

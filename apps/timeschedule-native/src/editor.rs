@@ -1,5 +1,6 @@
 use iced::widget::text_editor;
 use timeschedule_core::{
+    calendar::{EntryDisplay, EntryEdit, TaskDetails, TaskEdit, RECORD_CATEGORY},
     diary::{Entry, EntryInput, Project, ProjectInput},
     storage::{CalendarEvent, EventInput, Note, NoteInput, Task, TaskInput},
 };
@@ -19,7 +20,7 @@ impl Kind {
             Self::Entry => "기록",
             Self::Project => "프로젝트",
             Self::Note => "메모",
-            Self::Task => "할 일",
+            Self::Task => "일정",
         }
     }
 }
@@ -41,6 +42,12 @@ pub struct Form {
     pub color: String,
     pub completed: bool,
     pub event_version: Option<String>,
+    pub category_id: String,
+    pub short_title: String,
+    pub project_short_name: String,
+    pub entry_version: Option<EntryEdit>,
+    pub task_version: Option<TaskEdit>,
+    pub hydrated: bool,
 }
 impl Form {
     pub fn new(kind: Kind, date: String, project_id: Option<String>) -> Self {
@@ -60,6 +67,12 @@ impl Form {
             color: "sage".into(),
             completed: false,
             event_version: None,
+            category_id: RECORD_CATEGORY.into(),
+            short_title: String::new(),
+            project_short_name: String::new(),
+            entry_version: None,
+            task_version: None,
+            hydrated: false,
         }
     }
     pub fn event(e: CalendarEvent) -> Self {
@@ -142,23 +155,33 @@ impl Form {
                 )
                 .map(|_| ()),
             Kind::Entry => store
-                .save_entry(EntryInput {
-                    id: self.id.clone(),
-                    project_id: self.project_id.clone(),
-                    date: self.date.clone(),
-                    kind: self.entry_kind.clone(),
-                    title: self.title.clone(),
-                    body: self.body.clone(),
-                    source_url: self.source_url.clone(),
-                })
+                .save_calendar_entry(
+                    EntryInput {
+                        id: self.id.clone(),
+                        project_id: self.project_id.clone(),
+                        date: self.date.clone(),
+                        kind: self.entry_kind.clone(),
+                        title: self.title.clone(),
+                        body: self.body.clone(),
+                        source_url: self.source_url.clone(),
+                    },
+                    EntryDisplay {
+                        category_id: self.category_id.clone(),
+                        short_title: self.short_title.clone(),
+                    },
+                    self.entry_version.as_ref(),
+                )
                 .map(|_| ()),
             Kind::Project => store
-                .save_project(ProjectInput {
-                    id: self.id.clone(),
-                    title: self.title.clone(),
-                    description: self.body.clone(),
-                    repo_path: self.repo_path.clone(),
-                })
+                .save_calendar_project(
+                    ProjectInput {
+                        id: self.id.clone(),
+                        title: self.title.clone(),
+                        description: self.body.clone(),
+                        repo_path: self.repo_path.clone(),
+                    },
+                    &self.project_short_name,
+                )
                 .map(|_| ()),
             Kind::Note => store
                 .save_note(NoteInput {
@@ -168,16 +191,25 @@ impl Form {
                 })
                 .map(|_| ()),
             Kind::Task => store
-                .save_task(TaskInput {
-                    id: self.id.clone(),
-                    title: self.title.clone(),
-                    date: if self.date.trim().is_empty() {
-                        None
-                    } else {
-                        Some(self.date.clone())
+                .save_calendar_task(
+                    TaskInput {
+                        id: self.id.clone(),
+                        title: self.title.clone(),
+                        date: if self.date.trim().is_empty() {
+                            None
+                        } else {
+                            Some(self.date.clone())
+                        },
+                        completed: self.completed,
                     },
-                    completed: self.completed,
-                })
+                    TaskDetails {
+                        body: self.body.clone(),
+                        all_day: self.all_day,
+                        start_time: (!self.all_day).then(|| self.start.clone()),
+                        end_time: (!self.all_day).then(|| self.end.clone()),
+                    },
+                    self.task_version.as_ref(),
+                )
                 .map(|_| ()),
         }
     }

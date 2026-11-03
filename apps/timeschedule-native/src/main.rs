@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod app;
+mod calendar_ui;
 mod calendar_viewport;
+mod category_ui;
 mod desktop_widget;
 mod editor;
 mod frozen;
