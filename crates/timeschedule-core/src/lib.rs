@@ -1,3 +1,4 @@
+pub mod calendar;
 pub mod dates;
 pub mod diary;
 pub mod evidence;

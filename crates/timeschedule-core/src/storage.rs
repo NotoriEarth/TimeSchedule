@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 5;
 const MAX_TITLE_LENGTH: usize = 200;
 const MAX_TEXT_LENGTH: usize = 20_000;
 
@@ -121,12 +121,23 @@ impl Storage {
     }
     /// The caller creates the application's data directory before opening this file.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
         let mut connection = Connection::open(path)
             .map_err(|error| format!("Could not open SQLite database: {error}"))?;
         connection
             .busy_timeout(Duration::from_secs(5))
             .map_err(database_error)?;
         // Reject unsupported schemas before changing the database's journal mode.
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(database_error)?;
+        if (1..SCHEMA_VERSION).contains(&version) && path != Path::new(":memory:") {
+            let backup =
+                path.with_extension(format!("pre-v{SCHEMA_VERSION}-{}.db", Uuid::new_v4()));
+            connection
+                .execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
+                .map_err(database_error)?;
+        }
         migrate(&mut connection)?;
         connection
             .execute_batch(
@@ -512,6 +523,12 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
             )
             .map_err(database_error)?;
     }
+    if version < 4 {
+        crate::calendar::migrate(&transaction)?;
+    }
+    if version < 5 {
+        transaction.execute_batch("CREATE INDEX entry_display_category ON entry_display(category_id,entry_id); PRAGMA user_version=5;").map_err(database_error)?;
+    }
     transaction.commit().map_err(database_error)
 }
 
@@ -536,7 +553,7 @@ pub fn validate_date(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_time(value: &str) -> Result<NaiveTime, String> {
+pub(crate) fn validate_time(value: &str) -> Result<NaiveTime, String> {
     let bytes = value.as_bytes();
     if bytes.len() != 5
         || bytes[2] != b':'
@@ -590,7 +607,7 @@ pub(crate) fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-fn next_event_timestamp(previous: Option<&str>) -> String {
+pub(crate) fn next_event_timestamp(previous: Option<&str>) -> String {
     let now = Utc::now();
     let next = previous
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
@@ -628,7 +645,7 @@ fn event_from_row(row: &Row<'_>) -> rusqlite::Result<CalendarEvent> {
     })
 }
 
-fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
+pub(crate) fn task_from_row(row: &Row<'_>) -> rusqlite::Result<Task> {
     Ok(Task {
         id: row.get(0)?,
         title: row.get(1)?,

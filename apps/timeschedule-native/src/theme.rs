@@ -209,21 +209,3 @@ pub fn navigation(theme: &Theme, status: button::Status) -> button::Style {
         ..text_button(theme, status)
     }
 }
-pub fn event_color(p: Colors, category: &str) -> Color {
-    match category {
-        "blue" => p.blue,
-        "amber" => p.amber,
-        "rose" => p.rose,
-        _ => p.green,
-    }
-}
-pub fn event_surface(theme: &Theme, category: &str) -> container::Style {
-    let p = colors(theme);
-    container::Style::default()
-        .background(event_color(p, category).scale_alpha(0.12))
-        .color(p.text)
-        .border(Border {
-            radius: 5.0.into(),
-            ..Default::default()
-        })
-}

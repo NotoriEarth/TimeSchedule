@@ -67,7 +67,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         (Page::Week, Icon::Week, "주간"),
         (Page::Projects, Icon::Folder, "프로젝트"),
         (Page::Records, Icon::Record, "개발 기록"),
-        (Page::Tasks, Icon::Task, "할 일"),
+        (Page::Tasks, Icon::Task, "날짜 미정"),
         (Page::Notes, Icon::Note, "노트"),
     ] {
         navigation = navigation.push(
@@ -218,6 +218,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
                         - Duration::days(app.selected.weekday().num_days_from_monday() as i64 + 1)
                 )
             ),
+            control(
+                "카테고리",
+                crate::category_ui::msg(crate::category_ui::Action::Open)
+            ),
             control("+ 일정", Message::New(Kind::Event, None)).style(theme::primary),
         ]
         .spacing(6)
@@ -314,18 +318,7 @@ pub(crate) fn calendar(app: &App) -> Element<'_, Message> {
         for date in days {
             let date = *date;
             let key = date.to_string();
-            let events: Vec<_> = app
-                .snapshot
-                .events
-                .iter()
-                .filter(|e| e.date == key)
-                .collect();
-            let records = app
-                .snapshot
-                .entries
-                .iter()
-                .filter(|e| e.date == key)
-                .count();
+            let day = app.snapshot.days.iter().find(|d| d.date == key);
             let selected = date == app.selected;
             let outside = date.month() != app.month.month();
             let weekday = date.weekday().num_days_from_sunday();
@@ -334,15 +327,6 @@ pub(crate) fn calendar(app: &App) -> Element<'_, Message> {
                 .and_then(|s| week_after_sunday(s).ok())
                 .is_some_and(|w| date >= w.from && date <= w.to);
             let content = responsive(move |size| {
-                // Reserve the date and overflow summary before choosing how many
-                // chips fit. A short window still shows all six calendar rows.
-                let visible = if size.height >= 96.0 {
-                    2
-                } else if size.height >= 70.0 {
-                    1
-                } else {
-                    0
-                };
                 let label = container(text(date.day().to_string()).size(13))
                     .center_x(27)
                     .center_y(27)
@@ -370,48 +354,18 @@ pub(crate) fn calendar(app: &App) -> Element<'_, Message> {
                                 width: if date == today && !selected { 1.0 } else { 0.0 },
                             })
                     });
-                let mut cell = column![label].spacing(4);
-                for event in events.iter().take(visible) {
-                    let category = event.color.clone();
-                    // Exact times remain in the inspector; the small cell gives
-                    // the title its available width.
-                    let label =
-                        format!("{}{}", if event.completed { "✓ " } else { "" }, event.title);
-                    cell = cell.push(
-                        container(
-                            text(crate::text_layout::fit_label(
-                                &label,
-                                (size.width - 10.0).max(0.0),
-                                10.0,
-                            ))
-                            .size(10)
-                            .wrapping(text::Wrapping::None),
-                        )
-                        .padding([4, 5])
-                        .width(Length::Fill)
-                        .clip(true)
-                        .style(move |t| theme::event_surface(t, &category)),
-                    );
-                }
-                if size.height >= 44.0 && (events.len() > visible || records > 0) {
-                    let mut summary = String::new();
-                    if events.len() > visible {
-                        summary = format!("+{} 일정", events.len() - visible);
-                    }
-                    if records > 0 {
-                        summary.push_str(&format!("  기록 {records}"));
-                    }
-                    cell = cell.push(
-                        text(crate::text_layout::fit_label(
-                            summary.trim(),
-                            size.width,
-                            10.0,
-                        ))
-                        .size(10)
-                        .wrapping(text::Wrapping::None)
-                        .color(p.muted),
-                    );
-                }
+                let cell = column![
+                    label,
+                    crate::calendar_ui::day_items(
+                        app,
+                        day,
+                        size.width,
+                        (size.height - 31.0).max(0.0),
+                        11.0,
+                        false
+                    )
+                ]
+                .spacing(4);
                 cell.into()
             });
             cells = cells.push(
@@ -494,17 +448,6 @@ fn month(app: &App) -> Element<'_, Message> {
     }
 }
 
-fn section<'a>(label: &'static str, action: Message) -> Element<'a, Message> {
-    row![
-        text(label).size(14),
-        space().width(Length::Fill),
-        button(text("+").size(20))
-            .style(theme::text_button)
-            .on_press(action)
-    ]
-    .align_y(Alignment::Center)
-    .into()
-}
 fn date_details(app: &App) -> Column<'_, Message> {
     let key = app.selected.to_string();
     let mut details = column![
@@ -514,64 +457,25 @@ fn date_details(app: &App) -> Column<'_, Message> {
             app.selected.day()
         ))
         .size(26),
-        quiet(format!(
-            "{}요일",
-            WEEKDAYS[app.selected.weekday().num_days_from_sunday() as usize]
-        )),
-        space().height(10),
-        section("일정", Message::New(Kind::Event, Some(key.clone()))),
+        row![
+            control("+ 일정", Message::New(Kind::Event, Some(key.clone()))),
+            control("+ 기록", Message::New(Kind::Entry, Some(key.clone())))
+        ]
+        .spacing(6)
     ]
     .spacing(10);
-    let events: Vec<_> = app
-        .snapshot
-        .events
-        .iter()
-        .filter(|e| e.date == key)
-        .collect();
-    if events.is_empty() {
-        details = details.push(quiet("등록된 일정이 없습니다."));
-    }
-    for event in events {
-        details = details.push(views::event_card(app, event));
-    }
-    details = details.push(space().height(12)).push(section(
-        "할 일",
-        Message::New(Kind::Task, Some(key.clone())),
-    ));
-    let tasks: Vec<_> = app
-        .snapshot
-        .tasks
-        .iter()
-        .filter(|t| t.date.as_deref() == Some(&key))
-        .collect();
-    if tasks.is_empty() {
-        details = details.push(quiet("오늘의 할 일을 추가해 보세요."));
-    }
-    for task in tasks {
-        details = details.push(views::task_card(app, task));
-    }
-    details = details.push(space().height(12)).push(section(
-        "이날의 기록",
-        Message::New(Kind::Entry, Some(key.clone())),
-    ));
-    let records: Vec<_> = app
-        .snapshot
-        .entries
-        .iter()
-        .filter(|e| e.date == key)
-        .collect();
-    if records.is_empty() {
-        details = details.push(quiet(if app.more {
-            "불러온 기록이 없습니다. 더 보기를 확인하세요."
-        } else {
-            "작은 개선을 차곡차곡 기록해 보세요."
-        }));
-    }
-    for entry in records {
-        details = details.push(views::entry_card(app, entry));
-    }
-    if app.more {
-        details = details.push(views::more(app));
+    if let Some(day) = app.snapshot.days.iter().find(|d| d.date == key) {
+        for item in &day.items {
+            details = details.push(crate::calendar_ui::item_view(app, item, 13.0, false));
+        }
+        if day.completed > 0 || day.total > day.items.len() as u32 {
+            details = details.push(control(
+                format!("전체 {}개 · 완료 {}개", day.total, day.completed),
+                Message::WidgetDate(app.selected),
+            ));
+        }
+    } else {
+        details = details.push(quiet("일정과 기록을 추가해 보세요."));
     }
     details
 }

@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "timeschedule-native"
-version = "0.10.1"
+version = "0.12.0"
 dependencies = [
  "axum",
  "base64",
@@ -2501,6 +2501,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "iced",
+ "iced_runtime",
  "iced_tiny_skia",
  "png",
  "raw-window-handle",
@@ -2514,6 +2515,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml_edit",
+ "unicode-segmentation",
  "uuid",
  "windows-sys 0.61.2",
 ]

@@ -2,15 +2,13 @@
 use crate::{
     app::{App, Message, NativeAction},
     month_jump::{JumpField, JumpMessage},
-    text_layout::fit_label_with_font,
     theme,
     widget_appearance::Appearance,
     widget_settings::Change,
 };
 use chrono::{Datelike, Local};
 use iced::widget::{
-    button, checkbox, column, container, mouse_area, responsive, row, scrollable, slider, space,
-    text, Row,
+    button, column, container, mouse_area, responsive, row, scrollable, slider, space, text, Row,
 };
 use iced::{Alignment, Border, Element, Length};
 
@@ -120,9 +118,9 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
     let heading_size = if width < 420.0 { 20 } else { 24 };
     let heading = column![
         text(format!(
-            "{} · 일정 {}개",
+            "{} · 일정·기록 {}개",
             today.format("%Y년 %m월 %d일"),
-            app.snapshot.today_events.len()
+            app.snapshot.today.total
         ))
         .size(11)
         .font(font)
@@ -203,12 +201,7 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
         let mut cells = Row::new().spacing(a.gap).height(Length::Fill);
         for &date in week {
             let key = date.to_string();
-            let events: Vec<_> = app
-                .snapshot
-                .widget_events
-                .iter()
-                .filter(|event| event.date == key)
-                .collect();
+            let day = app.snapshot.widget_days.iter().find(|d| d.date == key);
             let is_today = date == today;
             let outside =
                 !app.preferences.widget.rolling && date.month() != app.widget_month.month();
@@ -252,112 +245,14 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
                 }
                 let mut lines = column![date_row].spacing(CONTENT_GAP);
                 let remaining = (size.height - a.date_height - CONTENT_GAP).max(0.0);
-                let slots = (remaining / a.event_height).floor() as usize;
-                let visible = if events.len() > slots {
-                    ((remaining - SUMMARY_HEIGHT).max(0.0) / a.event_height).floor() as usize
-                } else {
-                    events.len()
-                }
-                .min(50);
-                if visible > 0 {
-                    let mut entries = column![].spacing(0);
-                    for event in events.iter().take(visible) {
-                        let time = if !event.all_day && size.width >= 120.0 {
-                            format!("{}  ", event.start_time.as_deref().unwrap_or(""))
-                        } else {
-                            String::new()
-                        };
-                        let label = format!(
-                            "{}{}{}",
-                            if event.completed { "✓ " } else { "" },
-                            time,
-                            event.title
-                        );
-                        let ink = a.event_color(&event.color);
-                        let completion_enabled = !app.busy && !app.loading && app.editor.is_none();
-                        let completion_id = event.id.clone();
-                        let completed = event.completed;
-                        entries = entries.push(
-                            row![
-                                // Consume even disabled clicks so they cannot
-                                // become a date double-click in the parent.
-                                checkbox(event.completed)
-                                    .size(12)
-                                    .on_toggle(move |value| {
-                                        if completion_enabled {
-                                            Message::CompleteWidgetEvent(
-                                                completion_id.clone(),
-                                                value,
-                                            )
-                                        } else {
-                                            Message::Ignore
-                                        }
-                                    })
-                                    .style(move |theme, status| checkbox::primary(
-                                        theme,
-                                        if completion_enabled {
-                                            status
-                                        } else {
-                                            checkbox::Status::Disabled {
-                                                is_checked: completed,
-                                            }
-                                        }
-                                    )),
-                                container(space().width(2).height(10))
-                                    .style(move |_| container::Style::default().background(ink)),
-                                text(fit_label_with_font(
-                                    &label,
-                                    (size.width - 26.0).max(0.0),
-                                    a.event_size,
-                                    font
-                                ))
-                                .size(a.event_size)
-                                .font(font)
-                                .wrapping(text::Wrapping::None)
-                                .color(
-                                    if event.completed || outside {
-                                        p.muted
-                                    } else {
-                                        p.text
-                                    }
-                                )
-                            ]
-                            .spacing(4)
-                            .height(a.event_height)
-                            .align_y(Alignment::Center),
-                        );
-                    }
-                    // Keep the list and its summary together so the reserved
-                    // summary row has no extra inter-section spacing.
-                    if events.len() > visible {
-                        entries = entries.push(
-                            text(fit_label_with_font(
-                                &format!("+{}개 더", events.len() - visible),
-                                size.width,
-                                10.0,
-                                font,
-                            ))
-                            .size(10)
-                            .font(font)
-                            .height(SUMMARY_HEIGHT)
-                            .color(p.muted),
-                        );
-                    }
-                    lines = lines.push(entries);
-                } else if !events.is_empty() && remaining >= SUMMARY_HEIGHT {
-                    lines = lines.push(
-                        text(fit_label_with_font(
-                            &format!("일정 {}개", events.len()),
-                            size.width,
-                            10.0,
-                            font,
-                        ))
-                        .size(10)
-                        .font(font)
-                        .height(SUMMARY_HEIGHT)
-                        .color(p.muted),
-                    );
-                }
+                lines = lines.push(crate::calendar_ui::day_items(
+                    app,
+                    day,
+                    size.width,
+                    remaining,
+                    a.event_size,
+                    true,
+                ));
                 lines.into()
             });
             cells = cells.push(
