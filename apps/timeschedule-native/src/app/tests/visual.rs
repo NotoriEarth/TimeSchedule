@@ -255,6 +255,11 @@ fn render_calendar_overflow_previews() {
 }
 
 fn run_message(app: &mut App, message: Message) {
+    let task = app.update(message);
+    run_task(app, task);
+}
+
+fn run_task(app: &mut App, task: Task<Message>) {
     use iced::futures::StreamExt;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -262,7 +267,7 @@ fn run_message(app: &mut App, message: Message) {
         .unwrap();
     runtime.block_on(async {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            let mut pending = std::collections::VecDeque::from([app.update(message)]);
+            let mut pending = std::collections::VecDeque::from([task]);
             while let Some(task) = pending.pop_front() {
                 if let Some(mut stream) = iced_runtime::task::into_stream(task) {
                     while let Some(action) = stream.next().await {
@@ -416,7 +421,7 @@ fn category_save_button_reaches_the_store_from_the_real_modal() {
     run_message(&mut app, msg(Action::Open));
     run_message(&mut app, msg(Action::Name("운동".into())));
     run_message(&mut app, msg(Action::Color("#123ABC".into())));
-    click_category_control(&mut app, "저장");
+    click_category_control(&mut app, "카테고리 추가");
     assert!(app.snapshot.categories.iter().any(|c| c.name == "운동"));
 }
 
@@ -429,7 +434,7 @@ fn category_edit_and_new_draft_controls_keep_existing_categories() {
     let count = app.snapshot.categories.len();
     run_message(&mut app, msg(Action::Edit(id.clone())));
     run_message(&mut app, msg(Action::Name("학습 기록".into())));
-    click_category_control(&mut app, "저장");
+    click_category_control(&mut app, "변경 저장");
     assert_eq!(app.snapshot.categories.len(), count);
     assert_eq!(
         app.snapshot
@@ -461,6 +466,10 @@ fn category_edit_and_new_draft_controls_keep_existing_categories() {
 }
 
 fn click_category_control(app: &mut App, label: &str) {
+    click_category_control_at(app, label, 0);
+}
+
+fn click_category_control_at(app: &mut App, label: &str, occurrence: usize) {
     let size = Size::new(800., 620.);
     app.manager_size = size;
     let messages = {
@@ -482,7 +491,8 @@ fn click_category_control(app: &mut App, label: &str) {
         let target = probe
             .0
             .iter()
-            .find(|(s, _)| s == label)
+            .filter(|(s, _)| s == label)
+            .nth(occurrence)
             .expect("button label")
             .1
             .center();
@@ -507,6 +517,367 @@ fn click_category_control(app: &mut App, label: &str) {
     assert!(!messages.is_empty(), "button must dispatch an action");
     for message in messages {
         run_message(app, message);
+    }
+}
+
+fn category_delete_fixture() -> (
+    App,
+    timeschedule_core::calendar::Category,
+    Vec<timeschedule_core::calendar::EntryEdit>,
+) {
+    let mut app = calendar_record_fixture();
+    let s = app.store.as_ref().unwrap().clone();
+    let source = s.save_category(None, "학습", "#123456").unwrap();
+    s.save_category(None, "보관", "#ABCDEF").unwrap();
+    let mut records = Vec::new();
+    for i in 0..3 {
+        let mut form = Form::new(Kind::Entry, app.selected.to_string(), None);
+        form.title = format!("분류 기록{i}");
+        form.body = format!("유지할 원문{i}");
+        form.category_id = source.id.clone();
+        form.save(&s).unwrap();
+    }
+    for head in s.calendar_page(&app.selected.to_string(), 0).unwrap().items {
+        if head.category_id == source.id {
+            records.push(s.calendar_entry(&head.id).unwrap());
+        }
+    }
+    let ids: Vec<_> = s
+        .list_categories()
+        .unwrap()
+        .iter()
+        .map(|c| c.id.clone())
+        .collect();
+    let mut order = ids.clone();
+    order.retain(|id| *id != source.id);
+    order.insert(0, source.id.clone());
+    s.reorder_categories(&ids, &order).unwrap();
+    app.snapshot = worker::snapshot(&s, &app.scope()).unwrap();
+    run_message(
+        &mut app,
+        crate::category_ui::msg(crate::category_ui::Action::Open),
+    );
+    (app, source, records)
+}
+
+#[test]
+fn category_delete_controls_move_records_and_refresh_both_surfaces() {
+    use crate::category_ui::{msg, Action};
+    let (mut app, source, records) = category_delete_fixture();
+    assert_eq!(records.len(), 3);
+    click_category_control(&mut app, "수정");
+    assert_eq!(app.categories.editing.as_ref(), Some(&source.id));
+    click_category_control(&mut app, "카테고리 삭제");
+    assert_eq!(
+        app.categories
+            .delete_preview
+            .as_ref()
+            .unwrap()
+            .entry_ids
+            .len(),
+        3
+    );
+    assert!(app.categories.delete_target.is_none());
+    run_message(&mut app, msg(Action::ConfirmDelete));
+    assert!(app.snapshot.categories.iter().any(|c| c.id == source.id));
+    click_category_control(&mut app, "보관");
+    let target = app.categories.delete_target.as_ref().unwrap().id.clone();
+    click_category_control(&mut app, "이동 후 삭제");
+    assert!(!app.categories.saving);
+    assert!(!app.snapshot.categories.iter().any(|c| c.id == source.id));
+    for old in records {
+        assert_eq!(
+            app.store
+                .as_ref()
+                .unwrap()
+                .calendar_entry(&old.entry.id)
+                .unwrap()
+                .entry,
+            old.entry
+        );
+        for days in [&app.snapshot.days, &app.snapshot.widget_days] {
+            let shown = days
+                .iter()
+                .flat_map(|d| &d.items)
+                .find(|item| item.id == old.entry.id)
+                .unwrap();
+            assert_eq!(shown.category_id, target);
+        }
+    }
+    for element in [
+        crate::shell::calendar(&app),
+        crate::desktop_widget::view(&app),
+    ] {
+        let labels = calendar_texts(element, Size::new(1200., 1200.));
+        assert!(
+            labels.iter().any(|label| label.starts_with("분류 기록")),
+            "{labels:?}"
+        );
+        assert!(labels.iter().any(|label| label == "보관"), "{labels:?}");
+    }
+    assert!(app.categories.notice.contains("3"));
+}
+
+#[test]
+fn category_rename_control_keeps_id() {
+    use crate::category_ui::{msg, Action};
+    let (mut app, source, _) = category_delete_fixture();
+    click_category_control(&mut app, "수정");
+    run_message(&mut app, msg(Action::Name("독서".into())));
+    click_category_control(&mut app, "변경 저장");
+    let current = app
+        .snapshot
+        .categories
+        .iter()
+        .find(|c| c.id == source.id)
+        .unwrap();
+    assert_eq!(current.name, "독서");
+    assert_eq!(current.position, 0);
+    assert_eq!(
+        app.snapshot.categories,
+        app.store.as_ref().unwrap().list_categories().unwrap()
+    );
+}
+
+#[test]
+fn category_delete_cancel_preserves_draft_and_ignores_late_preview() {
+    use crate::category_ui::{msg, Action};
+    let (mut app, source, _) = category_delete_fixture();
+    click_category_control(&mut app, "수정");
+    run_message(&mut app, msg(Action::Name("입력 중".into())));
+    run_message(&mut app, msg(Action::Color("#987654".into())));
+    let task = app.update(msg(Action::RequestDelete));
+    let generation = app.categories.delete_generation;
+    let preview = app
+        .store
+        .as_ref()
+        .unwrap()
+        .preview_category_deletion(&source.id)
+        .unwrap();
+    let manager = app.manager;
+    run_message(&mut app, Message::EscapeWindow(manager));
+    assert!(app.categories.open);
+    assert_eq!(app.categories.name, "입력 중");
+    assert_eq!(app.categories.color, "#987654");
+    run_task(&mut app, task);
+    assert!(app.categories.delete_preview.is_none());
+    run_message(&mut app, Message::EscapeWindow(manager));
+    assert!(!app.categories.open);
+    run_message(&mut app, msg(Action::Open));
+    run_message(
+        &mut app,
+        msg(Action::DeletePreviewed {
+            generation,
+            result: Ok(preview),
+        }),
+    );
+    assert!(app.categories.delete_preview.is_none());
+    assert!(app
+        .snapshot
+        .categories
+        .iter()
+        .any(|c| c.id == source.id && c.name == "학습"));
+}
+
+#[test]
+fn category_delete_duplicate_confirm_writes_once() {
+    use crate::category_ui::{msg, Action};
+    let (mut app, _, _) = category_delete_fixture();
+    click_category_control(&mut app, "수정");
+    click_category_control(&mut app, "카테고리 삭제");
+    click_category_control(&mut app, "보관");
+    let first = app.update(msg(Action::ConfirmDelete));
+    assert!(app.categories.saving);
+    assert_eq!(app.update(msg(Action::ConfirmDelete)).units(), 0);
+    run_task(&mut app, first);
+    assert!(app.categories.error.is_empty());
+    assert!(app.categories.notice.contains("3"));
+}
+
+#[test]
+fn category_delete_preserves_open_record_draft() {
+    let (mut app, _, records) = category_delete_fixture();
+    let mut form = Form::entry(records[0].entry.clone());
+    form.category_id = records[0].display.category_id.clone();
+    form.entry_version = Some(records[0].clone());
+    form.body = "미저장 초안".into();
+    // An editor in another window holds this version while the manager deletes.
+    click_category_control(&mut app, "수정");
+    click_category_control(&mut app, "카테고리 삭제");
+    click_category_control(&mut app, "보관");
+    click_category_control(&mut app, "이동 후 삭제");
+    assert_eq!(form.body, "미저장 초안");
+    assert!(form.save(app.store.as_ref().unwrap()).is_err());
+    form.category_id = timeschedule_core::calendar::RECORD_CATEGORY.into();
+    assert!(form.save(app.store.as_ref().unwrap()).is_err());
+    assert_eq!(
+        app.store
+            .as_ref()
+            .unwrap()
+            .get_entry(&records[0].entry.id)
+            .unwrap()
+            .body,
+        records[0].entry.body
+    );
+}
+
+#[test]
+fn category_delete_stale_target_reloads_without_moving_records() {
+    use crate::category_ui::{msg, Action};
+    let (mut app, source, records) = category_delete_fixture();
+    click_category_control(&mut app, "수정");
+    run_message(&mut app, msg(Action::Name("미저장 분류 이름".into())));
+    click_category_control(&mut app, "카테고리 삭제");
+    click_category_control(&mut app, "보관");
+    let target = app.categories.delete_target.clone().unwrap();
+    app.store
+        .as_ref()
+        .unwrap()
+        .save_category(Some(&target.id), "외부 수정", &target.color)
+        .unwrap();
+    click_category_control(&mut app, "이동 후 삭제");
+    assert!(!app.categories.saving);
+    assert!(app.categories.delete_target.is_none());
+    assert_eq!(
+        app.categories
+            .delete_preview
+            .as_ref()
+            .unwrap()
+            .entry_ids
+            .len(),
+        3
+    );
+    assert!(!app.categories.error.is_empty());
+    assert_eq!(app.categories.name, "미저장 분류 이름");
+    for record in records {
+        assert_eq!(
+            app.store
+                .as_ref()
+                .unwrap()
+                .entry_display(&record.entry.id)
+                .unwrap()
+                .category_id,
+            source.id
+        );
+    }
+    click_category_control(&mut app, "외부 수정");
+    click_category_control(&mut app, "이동 후 삭제");
+    assert!(!app.snapshot.categories.iter().any(|c| c.id == source.id));
+}
+
+#[test]
+fn category_delete_empty_confirm_and_basic_protection_use_real_controls() {
+    use crate::category_ui::{msg, Action};
+    let (mut app, _, _) = category_delete_fixture();
+    let empty = app
+        .snapshot
+        .categories
+        .iter()
+        .find(|c| c.name == "보관")
+        .unwrap()
+        .id
+        .clone();
+    run_message(&mut app, msg(Action::Edit(empty.clone())));
+    click_category_control(&mut app, "카테고리 삭제");
+    assert!(app
+        .categories
+        .delete_preview
+        .as_ref()
+        .unwrap()
+        .entry_ids
+        .is_empty());
+    // The confirmation heading has the same text; click the footer button.
+    click_category_control_at(&mut app, "카테고리 삭제", 1);
+    assert!(!app.snapshot.categories.iter().any(|c| c.id == empty));
+    run_message(
+        &mut app,
+        msg(Action::Edit(
+            timeschedule_core::calendar::RECORD_CATEGORY.into(),
+        )),
+    );
+    let labels = calendar_texts(crate::category_ui::view(&app), Size::new(600., 700.));
+    assert!(labels
+        .iter()
+        .any(|s| s == "기본 카테고리는 삭제할 수 없습니다"));
+    assert!(!labels.iter().any(|s| s == "카테고리 삭제"));
+    run_message(&mut app, msg(Action::Name("기본 기록 새 이름".into())));
+    click_category_control(&mut app, "변경 저장");
+    assert!(app
+        .snapshot
+        .categories
+        .iter()
+        .any(|c| c.id == timeschedule_core::calendar::RECORD_CATEGORY
+            && c.name == "기본 기록 새 이름"));
+}
+
+#[test]
+#[ignore = "manual category delete/rename native renderer previews"]
+fn render_category_delete_rename_previews() {
+    use crate::category_ui::{msg, Action};
+    let output = PathBuf::from(std::env::var_os("TIMESCHEDULE_PREVIEW_DIR").unwrap());
+    std::fs::create_dir_all(&output).unwrap();
+    for (state_name, state) in [("edit", 0), ("move", 1), ("empty", 2), ("basic", 3)] {
+        for (size_name, size) in [
+            ("small", Size::new(800., 620.)),
+            ("wide", Size::new(1160., 820.)),
+        ] {
+            let (mut app, source, _) = category_delete_fixture();
+            let long = "프로젝트 기록과 학습 내용을 함께 관리하는 카테고리 이름";
+            app.store
+                .as_ref()
+                .unwrap()
+                .save_category(Some(&source.id), long, &source.color)
+                .unwrap();
+            app.snapshot = worker::snapshot(app.store.as_ref().unwrap(), &app.scope()).unwrap();
+            let edit_id = if state == 2 {
+                app.snapshot
+                    .categories
+                    .iter()
+                    .find(|c| c.name == "보관")
+                    .unwrap()
+                    .id
+                    .clone()
+            } else if state == 3 {
+                timeschedule_core::calendar::RECORD_CATEGORY.into()
+            } else {
+                source.id.clone()
+            };
+            run_message(&mut app, msg(Action::Edit(edit_id)));
+            if state == 1 || state == 2 {
+                run_message(&mut app, msg(Action::RequestDelete));
+            }
+            if state == 1 {
+                run_message(
+                    &mut app,
+                    msg(Action::DeleteTarget(
+                        timeschedule_core::calendar::RECORD_CATEGORY.into(),
+                    )),
+                );
+            }
+            for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+                app.preferences.theme = mode;
+                app.manager_size = size;
+                let mut element = app.view(app.manager);
+                let mut renderer =
+                    iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+                let mut tree = Tree::new(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                render_scaled_frame(
+                    &app,
+                    &mut element,
+                    &mut tree,
+                    &node,
+                    &mut renderer,
+                    size,
+                    &output.join(format!("{state_name}-{size_name}-{mode:?}.png")),
+                    1.,
+                );
+            }
+        }
     }
 }
 
