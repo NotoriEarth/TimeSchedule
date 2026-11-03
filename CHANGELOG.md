@@ -1,6 +1,6 @@
 # TimeSchedule 버전 이력
 
-현재 소스 버전은 **Rust/Iced 네이티브 0.12.0**이며 대표 실행 파일은 `artifacts/TimeSchedule.exe`이다. 교체 여부는 검증 문서의 전달 결과를 따른다.
+현재 대표 앱은 **Rust/Iced 네이티브 0.12.0**이며 실행 파일은 `artifacts/TimeSchedule.exe`이다.
 
 ## 버전 규칙
 

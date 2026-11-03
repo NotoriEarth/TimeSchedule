@@ -14,7 +14,7 @@ schema 5 이전은 기존 DB 백업(`schedule.pre-v5-<UUID>.db`) 후 카테고�
 
 수동 제외된 `render_category_delete_rename_previews`를 별도로 실행해 800×620/1160×820 × 두 테마 × 수정/기록 이동/빈 분류/기본 보호 16개 이미지를 생성했다. 작은 창의 4가지 상태에서 버튼·본문·긴 이름을 직접 확인했다. 결과는 `.cache/category-delete-previews/`이며 사용자 데이터나 실제 사용자 마우스 입력을 사용하지 않았다. 사용자 환경에서의 체감과 장기 자원 안정성은 아직 확인하지 않았다.
 
-`scripts/build-native.ps1 -Offline`로 최종 native 132개 테스트와 0.12.0 release 빌드를 완료했다. 현재 사용자 0.11.3 앱이 실행 중이므로 게시 스크립트가 대표 EXE 교체를 보류했다. 빌드 결과는 `target/release/timeschedule-native.exe`, 8,886,272 bytes, SHA-256 `38B0194172CD435619325EE2FB45D9AE9BCFE6786E38732C96AE81B7DBCA1B5F`이며 사용자 종료 확인 후 같은 게시 절차로 대표 경로에 교체한다. 앱 강제 종료나 사용자 데이터 이동은 하지 않았다.
+`scripts/build-native.ps1 -Offline`로 최종 native 132개 테스트와 0.12.0 release 빌드를 완료했다. 사용자 저장·완전 종료 확인 후 같은 스크립트로 `artifacts/TimeSchedule.exe`를 교체했다. 8,886,272 bytes, SHA-256 `38B0194172CD435619325EE2FB45D9AE9BCFE6786E38732C96AE81B7DBCA1B5F`이며 빌드 출력과 대표 EXE가 일치한다. 이전 0.11.3은 `artifacts/archive/TimeSchedule-20261103-214639-bff8823e117d4ffc8504a1da66c9c440.exe`에 보관했다. 사용자 앱 강제 종료·데이터 이동·자동 실행은 하지 않았다.
 
 짧은 자원 확인: 합성 DB(기록 2,000·일정 1,000·할일 100·노트 20·프로젝트 10), MCP 비활성, 별도 데이터 폴더, 같은 PC에서 각 6회 측정했다. 0.12.0은 시작 5초 뒤 평균 작업집합 37.98MiB, 전용 커밋 21.34MiB, CPU 1.826%(1코어=100%), 프로세스 1개였다. 0.11.3은 평균 33.74MiB/20.56MiB/0.696%/1개였으나 첫 측정의 CIM 접근 오류로 재실행하여 대기 시간이 더 길었다. 따라서 공정한 성능 개선/퇴행 판정으로 사용하지 않는다. 확인창/취소 후 자원 비교는 Windows 캡처의 두 차례 시간 초과로 수행하지 못했다. 테스트용 두 프로세스만 PID·경로·시작 시각을 검증해 정리했고 사용자 앱은 유지했다. 자료: `.cache/category-delete-runtime/`.
 

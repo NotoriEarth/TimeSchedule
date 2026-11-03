@@ -1,6 +1,6 @@
 # 카테고리 삭제·이름 변경 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking. 기존 작업처럼 본 에이전트가 구현하고 최종 변경은 독립 검토한다. 0.12.0 소스·테스트·빌드를 완료했다. 대표 EXE는 사용자 앱 종료 대기이며 전달 상태는 검증 문서를 따른다.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking. 기존 작업처럼 본 에이전트가 구현하고 최종 변경은 독립 검토한다. 0.12.0 소스·테스트·빌드를 완료했다. 사용자 종료 확인 후 대표 EXE 교체를 완료했으며 전달 상태는 검증 문서를 따른다.
 
 **Goal:** 1번 시안의 수정 화면에서 이름·색상을 변경하고, 사용자가 선택한 분류로 기록을 보존해 옮긴 뒤 카테고리를 삭제한다.
 
@@ -70,11 +70,11 @@
 - [x] **worker·상태 연결:** 미리보기/최종 저장만 worker로 실행한다. 미선택·조회 중·저장 중 확정을 비활성화하고 확인 중 배경 수정·드래그를 막는다. 기존 saving guard는 `Deleted` 완료도 허용한다. 취소/닫기 시 generation을 증가시키고 늦은 조회 결과를 무시하며 관리창을 다시 열어도 generation을 초기화하지 않는다. 오류는 draft를 유지하며 최신 미리보기와 후보를 재조회하고 선택을 비워 재확인한다. 성공 시 `기록 {N}개를 ‘{대상}’으로 옮기고 카테고리를 삭제했습니다` 또는 빈 분류 삭제 안내를 보이고 공통 refresh를 한 번 요청한다.
 - [x] **순서·충돌 회귀:** `category_delete_cancel_preserves_draft_and_ignores_late_preview`에서 취소→늦은 응답→다른 분류 수정, Esc 두 단계와 무저장을 검증한다. `category_delete_duplicate_confirm_writes_once`에서 단일 worker 저장을 검증한다. `category_delete_preserves_open_record_draft`에서 다른 창의 편집 초안은 그대로이며 저장 시 최신 분류 선택/충돌 안내가 나오고 기록이 복제되지 않음을 확인한다. 기존 추가·이름 검증·드래그·공통 편집 회귀도 유지한다.
 - [x] **통과·가독성 확인:** `. scripts/toolchain.ps1; cargo test --workspace --locked --offline` 전체 통과. 기존 native 렌더 경로로 800×620/1160×820, 두 테마, 32자 이름·긴 대상 이름·빈 분류/기록 있는 분류/기본 분류 화면을 생성해 버튼·선택·오류가 잘리지 않는지 확인한다. 실제 사용자 마우스 체감과 자동 검증 결과를 구분해 기록한다.
-- [ ] **빌드·리뷰·전달:** 버전 파일·검증 문서를 갱신하고 `scripts/build-native.ps1 -Offline`로 대표 EXE를 준비한다. 최종 변경을 독립 검토하고 지적을 보완한다. 사용자 앱이 실행 중이면 강제 종료하지 않고 교체 대기를 알린다. 정상 교체 후 파일 버전/해시를 검증한다. 시작·확인창·종료 후 idle 자원을 같은 조건으로 비교하고 새 폴링/지속 redraw가 없음을 확인하되 측정하지 않은 값을 주장하지 않는다.
+- [x] **빌드·리뷰·전달:** 버전 파일·검증 문서를 갱신하고 `scripts/build-native.ps1 -Offline`로 대표 EXE를 준비한다. 최종 변경을 독립 검토하고 지적을 보완한다. 사용자 앱이 실행 중이면 강제 종료하지 않고 교체 대기를 알린다. 정상 교체 후 파일 버전/해시를 검증한다. 시작·확인창·종료 후 idle 자원을 같은 조건으로 비교하고 새 폴링/지속 redraw가 없음을 확인하되 측정하지 않은 값을 주장하지 않는다.
 - [ ] **커밋·PR·기록:** UI/검증/버전 변경을 `feat: add category deletion and rename controls`로 커밋하고 관련 브랜치를 push, PR을 실제 완료 결과로 갱신한다. 소스 변경·커밋이 생긴 이 구현 작업에 한해서 `docs/project-records.md`의 기준·완료 커밋 전달 절차를 적용한다. 삭제 기능 작업의 기존 state가 있으면 같은 workId를 유지하고 새 작업이면 새 UUID를 사용한다. 앞선 추가 버튼 수정 기록을 임의로 재사용하지 않는다. 테스트 방법·실행 파일·PR을 전달하고 사용자의 새 테스트 승인 전 머지하지 않는다.
 
 ## 실행 결과와 남은 전달
 
 - 최종 전체 197개 통과, 8개 기본 제외. 독립 검토 P2 1건은 실제 창 간 경합 회귀 2개의 실패→통과로 보완했다.
-- 새 실행 파일 빌드 완료. 사용자 0.11.3 앱 실행 중이므로 대표 EXE 교체만 대기한다. 머지하지 않았다.
+- 새 실행 파일 빌드와 사용자 종료 확인 후 대표 EXE 교체를 완료했다. 이전 버전을 보관했고 머지하지 않았다.
 - 확인창/취소 후 자원 측정은 Windows 캡처 두 차례 시간 초과로 미검증이다. 시작 후 짧은 측정만 수행했으며 동등 조건의 성능 비교로 해석하지 않는다.
