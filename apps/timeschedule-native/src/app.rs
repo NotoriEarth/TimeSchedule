@@ -849,6 +849,12 @@ impl App {
                     | Message::RecordsDrained(_)
                     | Message::NativeDone(..)
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Finished(_))
+                    | Message::Category(
+                        crate::category_ui::Action::Deleted(_)
+                            | crate::category_ui::Action::DeletePreviewed { .. }
+                            | crate::category_ui::Action::Saved(_)
+                            | crate::category_ui::Action::Reordered(_)
+                    )
                     | Message::DisplayObserverReady(..)
                     | Message::PrefsDone(_)
                     | Message::Loaded(..)

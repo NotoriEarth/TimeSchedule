@@ -766,6 +766,100 @@ fn category_delete_stale_target_reloads_without_moving_records() {
 }
 
 #[test]
+fn category_preview_completion_survives_quick_editor_confirmation() {
+    assert_category_completion_survives_quick_editor_confirmation(false);
+}
+
+#[test]
+fn category_delete_completion_survives_quick_editor_confirmation() {
+    assert_category_completion_survives_quick_editor_confirmation(true);
+}
+
+fn assert_category_completion_survives_quick_editor_confirmation(deleting: bool) {
+    use crate::category_ui::{msg, Action};
+    let (mut app, source, records) = category_delete_fixture();
+    click_category_control(&mut app, "수정");
+    // Open a real existing-record editor in the quick window while the
+    // category manager remains mounted in the main window.
+    app.quick_window = Some(window::Id::unique());
+    app.quick_date = Some(app.selected);
+    let mut form = Form::entry(records[0].entry.clone());
+    form.category_id = source.id.clone();
+    form.entry_version = Some(records[0].clone());
+    app.calendar.detail = Some(form);
+    app.calendar.detail_quick = true;
+    run_message(
+        &mut app,
+        crate::calendar_ui::message(crate::calendar_ui::Action::EditDetail),
+    );
+    assert!(app.editor_in_quick);
+    assert!(app.categories.open);
+    let pending = if deleting {
+        run_message(&mut app, msg(Action::RequestDelete));
+        run_message(
+            &mut app,
+            msg(Action::DeleteTarget(
+                timeschedule_core::calendar::RECORD_CATEGORY.into(),
+            )),
+        );
+        app.update(msg(Action::ConfirmDelete))
+    } else {
+        app.update(msg(Action::RequestDelete))
+    };
+    run_message(&mut app, Message::Delete);
+    assert_eq!(
+        app.editor.as_ref().unwrap().confirmation,
+        Some(Confirmation::Delete)
+    );
+    run_task(&mut app, pending);
+    assert_eq!(
+        app.editor.as_ref().unwrap().confirmation,
+        Some(Confirmation::Delete)
+    );
+    assert_eq!(
+        app.editor.as_ref().unwrap().form.body,
+        records[0].entry.body
+    );
+    assert!(
+        !app.categories.delete_loading,
+        "preview completion was lost"
+    );
+    assert!(!app.categories.saving, "delete completion was lost");
+    if deleting {
+        assert!(!app.snapshot.categories.iter().any(|c| c.id == source.id));
+        let original = &records[0].entry;
+        assert_eq!(
+            app.store.as_ref().unwrap().get_entry(&original.id).unwrap(),
+            *original
+        );
+        assert!(app
+            .editor
+            .as_ref()
+            .unwrap()
+            .form
+            .save(app.store.as_ref().unwrap())
+            .is_err());
+    } else {
+        assert!(app.categories.delete_preview.is_some());
+    }
+    // User actions stay blocked by the other confirmation.
+    let old_target = app.categories.delete_target.clone();
+    run_message(
+        &mut app,
+        msg(Action::DeleteTarget(
+            timeschedule_core::calendar::RECORD_CATEGORY.into(),
+        )),
+    );
+    assert_eq!(app.categories.delete_target, old_target);
+    run_message(&mut app, Message::Keep);
+    run_message(&mut app, msg(Action::Close));
+    if app.categories.open {
+        run_message(&mut app, msg(Action::Close));
+    }
+    assert!(!app.categories.open);
+}
+
+#[test]
 fn category_delete_empty_confirm_and_basic_protection_use_real_controls() {
     use crate::category_ui::{msg, Action};
     let (mut app, _, _) = category_delete_fixture();
