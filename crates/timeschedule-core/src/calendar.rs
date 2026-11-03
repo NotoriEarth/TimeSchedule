@@ -6,6 +6,8 @@ use crate::{
 use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use std::collections::{BTreeMap, HashSet};
+mod category_lifecycle;
+pub use category_lifecycle::CategoryDeletePreview;
 
 pub const SCHEDULE_CATEGORY: &str = "00000000-0000-4000-8000-000000000001";
 pub const RECORD_CATEGORY: &str = "00000000-0000-4000-8000-000000000002";
@@ -232,43 +234,11 @@ impl Storage {
         name: &str,
         color: &str,
     ) -> Result<Category, String> {
-        let name = line(name, "카테고리 이름", 32)?;
-        if name.is_empty() {
-            return Err("카테고리 이름을 입력해 주세요.".into());
-        }
-        if color.len() != 7
-            || !color.starts_with('#')
-            || !color[1..].bytes().all(|b| b.is_ascii_hexdigit())
-        {
-            return Err("색상은 #RRGGBB 형식으로 입력해 주세요.".into());
-        }
         let mut c = self.connection()?;
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        let all = categories(&tx)?;
-        if all
-            .iter()
-            .any(|v| Some(v.id.as_str()) != id && v.name.to_lowercase() == name.to_lowercase())
-        {
-            return Err("같은 이름의 카테고리가 있습니다.".into());
-        }
-        let position = match id {
-            Some(id) => {
-                all.iter()
-                    .find(|v| v.id == id)
-                    .ok_or("카테고리를 찾지 못했습니다.")?
-                    .position
-            }
-            None => all.len() as u32,
-        };
-        let value = Category {
-            id: record_id(id.map(str::to_owned))?,
-            name,
-            color: color.to_ascii_uppercase(),
-            position,
-        };
-        tx.execute("INSERT INTO calendar_categories VALUES(?1,?2,?3,?4) ON CONFLICT(id) DO UPDATE SET name=excluded.name,color=excluded.color",params![value.id,value.name,value.color,value.position]).map_err(database_error)?;
+        let value = category_lifecycle::write_category(&tx, id, name, color)?;
         tx.commit().map_err(database_error)?;
         Ok(value)
     }

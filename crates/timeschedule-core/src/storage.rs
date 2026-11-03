@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const MAX_TITLE_LENGTH: usize = 200;
 const MAX_TEXT_LENGTH: usize = 20_000;
 
@@ -132,7 +132,8 @@ impl Storage {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(database_error)?;
         if (1..SCHEMA_VERSION).contains(&version) && path != Path::new(":memory:") {
-            let backup = path.with_extension(format!("pre-v4-{}.db", Uuid::new_v4()));
+            let backup =
+                path.with_extension(format!("pre-v{SCHEMA_VERSION}-{}.db", Uuid::new_v4()));
             connection
                 .execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])
                 .map_err(database_error)?;
@@ -524,6 +525,9 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
     }
     if version < 4 {
         crate::calendar::migrate(&transaction)?;
+    }
+    if version < 5 {
+        transaction.execute_batch("CREATE INDEX entry_display_category ON entry_display(category_id,entry_id); PRAGMA user_version=5;").map_err(database_error)?;
     }
     transaction.commit().map_err(database_error)
 }

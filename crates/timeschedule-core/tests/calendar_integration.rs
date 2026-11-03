@@ -286,7 +286,7 @@ fn migration_keeps_backup_and_category_settings_survive_restart() {
     let backups = std::fs::read_dir(&dir)
         .unwrap()
         .map(|p| p.unwrap().path())
-        .filter(|p| p.to_string_lossy().contains("pre-v4-"))
+        .filter(|p| p.to_string_lossy().contains("pre-v5-"))
         .collect::<Vec<_>>();
     assert_eq!(backups.len(), 1);
     {
@@ -347,4 +347,324 @@ fn completed_section_opens_directly_after_many_pending_records() {
             .len(),
         50
     );
+}
+
+#[test]
+fn category_delete_moves_all_records_and_preserves_content() {
+    use timeschedule_core::project_records::ProjectRecord;
+    let s = Storage::open(":memory:").unwrap();
+    let source = s.save_category(None, "학습", "#123456").unwrap();
+    let target = s.save_category(None, "보관", "#ABCDEF").unwrap();
+    let record = ProjectRecord {
+        schema_version: 1,
+        work_id: uuid::Uuid::new_v4().to_string(),
+        revision: 1,
+        project_title: "전달 프로젝트".into(),
+        repo_path: std::env::current_dir().unwrap().to_string_lossy().into(),
+        date: "2026-10-31".into(),
+        kind: "development".into(),
+        title: "자동 전달".into(),
+        summary: "보존할 원문".into(),
+        space_url: "https://chatgpt.com/space/page_6ae1b18a44f08191ad2a86276972476c".into(),
+        status: "verification_pending".into(),
+        delivery_state: String::new(),
+        detail: String::new(),
+    };
+    let receipt = s.apply_project_record(&record).unwrap();
+    let imported = s.get_entry(receipt.entry_id.as_ref().unwrap()).unwrap();
+    let mut originals = Vec::new();
+    for (i, date) in ["2026-10-31", "2026-11-03", "2027-01-01"]
+        .iter()
+        .enumerate()
+    {
+        let mut input = entry(date, &format!("원문{i}"));
+        if i == 0 {
+            input.id = Some(imported.id.clone());
+            input.project_id = imported.project_id.clone();
+            input.title = imported.title.clone();
+            input.body = imported.body.clone();
+            input.kind = imported.kind.clone();
+            input.source_url = imported.source_url.clone();
+        } else {
+            input.project_id = Some(
+                s.save_project(ProjectInput {
+                    id: None,
+                    title: format!("프로젝트{i}"),
+                    description: "설명".into(),
+                    repo_path: String::new(),
+                })
+                .unwrap()
+                .id,
+            );
+        }
+        originals.push(
+            s.save_calendar_entry(
+                input,
+                EntryDisplay {
+                    category_id: source.id.clone(),
+                    short_title: format!("별칭{i}"),
+                },
+                None,
+            )
+            .unwrap(),
+        );
+    }
+    let projects = serde_json::to_value(s.list_projects().unwrap()).unwrap();
+    let preview = s.preview_category_deletion(&source.id).unwrap();
+    assert_eq!(preview.entry_ids.len(), 3);
+    assert_eq!(s.delete_category(&preview, Some(&target)).unwrap(), 3);
+    assert_eq!(
+        serde_json::to_value(s.list_projects().unwrap()).unwrap(),
+        projects
+    );
+    let categories = s.list_categories().unwrap();
+    assert!(!categories.iter().any(|c| c.id == source.id));
+    assert_eq!(
+        categories.iter().map(|c| c.position).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    for old in originals {
+        let current = s.calendar_entry(&old.entry.id).unwrap();
+        assert_eq!(current.entry, old.entry);
+        assert_eq!(current.display.short_title, old.display.short_title);
+        assert_eq!(current.display.category_id, target.id);
+    }
+    let repeated = s.apply_project_record(&record).unwrap();
+    assert_eq!(repeated.entry_id, receipt.entry_id);
+    assert_eq!(repeated.outcome, "unchanged");
+    assert_eq!(
+        s.entry_display(repeated.entry_id.as_ref().unwrap())
+            .unwrap()
+            .category_id,
+        target.id
+    );
+}
+
+#[test]
+fn category_delete_empty_and_protected() {
+    let s = Storage::open(":memory:").unwrap();
+    for (id, name) in [(SCHEDULE_CATEGORY, "약속"), (RECORD_CATEGORY, "일지")] {
+        let category = s.save_category(Some(id), name, "#123456").unwrap();
+        assert!(s.preview_category_deletion(id).is_err());
+        assert!(s
+            .delete_category(
+                &CategoryDeletePreview {
+                    category,
+                    entry_ids: vec![]
+                },
+                None
+            )
+            .is_err());
+    }
+    let source = s.save_category(None, "비어 있음", "#123456").unwrap();
+    let preview = s.preview_category_deletion(&source.id).unwrap();
+    assert!(preview.entry_ids.is_empty());
+    assert_eq!(s.delete_category(&preview, None).unwrap(), 0);
+    assert!(s.delete_category(&preview, None).is_err());
+    assert_eq!(s.list_categories().unwrap().len(), 2);
+}
+
+#[test]
+fn category_delete_rejects_stale_membership_and_targets() {
+    let s = Storage::open(":memory:").unwrap();
+    let source = s.save_category(None, "학습", "#123456").unwrap();
+    let target = s.save_category(None, "보관", "#ABCDEF").unwrap();
+    let schedule = s
+        .list_categories()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.id == SCHEDULE_CATEGORY)
+        .unwrap();
+    let empty = s.preview_category_deletion(&source.id).unwrap();
+    let first = s
+        .save_calendar_entry(
+            entry("2026-11-03", "첫째"),
+            EntryDisplay {
+                category_id: source.id.clone(),
+                short_title: "짧게".into(),
+            },
+            None,
+        )
+        .unwrap();
+    assert!(s.delete_category(&empty, None).is_err());
+    let expected = s.preview_category_deletion(&source.id).unwrap();
+    for invalid in [None, Some(&source), Some(&schedule)] {
+        assert!(s.delete_category(&expected, invalid).is_err());
+    }
+    // Same count, different membership must not bypass the confirmation.
+    s.save_calendar_entry(
+        EntryInput {
+            id: Some(first.entry.id.clone()),
+            ..entry("2026-11-03", "첫째")
+        },
+        EntryDisplay {
+            category_id: target.id.clone(),
+            short_title: "짧게".into(),
+        },
+        None,
+    )
+    .unwrap();
+    s.save_calendar_entry(
+        entry("2027-01-01", "둘째"),
+        EntryDisplay {
+            category_id: source.id.clone(),
+            short_title: String::new(),
+        },
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        s.preview_category_deletion(&source.id)
+            .unwrap()
+            .entry_ids
+            .len(),
+        1
+    );
+    assert!(s.delete_category(&expected, Some(&target)).is_err());
+    let current = s.preview_category_deletion(&source.id).unwrap();
+    let renamed = s
+        .save_category(Some(&target.id), "이름 변경", "#ABCDEF")
+        .unwrap();
+    assert!(s.delete_category(&current, Some(&target)).is_err());
+    s.save_category(Some(&source.id), "원본 변경", "#123456")
+        .unwrap();
+    assert!(s.delete_category(&current, Some(&renamed)).is_err());
+    let gone = s.save_category(None, "삭제될 대상", "#ABCDEF").unwrap();
+    s.delete_category(&s.preview_category_deletion(&gone.id).unwrap(), None)
+        .unwrap();
+    let current = s.preview_category_deletion(&source.id).unwrap();
+    assert!(s.delete_category(&current, Some(&gone)).is_err());
+    assert_eq!(s.preview_category_deletion(&source.id).unwrap(), current);
+}
+
+#[test]
+fn category_update_checked_rejects_stale() {
+    let s = Storage::open(":memory:").unwrap();
+    let source = s.save_category(None, "학습", "#123456").unwrap();
+    for name in ["".to_owned(), "일정".into(), "가".repeat(33)] {
+        assert!(s
+            .update_category_checked(&source, &name, "#ABCDEF")
+            .is_err());
+    }
+    let renamed = s
+        .update_category_checked(&source, "독서", "#abcdef")
+        .unwrap();
+    assert_eq!(renamed.id, source.id);
+    assert_eq!(renamed.position, source.position);
+    assert_eq!(renamed.name, "독서");
+    assert_eq!(renamed.color, "#ABCDEF");
+    assert!(s
+        .update_category_checked(&source, "오래된 수정", "#123456")
+        .is_err());
+    s.delete_category(&s.preview_category_deletion(&source.id).unwrap(), None)
+        .unwrap();
+    assert!(s
+        .update_category_checked(&renamed, "되살리기", "#123456")
+        .is_err());
+    assert_eq!(s.list_categories().unwrap().len(), 2);
+}
+
+#[test]
+fn category_delete_rolls_back_after_move_failure() {
+    let dir = std::env::temp_dir().join(format!(
+        "timeschedule-category-delete-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.db");
+    {
+        let s = Storage::open(&path).unwrap();
+        let source = s.save_category(None, "학습", "#123456").unwrap();
+        let target = s.save_category(None, "보관", "#ABCDEF").unwrap();
+        let record = s
+            .save_calendar_entry(
+                entry("2026-11-03", "보존"),
+                EntryDisplay {
+                    category_id: source.id.clone(),
+                    short_title: "별칭".into(),
+                },
+                None,
+            )
+            .unwrap();
+        let before = s.list_categories().unwrap();
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute_batch("CREATE TRIGGER reject_category_delete BEFORE DELETE ON calendar_categories BEGIN SELECT RAISE(ABORT,'test failure'); END;").unwrap();
+        assert!(s
+            .delete_category(
+                &s.preview_category_deletion(&source.id).unwrap(),
+                Some(&target)
+            )
+            .is_err());
+        assert_eq!(s.list_categories().unwrap(), before);
+        assert_eq!(s.calendar_entry(&record.entry.id).unwrap(), record);
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn category_schema_v5_preserves_v4_data() {
+    let dir =
+        std::env::temp_dir().join(format!("timeschedule-category-v5-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("test.db");
+    let (source, record) = {
+        let s = Storage::open(&path).unwrap();
+        let source = s.save_category(None, "이전 분류", "#123456").unwrap();
+        let record = s
+            .save_calendar_entry(
+                entry("2026-11-03", "원문"),
+                EntryDisplay {
+                    category_id: source.id.clone(),
+                    short_title: "별칭".into(),
+                },
+                None,
+            )
+            .unwrap();
+        (source, record)
+    };
+    {
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute_batch("DROP INDEX IF EXISTS entry_display_category; PRAGMA user_version=4;")
+            .unwrap();
+    }
+    {
+        let s = Storage::open(&path).unwrap();
+        assert_eq!(s.calendar_entry(&record.entry.id).unwrap(), record);
+        assert!(s.list_categories().unwrap().contains(&source));
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            raw.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap(),
+            5
+        );
+        let query_plan: String = raw.query_row("EXPLAIN QUERY PLAN SELECT entry_id FROM entry_display WHERE category_id=?1 ORDER BY entry_id", [&source.id], |r| r.get(3)).unwrap();
+        assert!(
+            query_plan.contains("entry_display_category"),
+            "{query_plan}"
+        );
+        let backups = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|v| v.unwrap().path())
+            .filter(|p| p.to_string_lossy().contains("pre-v5-"))
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        let backup = rusqlite::Connection::open(&backups[0]).unwrap();
+        assert_eq!(
+            backup
+                .query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            backup
+                .query_row::<String, _, _>(
+                    "SELECT short_title FROM entry_display WHERE entry_id=?1",
+                    [&record.entry.id],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            "별칭"
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }
