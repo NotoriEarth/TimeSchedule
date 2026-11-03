@@ -1,13 +1,22 @@
 [workspace]
 members = ["crates/timeschedule-core", "crates/timeschedule-desktop", "apps/timeschedule-native"]
-exclude = ["src-tauri", "experiments/rust-ui-spike", "vendor/softbuffer"]
+exclude = ["src-tauri", "experiments/rust-ui-spike", "vendor/softbuffer", "vendor/iced_tiny_skia"]
 resolver = "2"
 
 [patch.crates-io]
 softbuffer = { path = "vendor/softbuffer" }
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }
 
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+
+# Rasterization is on the UI thread. Favor speed for these existing CPU-renderer
+# crates while keeping the rest of the application optimized for binary size.
+[profile.release.package.tiny-skia]
+opt-level = 3
+
+[profile.release.package.iced_tiny_skia]
+opt-level = 3

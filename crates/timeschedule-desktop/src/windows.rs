@@ -1827,6 +1827,9 @@ mod native {
         // It does not inspect, automate, or change Explorer or the real desktop.
         #[cfg_attr(test, test)]
         pub fn verify_layered_child_fixture() {
+            // Match the real app's DPI context before creating fixture HWNDs.
+            // A DPI-unaware test window virtualizes coordinates at 125%/150%.
+            let _fixture_dpi = DpiGuard::enter(-4).unwrap();
             let suffix = format!("{}_{}", unsafe { GetCurrentProcessId() }, unsafe {
                 GetCurrentThreadId()
             });

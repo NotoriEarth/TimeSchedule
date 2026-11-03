@@ -3,6 +3,9 @@ use super::*;
 use iced::advanced::{graphics::Viewport, layout, mouse, renderer, widget::Tree, Renderer};
 use iced::{Point, Rectangle};
 
+#[path = "scroll_latency.rs"]
+mod scroll_latency;
+
 #[derive(Default)]
 struct SettingsProbe {
     set_scroll: Option<f32>,

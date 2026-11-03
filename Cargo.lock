@@ -982,8 +982,6 @@ dependencies = [
 [[package]]
 name = "iced_tiny_skia"
 version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c267596d742714b1853cc10c3983a367762816fc4836bd3b79f76ce76787d6f8"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -2493,13 +2491,14 @@ dependencies = [
 
 [[package]]
 name = "timeschedule-native"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "axum",
  "chrono",
  "hyper",
  "hyper-util",
  "iced",
+ "iced_tiny_skia",
  "png",
  "raw-window-handle",
  "rmcp",
