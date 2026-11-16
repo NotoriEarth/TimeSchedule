@@ -304,6 +304,30 @@ fn unlocked_widget_resize_grip_covers_no_cell_text() {
 }
 
 #[test]
+fn short_unlocked_widget_still_shows_a_line_per_cell() {
+    // A six-week month in a short widget with small text: the grip's room
+    // must come out of the scrollable minimum, not out of the cells.
+    for locked in [true, false] {
+        let mut app = fixture();
+        app.widget_attached = true;
+        app.preferences.widget_locked = locked;
+        app.preferences.widget.event_size = 9;
+        app.widget_month = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+        assert_eq!(app.widget_days().len(), 42, "May 2026 spans six weeks");
+        let store = app.store.clone().unwrap();
+        let mut form = Form::new(Kind::Event, "2026-05-15".into(), None);
+        form.title = "회의".into();
+        form.save(&store).unwrap();
+        app.snapshot = worker::snapshot(&store, &app.scope()).unwrap();
+        let labels = calendar_texts(crate::desktop_widget::view(&app), Size::new(960., 360.));
+        assert!(
+            labels.iter().any(|s| s == "회의"),
+            "locked={locked}: {labels:?}"
+        );
+    }
+}
+
+#[test]
 fn day_cell_text_stays_inside_cell() {
     let mut app = overflowing_calendar_fixture(5);
     let mut day = selected_day(&app).clone();

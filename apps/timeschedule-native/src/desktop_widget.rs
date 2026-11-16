@@ -73,7 +73,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         let minimum = (a.date_height + CONTENT_GAP + SUMMARY_HEIGHT + a.padding * 2.0)
             * rows as f32
             + a.gap * rows as f32
-            + if width < 560.0 { 116.0 } else { 86.0 };
+            + if width < 560.0 { 116.0 } else { 86.0 }
+            // The grip's room and the 6px body spacing before it come out of
+            // the scrollable minimum, never out of the cells.
+            + if app.preferences.widget_locked {
+                0.0
+            } else {
+                GRIP_ROOM + 6.0
+            };
         let height = (size.height - 16.0).max(minimum);
         let base: Element<'_, Message> = container(
             scrollable(content(app, width).height(height))
