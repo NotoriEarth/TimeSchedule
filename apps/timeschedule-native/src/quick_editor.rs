@@ -9,7 +9,9 @@ use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{window, Element, Length, Size, Task};
 
 impl App {
-    pub(crate) fn open_quick(&mut self, date: NaiveDate) -> Task<Message> {
+    /// Open the day window for `date`, placed over `source` (the widget or
+    /// the diary window it was opened from).
+    pub(crate) fn open_quick(&mut self, date: NaiveDate, source: window::Id) -> Task<Message> {
         if self.editor.is_some() {
             self.notice = "작성 중인 내용을 저장하거나 닫은 뒤 다른 일정을 선택하세요.".into();
             return if self.editor_in_quick {
@@ -19,6 +21,7 @@ impl App {
             };
         }
         self.quick_date = Some(date);
+        self.quick_source = Some(source);
         self.calendar.quick = Default::default();
         self.calendar.offset = 0;
         self.calendar.show_completed = false;
@@ -30,7 +33,7 @@ impl App {
 
         self.error.clear();
         let open = if let Some(id) = self.quick_window {
-            self.place_popup(self.widget.unwrap_or(self.manager), id)
+            self.place_popup(source, id)
         } else {
             let (id, open) = window::open(window::Settings {
                 size: crate::views::EDITOR_SIZE,

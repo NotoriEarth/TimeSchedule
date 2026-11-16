@@ -327,6 +327,91 @@ fn short_unlocked_widget_still_shows_a_line_per_cell() {
     }
 }
 
+fn click_text(mut element: Element<'_, Message>, size: Size, target: Rectangle) -> Vec<Message> {
+    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, size),
+    );
+    let bounds = Rectangle::new(Point::ORIGIN, size);
+    let mut messages = Vec::new();
+    for press in [true, false] {
+        let event = iced::Event::Mouse(if press {
+            mouse::Event::ButtonPressed(mouse::Button::Left)
+        } else {
+            mouse::Event::ButtonReleased(mouse::Button::Left)
+        });
+        element.as_widget_mut().update(
+            &mut tree,
+            &event,
+            layout::Layout::new(&node),
+            mouse::Cursor::Available(target.center()),
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut messages),
+            &bounds,
+        );
+    }
+    messages
+}
+
+#[test]
+fn day_cell_summary_opens_the_day_from_its_own_window() {
+    let mut app = overflowing_calendar_fixture(5);
+    app.preferences.widget.line_gap = 0;
+    let day = selected_day(&app);
+    let date = app.selected;
+    let rest = day.items[2..]
+        .iter()
+        .map(|i| i.title.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let size = Size::new(240., 45.);
+    for widget in [false, true] {
+        let summary = calendar_text_bounds(
+            crate::calendar_ui::day_items(&app, Some(day), 240., 45., 11., widget),
+            size,
+        )
+        .into_iter()
+        .find(|(s, _)| s == &rest)
+        .expect("summary line")
+        .1;
+        let messages = click_text(
+            crate::calendar_ui::day_items(&app, Some(day), 240., 45., 11., widget),
+            size,
+            summary,
+        );
+        if widget {
+            assert!(
+                matches!(&messages[..], [Message::WidgetDate(d)] if *d == date),
+                "{messages:?}"
+            );
+        } else {
+            assert!(
+                matches!(&messages[..], [Message::ManagerDate(d)] if *d == date),
+                "{messages:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn day_window_is_placed_over_the_window_it_was_opened_from() {
+    let mut app = fixture();
+    let widget = window::Id::unique();
+    app.widget = Some(widget);
+    let date = app.selected;
+    let _ = app.update(Message::ManagerDate(date));
+    assert_eq!(app.quick_source, Some(app.manager));
+    // Reopening the same day window from the other side moves it there.
+    let _ = app.update(Message::WidgetDate(date));
+    assert_eq!(app.quick_source, Some(widget));
+    let _ = app.update(Message::ManagerDate(date));
+    assert_eq!(app.quick_source, Some(app.manager));
+}
+
 #[test]
 fn day_cell_text_stays_inside_cell() {
     let mut app = overflowing_calendar_fixture(5);

@@ -272,7 +272,7 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
         if day.completed > 0 || day.total > day.items.len() as u32 {
             items = items.push(control(
                 format!("전체 {}개 · 완료 {}개", day.total, day.completed),
-                Message::WidgetDate(date),
+                Message::ManagerDate(date),
             ));
         }
     } else {

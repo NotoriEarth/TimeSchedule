@@ -88,7 +88,7 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
                 && date.is_some()
                 && (app.quick_window.is_none() || app.quick_date != date)
             {
-                app.open_quick(date.unwrap())
+                app.open_quick(date.unwrap(), app.widget.unwrap_or(app.manager))
             } else {
                 Task::none()
             };

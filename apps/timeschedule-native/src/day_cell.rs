@@ -147,7 +147,11 @@ pub fn view<'a>(
             .padding(0)
             .height(style.line)
             .style(theme::text_button)
-            .on_press(Message::WidgetDate(date)),
+            .on_press(if widget {
+                Message::WidgetDate(date)
+            } else {
+                Message::ManagerDate(date)
+            }),
         );
     }
     cell.into()
