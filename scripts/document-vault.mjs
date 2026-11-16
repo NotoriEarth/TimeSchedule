@@ -39,7 +39,8 @@ const atomicJson = (file, value) => atomicWrite(file, JSON.stringify(value, null
 
 async function withLock(directory, action) {
   fs.mkdirSync(directory, { recursive: true });
-  const root = fs.realpathSync(directory);
+  // Native resolution expands 8.3 short names, so every spelling shares one lock.
+  const root = fs.realpathSync.native(directory);
   const identity = hash(process.platform === 'win32' ? root.toLowerCase() : root);
   const server = createServer(socket => socket.destroy());
   const address = process.platform === 'win32' ? { path: `\\\\.\\pipe\\timeschedule-vault-${identity}`, exclusive: true }

@@ -28,10 +28,14 @@ export function developmentEvidence(repoPath, evidence, projectRoot) {
   const selected = [...new Set(paths)].sort();
   if (!selected.some(p => DEVELOPMENT.test(p) && !DOCUMENT.test(p))) return skip('no_development_changes');
   try {
-    const repo = fs.realpathSync(repoPath);
+    // The native resolver expands Windows 8.3 short names (C:\Users\RUNNER~1\...)
+    // to the long form Git reports; the JS one keeps them, so the same repository
+    // would compare unequal and every record would be skipped.
+    const canonical = value => fs.realpathSync.native(value);
+    const repo = canonical(repoPath);
     const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
-    if (!samePath(repo, fs.realpathSync(projectRoot))
-        || !samePath(repo, fs.realpathSync(git(repo, 'rev-parse', '--show-toplevel').trim()))) return skip('wrong_repository');
+    if (!samePath(repo, canonical(projectRoot))
+        || !samePath(repo, canonical(git(repo, 'rev-parse', '--show-toplevel').trim()))) return skip('wrong_repository');
     for (const sha of [base, head]) if (git(repo, 'cat-file', '-t', sha).trim() !== 'commit') return skip('invalid_git_changes');
     git(repo, 'merge-base', '--is-ancestor', base, head);
     const changed = new Set(git(repo, 'diff', '--name-only', '-z', '--no-renames', '--no-ext-diff', base, head, '--').split('\0').filter(Boolean));

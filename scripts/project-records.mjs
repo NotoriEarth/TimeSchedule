@@ -22,7 +22,7 @@ function text(value, name, max) {
 function normalizeSource(input, projectRoot = PROJECT_ROOT) {
   if (!input || !UUID.test(input.workId)) throw new Error('고정된 UUID workId가 필요합니다. 같은 작업의 갱신에는 같은 ID를 사용하세요.');
   const repoPath = text(input.repoPath, 'repoPath', 2000);
-  if (!path.isAbsolute(repoPath) || fs.realpathSync(repoPath).toLowerCase() !== fs.realpathSync(projectRoot).toLowerCase()) throw new Error('현재 설정된 TimeSchedule 저장소의 기록만 처리합니다.');
+  if (!path.isAbsolute(repoPath) || fs.realpathSync.native(repoPath).toLowerCase() !== fs.realpathSync.native(projectRoot).toLowerCase()) throw new Error('현재 설정된 TimeSchedule 저장소의 기록만 처리합니다.');
   const date = text(input.date, 'date', 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number(date.slice(0, 4)) < 1 || new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date) throw new Error('실제 YYYY-MM-DD 날짜가 필요합니다.');
   if (!Object.hasOwn(LABELS, input.status)) throw new Error('지원하지 않는 작업 상태입니다.');
@@ -34,7 +34,7 @@ function normalizeSource(input, projectRoot = PROJECT_ROOT) {
   // Extract whole paragraphs, including their caveats. No free-form second
   // summary can invent a cause, change a number, or drop half a paragraph.
   if (!diarySummary.split(/\n{2,}/).every(p => paragraphs.includes(p))) throw new Error('다이어리 요약은 한계를 포함한 원문 문단을 그대로 골라 주세요.');
-  return { workId: input.workId, projectTitle: text(input.projectTitle, '프로젝트 제목', 200), repoPath: fs.realpathSync(repoPath), date,
+  return { workId: input.workId, projectTitle: text(input.projectTitle, '프로젝트 제목', 200), repoPath: fs.realpathSync.native(repoPath), date,
     kind: input.kind, title: text(input.title, '기록 제목', 200), status: input.status, detailedMarkdown, diarySummary, parentPageId: PARENT_PAGE_ID };
 }
 function atomicJson(file, value) {
@@ -73,7 +73,9 @@ function upgradeJob(job) {
 }
 async function locked(stateDir, action) {
   fs.mkdirSync(stateDir, { recursive: true });
-  const identity = sha(fs.realpathSync(stateDir).toLowerCase());
+  // Native resolution expands 8.3 short names, so every spelling of one folder
+  // shares one lock.
+  const identity = sha(fs.realpathSync.native(stateDir).toLowerCase());
   // An OS-owned named pipe disappears on process exit: no stale PID marker or
   // check/unlink race. The loopback fallback is only for non-Windows tests.
   const address = process.platform === 'win32'

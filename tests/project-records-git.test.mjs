@@ -6,6 +6,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { prepare, sync, status, PARENT_PAGE_ID } from '../scripts/project-records.mjs';
 import { gitFixture } from './helpers/record-git-fixture.mjs';
+import { developmentEvidence } from '../scripts/project-records-git.mjs';
+import { execFileSync } from 'node:child_process';
 
 function setup(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'timeschedule-git-records-'));
@@ -182,4 +184,18 @@ test('legacy schema-v1 publishing is normalized before exclusion and later re-pr
   let recoveryOnly;
   await sync({ ...f, importer: async r => saved(r), publisher: async (j, o) => { recoveryOnly = o.recoverOnly; return published(j); } });
   assert.equal(recoveryOnly, true);
+});
+
+// Windows can hand the script a short 8.3 path (GitHub's runner temp folder is
+// C:\Users\RUNNER~1\...), while Git reports the long one. Both name the same repo.
+test('a short Windows path to the repository is the same repository', { skip: process.platform !== 'win32' }, async t => {
+  const f = setup(t);
+  const script = `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${f.repo.replaceAll("'", "''")}').ShortPath`;
+  const short = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true }).trim();
+  if (short.toLowerCase() === f.repo.toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
+  assert.deepEqual(developmentEvidence(short, f.gitChanges, short), { eligible: true, gitChanges: f.gitChanges });
+  assert.deepEqual(developmentEvidence(short, f.gitChanges, f.repo), { eligible: true, gitChanges: f.gitChanges });
+  const prepared = await prepare(input(f), { ...f, projectRoot: short });
+  assert.equal(prepared.skipped, undefined, JSON.stringify(prepared));
+  assert.equal(prepared.revision, 1);
 });
