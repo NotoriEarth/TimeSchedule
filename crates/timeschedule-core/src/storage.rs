@@ -1,12 +1,12 @@
 use chrono::{Datelike, NaiveDate, NaiveTime, SecondsFormat, Utc};
-use rusqlite::{params, Connection, Row, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const MAX_TITLE_LENGTH: usize = 200;
 const MAX_TEXT_LENGTH: usize = 20_000;
 
@@ -75,9 +75,14 @@ pub struct NoteInput {
     pub body: String,
 }
 
-/// One SQLite connection shared by the manager and widget command handlers.
+/// One SQLite connection shared by the manager and widget command handlers, plus a
+/// read-only one for global search.
 pub struct Storage {
     connection: Mutex<Connection>,
+    /// A slow short-query scan on its own connection does not hold up saves or screen
+    /// refreshes: WAL readers never wait for the writer. `None` for `:memory:`, which
+    /// is private to a single connection.
+    search: Option<Mutex<Connection>>,
 }
 
 impl Storage {
@@ -144,8 +149,25 @@ impl Storage {
                 "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;",
             )
             .map_err(database_error)?;
+        let search = if path == Path::new(":memory:") {
+            None
+        } else {
+            let reader = Connection::open_with_flags(
+                path,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|error| format!("Could not open SQLite database: {error}"))?;
+            reader
+                .busy_timeout(Duration::from_secs(5))
+                .map_err(database_error)?;
+            reader
+                .execute_batch("PRAGMA query_only = ON;")
+                .map_err(database_error)?;
+            Some(Mutex::new(reader))
+        };
         Ok(Self {
             connection: Mutex::new(connection),
+            search,
         })
     }
 
@@ -444,9 +466,24 @@ impl Storage {
             .lock()
             .map_err(|_| "Database access was interrupted. Please restart the application.".into())
     }
+
+    /// The connection global search reads through.
+    pub(crate) fn search_connection(&self) -> Result<MutexGuard<'_, Connection>, String> {
+        match &self.search {
+            Some(search) => search.lock().map_err(|_| {
+                "Database access was interrupted. Please restart the application.".into()
+            }),
+            None => self.connection(),
+        }
+    }
 }
 
 fn migrate(connection: &mut Connection) -> Result<(), String> {
+    migrate_to(connection, SCHEMA_VERSION)
+}
+
+/// Applies the schema steps up to `target`. Tests stop early to build old databases.
+pub(crate) fn migrate_to(connection: &mut Connection, target: i64) -> Result<(), String> {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(database_error)?;
@@ -456,7 +493,7 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
     if version > SCHEMA_VERSION {
         return Err(format!("This database uses schema version {version}, which is newer than this application supports ({SCHEMA_VERSION})."));
     }
-    if version == 0 {
+    if version == 0 && target >= 1 {
         transaction.execute_batch(
             "CREATE TABLE events (
                 id TEXT PRIMARY KEY NOT NULL,
@@ -489,7 +526,7 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
             PRAGMA user_version = 1;"
         ).map_err(database_error)?;
     }
-    if version < 2 {
+    if version < 2 && target >= 2 {
         transaction.execute_batch(
             "CREATE TABLE projects (
                 id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL,
@@ -506,9 +543,9 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
             CREATE INDEX diary_project_date ON diary_entries(project_id, date);
             PRAGMA user_version = 2;"
         ).map_err(database_error)?;
-        crate::diary::create_search_index(&transaction)?;
+        crate::search::create_v2(&transaction)?;
     }
-    if version < 3 {
+    if version < 3 && target >= 3 {
         // Deliberately no FK: retaining this receipt also preserves a user's
         // deletion when an external delivery is retried later.
         transaction
@@ -523,11 +560,14 @@ fn migrate(connection: &mut Connection) -> Result<(), String> {
             )
             .map_err(database_error)?;
     }
-    if version < 4 {
+    if version < 4 && target >= 4 {
         crate::calendar::migrate(&transaction)?;
     }
-    if version < 5 {
+    if version < 5 && target >= 5 {
         transaction.execute_batch("CREATE INDEX entry_display_category ON entry_display(category_id,entry_id); PRAGMA user_version=5;").map_err(database_error)?;
+    }
+    if version < 6 && target >= 6 {
+        crate::search::migrate_v6(&transaction)?;
     }
     transaction.commit().map_err(database_error)
 }

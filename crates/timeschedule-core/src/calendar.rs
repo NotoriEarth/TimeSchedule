@@ -107,18 +107,7 @@ pub(crate) fn migrate(c: &Connection) -> Result<(), String> {
         params![SCHEDULE_CATEGORY, RECORD_CATEGORY],
     )
     .map_err(database_error)?;
-    // Both old clients updating a task and native detail edits retain the full search text.
-    c.execute_batch("DROP TRIGGER tasks_search_update;
-        CREATE TRIGGER tasks_search_update AFTER UPDATE ON tasks BEGIN
-          DELETE FROM diary_search WHERE rowid=old.rowid*5+1;
-          INSERT INTO diary_search(rowid,kind,id,title,body,date,project_id,updated_at) VALUES(new.rowid*5+1,'task',new.id,new.title,COALESCE((SELECT body FROM task_details WHERE task_id=new.id),''),new.date,NULL,new.updated_at);
-        END;
-        CREATE TRIGGER task_details_search_insert AFTER INSERT ON task_details BEGIN
-          UPDATE diary_search SET body=new.body WHERE kind='task' AND id=new.task_id;
-        END;
-        CREATE TRIGGER task_details_search_update AFTER UPDATE ON task_details BEGIN
-          UPDATE diary_search SET body=new.body WHERE kind='task' AND id=new.task_id;
-        END;").map_err(database_error)
+    crate::search::task_details_v4(c)
 }
 
 fn line(value: &str, label: &str, max: usize) -> Result<String, String> {

@@ -2,7 +2,7 @@ use crate::storage::{
     database_error, record_id, require_changed, timestamp, validate_date, validate_id,
     validate_text, validated_title, Storage,
 };
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Row};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
@@ -81,43 +81,6 @@ pub struct GitCommit {
     hash: String,
     date: String,
     message: String,
-}
-
-/// Trigrams index literal Korean substrings of three or more characters. Short queries
-/// fall back to a bounded-result scan; neither path returns full bodies to the WebView.
-pub(crate) fn create_search_index(connection: &Connection) -> Result<(), String> {
-    connection.execute_batch("CREATE VIRTUAL TABLE diary_search USING fts5(kind UNINDEXED, id UNINDEXED, title, body, date UNINDEXED, project_id UNINDEXED, updated_at UNINDEXED, tokenize='trigram');").map_err(database_error)?;
-    for (offset, (table, kind, body, date, project)) in [
-        ("events", "event", "notes", "date", "NULL"),
-        ("tasks", "task", "''", "date", "NULL"),
-        ("notes", "note", "body", "NULL", "NULL"),
-        ("projects", "project", "description", "NULL", "id"),
-        ("diary_entries", "entry", "body", "date", "project_id"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let expr = |field: &str| {
-            if field == "NULL" || field == "''" {
-                field.to_string()
-            } else {
-                format!("new.{field}")
-            }
-        };
-        let values = format!(
-            "new.rowid*5+{offset}, '{kind}', new.id, new.title, {}, {}, {}, new.updated_at",
-            expr(body),
-            expr(date),
-            expr(project)
-        );
-        connection.execute_batch(&format!(
-            "INSERT INTO diary_search(rowid,kind,id,title,body,date,project_id,updated_at) SELECT rowid*5+{offset},'{kind}',id,title,{body},{date},{project},updated_at FROM {table};
-             CREATE TRIGGER {table}_search_insert AFTER INSERT ON {table} BEGIN INSERT INTO diary_search(rowid,kind,id,title,body,date,project_id,updated_at) VALUES ({values}); END;
-             CREATE TRIGGER {table}_search_delete AFTER DELETE ON {table} BEGIN DELETE FROM diary_search WHERE rowid=old.rowid*5+{offset}; END;
-             CREATE TRIGGER {table}_search_update AFTER UPDATE ON {table} BEGIN DELETE FROM diary_search WHERE rowid=old.rowid*5+{offset}; INSERT INTO diary_search(rowid,kind,id,title,body,date,project_id,updated_at) VALUES ({values}); END;"
-        )).map_err(database_error)?;
-    }
-    Ok(())
 }
 
 fn project_row(row: &Row<'_>) -> rusqlite::Result<Project> {
@@ -259,37 +222,6 @@ impl Storage {
     }
     pub fn delete_entry(&self, id: &str) -> Result<(), String> {
         self.delete("DELETE FROM diary_entries WHERE id=?1", "기록", id)
-    }
-    pub fn search_diary(&self, query: &str, limit: u32) -> Result<Vec<SearchHit>, String> {
-        let query = query.trim();
-        if query.is_empty() {
-            return Ok(vec![]);
-        }
-        validate_text(query, "검색어", 200)?;
-        let indexed = query.chars().count() >= 3;
-        let needle = if indexed {
-            format!("\"{}\"", query.replace('"', "\"\""))
-        } else {
-            query.to_string()
-        };
-        let c = self.connection()?;
-        let sql=format!("SELECT id,kind,title,substr(body,1,160),date,project_id FROM diary_search WHERE {} ORDER BY updated_at DESC,id LIMIT ?2", if indexed { "diary_search MATCH ?1" } else { "instr(lower(title),lower(?1))>0 OR instr(lower(body),lower(?1))>0" });
-        let mut q = c.prepare(&sql).map_err(database_error)?;
-        let rows = q
-            .query_map(params![needle, limit.clamp(1, 50)], |r| {
-                Ok(SearchHit {
-                    id: r.get(0)?,
-                    kind: r.get(1)?,
-                    title: r.get(2)?,
-                    excerpt: r.get(3)?,
-                    date: r.get(4)?,
-                    project_id: r.get(5)?,
-                })
-            })
-            .map_err(database_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        Ok(rows)
     }
     pub fn import_git(&self, project_id: &str) -> Result<ImportResult, String> {
         validate_id(project_id)?;
