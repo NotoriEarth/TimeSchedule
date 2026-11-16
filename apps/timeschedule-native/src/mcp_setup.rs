@@ -109,12 +109,14 @@ impl std::fmt::Debug for Plan {
 
 /// Encoded PowerShell avoids cmd.exe expansion of %, &, quotes and Unicode paths.
 /// Only paths/arguments are encoded; this is not credential encryption.
-pub fn helper_command(exe: &Path, dir: &Path) -> Result<String, String> {
+pub fn helper_command(exe: &Path, dir: &Path, endpoint: &str) -> Result<String, String> {
+    // The helper releases the token only to this exact endpoint (digits-only port, no quoting).
+    crate::mcp_connection::endpoint(endpoint)?;
     let literal = |p: &Path| -> Result<String, String> {
         let s = p.to_str().ok_or("경로를 문자열로 읽을 수 없습니다.")?;
         Ok(format!("'{}'", s.replace('\'', "''")))
     };
-    let script = format!("$ErrorActionPreference='Stop'; & {} --mcp-auth-headers --data-dir {} | Out-String; exit $LASTEXITCODE", literal(exe)?, literal(dir)?);
+    let script = format!("$ErrorActionPreference='Stop'; & {} --mcp-auth-headers --data-dir {} --endpoint '{endpoint}' | Out-String; exit $LASTEXITCODE", literal(exe)?, literal(dir)?);
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     Ok(format!(
         "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {}",
@@ -156,7 +158,7 @@ pub fn prepare(
     let source = std::str::from_utf8(original.as_deref().unwrap_or_default())
         .map_err(|_| "설정 파일은 UTF-8 형식이어야 합니다.")?
         .trim_start_matches('\u{feff}');
-    let helper = helper_command(exe, dir)?;
+    let helper = helper_command(exe, dir, endpoint)?;
     let desired = match client {
         Client::Codex | Client::ChatGptDesktop => {
             json!({"url": endpoint, "http_headers_helper":helper})
@@ -439,6 +441,26 @@ fn write_backup(_: &Path, _: &[u8], _: &std::fs::File) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::Value;
+    #[test]
+    fn helper_command_passes_the_registered_endpoint_to_the_helper() {
+        let exe = Path::new("C:\\app\\TimeSchedule.exe");
+        let dir = Path::new("C:\\data");
+        let command = helper_command(exe, dir, "http://127.0.0.1:40123/mcp").unwrap();
+        let encoded = command.rsplit(' ').next().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let units: Vec<u16> = bytes
+            .chunks(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        let script = String::from_utf16(&units).unwrap();
+        assert!(
+            script.contains("--endpoint 'http://127.0.0.1:40123/mcp'"),
+            "{script}"
+        );
+        assert!(helper_command(exe, dir, "http://example.com:39281/mcp").is_err());
+    }
     #[test]
     fn chatgpt_desktop_shares_codex_registration_without_rewriting() {
         let chatgpt = Client::ALL

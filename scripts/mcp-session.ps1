@@ -31,7 +31,22 @@ if ($PersistToken) {
     Write-Host 'Saved token to your Windows user environment (not encrypted there). Sign out/in, then restart Codex to inherit it.'
 }
 if ($Status) {
-    $mcpHeaders = @{ Authorization = 'Bearer ' + $mcpToken; Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = '2025-11-25' }
+    # mcp-status.json can outlive a crashed app, so another process may own this port.
+    # Send the token only after the listener proves it already holds it (HMAC over a
+    # fresh challenge and this host; the token itself is not transmitted).
+    $mcpProven = $false
+    try {
+        $mcpHost = '127.0.0.1:' + $mcpUri.Port
+        $mcpChallenge = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
+        $mcpHmac = [Security.Cryptography.HMACSHA256]::new([Text.Encoding]::UTF8.GetBytes($mcpToken))
+        try {
+            $mcpExpected = -join ($mcpHmac.ComputeHash([Text.Encoding]::UTF8.GetBytes("TimeSchedule MCP server proof v1`n$mcpHost`n$mcpChallenge")) | ForEach-Object { $_.ToString('x2') })
+        } finally { $mcpHmac.Dispose() }
+        $mcpAnswer = Invoke-RestMethod -Uri ('http://' + $mcpHost + '/proof') -Method Get -Headers @{ 'TimeSchedule-Challenge' = $mcpChallenge } -MaximumRedirection 0 -TimeoutSec 3
+        $mcpProven = ([string]$mcpAnswer -ceq $mcpExpected)
+    } catch { $mcpProven = $false }
+    if (-not $mcpProven) { throw 'Could not confirm that TimeSchedule 0.13.1 or later is the app listening on this port. The credential was not sent. Start TimeSchedule and try again.' }
+    $mcpHeaders =@{ Authorization = 'Bearer ' + $mcpToken; Accept = 'application/json, text/event-stream'; 'MCP-Protocol-Version' = '2025-11-25' }
     $mcpInit = @{ jsonrpc = '2.0'; id = 1; method = 'initialize'; params = @{ protocolVersion = '2025-11-25'; capabilities = @{}; clientInfo = @{ name = 'TimeSchedule setup'; version = '1' } } } | ConvertTo-Json -Depth 8 -Compress
     try {
         $mcpReply = Invoke-RestMethod -Uri $mcpEndpoint -Method Post -Headers $mcpHeaders -ContentType 'application/json' -Body $mcpInit -MaximumRedirection 0 -TimeoutSec 12

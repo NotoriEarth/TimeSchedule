@@ -11,7 +11,7 @@ use timeschedule_core::storage::EventInput;
 use timeschedule_core::storage::Storage;
 #[path = "mcp_server.rs"]
 mod server;
-pub(crate) use server::read_token;
+pub(crate) use server::{proof, read_token, CHALLENGE_HEADER};
 
 pub struct LocalMcp {
     server: Option<server::Server>,
