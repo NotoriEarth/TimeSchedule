@@ -2,7 +2,7 @@ use super::*;
 use axum::{
     body::Body,
     extract::State,
-    http::{Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     Router,
@@ -74,12 +74,17 @@ impl Server {
         );
         let guard = Arc::new(Guard {
             token: format!("Bearer {token}"),
+            secret: token,
             host: address.to_string(),
             slots: tokio::sync::Semaphore::new(8),
         });
         let router = Router::new()
             .route_service("/mcp", service)
-            .layer(middleware::from_fn_with_state(guard, protect));
+            .layer(middleware::from_fn_with_state(guard.clone(), protect))
+            // Added after the token layer: a client asks for this proof before it
+            // sends the token, so the route cannot itself require the token.
+            .route("/proof", axum::routing::get(prove))
+            .with_state(guard);
         let shutdown = cancel.clone();
         let thread = std::thread::Builder::new()
             .name("calendar-mcp".into())
@@ -155,15 +160,47 @@ impl Drop for Server {
 
 struct Guard {
     token: String,
+    secret: String,
     host: String,
     slots: tokio::sync::Semaphore,
 }
+/// Exactly this listener's Host and no browser Origin (DNS-rebinding defence).
+fn addressed_locally(guard: &Guard, headers: &HeaderMap) -> bool {
+    headers.get_all("host").iter().count() == 1
+        && headers.get("host").and_then(|v| v.to_str().ok()) == Some(guard.host.as_str())
+        && !headers.contains_key("origin")
+}
+
+pub(crate) const CHALLENGE_HEADER: &str = "timeschedule-challenge";
+/// What a listener on `host` that holds `token` answers to `challenge`. The
+/// token never travels, and binding the host stops another port from relaying
+/// the genuine server's answer.
+pub(crate) fn proof(token: &str, host: &str, challenge: &str) -> Result<String, String> {
+    let message = format!("TimeSchedule MCP server proof v1\n{host}\n{challenge}");
+    let mac = hmac_sha256(token.as_bytes(), message.as_bytes())?;
+    Ok(mac.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+async fn prove(State(guard): State<Arc<Guard>>, headers: HeaderMap) -> Response {
+    if !addressed_locally(&guard, &headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let mut challenges = headers.get_all(CHALLENGE_HEADER).iter();
+    let challenge = match (challenges.next(), challenges.next()) {
+        (Some(value), None) => value.to_str().ok(),
+        _ => None,
+    }
+    .filter(|v| v.len() == 64 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+    let Some(challenge) = challenge else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    match proof(&guard.secret, &guard.host, challenge) {
+        Ok(value) => ([("cache-control", "no-store")], value).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
 async fn protect(State(guard): State<Arc<Guard>>, request: Request<Body>, next: Next) -> Response {
     let headers = request.headers();
-    if headers.get_all("host").iter().count() != 1
-        || headers.get("host").and_then(|v| v.to_str().ok()) != Some(&guard.host)
-        || headers.contains_key("origin")
-    {
+    if !addressed_locally(&guard, headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let authenticated = headers.get_all("authorization").iter().count() == 1
@@ -295,6 +332,32 @@ fn protect_token(_: &[u8], _: bool) -> Result<Vec<u8>, String> {
     Err("MCP 인증 저장은 Windows에서 지원됩니다.".into())
 }
 
+#[cfg(windows)]
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<[u8; 32], String> {
+    use windows_sys::Win32::Security::Cryptography::{BCryptHash, BCRYPT_HMAC_SHA256_ALG_HANDLE};
+    let mut output = [0u8; 32];
+    // One-shot CNG HMAC through the built-in pseudo-handle: nothing to open or free.
+    let status = unsafe {
+        BCryptHash(
+            BCRYPT_HMAC_SHA256_ALG_HANDLE,
+            key.as_ptr(),
+            key.len() as u32,
+            data.as_ptr(),
+            data.len() as u32,
+            output.as_mut_ptr(),
+            output.len() as u32,
+        )
+    };
+    if status != 0 {
+        return Err("MCP 서버 확인값 계산 실패".into());
+    }
+    Ok(output)
+}
+#[cfg(not(windows))]
+fn hmac_sha256(_: &[u8], _: &[u8]) -> Result<[u8; 32], String> {
+    Err("MCP 서버 확인은 Windows에서 지원됩니다.".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,7 +387,7 @@ mod tests {
             json!({"endpoint":endpoint}).to_string(),
         )
         .unwrap();
-        let helper = crate::mcp_setup::helper_command(&exe, &dir).unwrap();
+        let helper = crate::mcp_setup::helper_command(&exe, &dir, &endpoint).unwrap();
         let mut parts = helper.split_whitespace();
         let header_output = Command::new(parts.next().unwrap())
             .args(parts)
@@ -496,6 +559,419 @@ mod tests {
     }
     fn auth() -> String {
         format!("Authorization: Bearer {TOKEN}\r\nMCP-Protocol-Version: 2025-11-25\r\n")
+    }
+    /// A local listener that is not TimeSchedule. It records every request it
+    /// receives and answers each one with 200 and the body `reply` returns for it.
+    fn impostor(
+        reply: impl Fn(&str) -> String + Send + 'static,
+    ) -> (SocketAddr, Arc<std::sync::Mutex<String>>) {
+        impostor_raw(move |request| {
+            let body = reply(request);
+            format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+        })
+    }
+    /// Like `impostor`, but `reply` returns the whole HTTP response.
+    fn impostor_raw(
+        reply: impl Fn(&str) -> String + Send + 'static,
+    ) -> (SocketAddr, Arc<std::sync::Mutex<String>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let record = seen.clone();
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { break };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0u8; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match socket.read(&mut chunk) {
+                        Ok(n) if n > 0 => request.extend_from_slice(&chunk[..n]),
+                        _ => break,
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).into_owned();
+                record.lock().unwrap().push_str(&request);
+                let _ = socket.write_all(reply(&request).as_bytes());
+            }
+        });
+        (address, seen)
+    }
+    /// A listener that holds `secret`, so it passes the proof, and serves further
+    /// requests on the same connection. Every other request is answered with the
+    /// raw response `reply` returns, and the log records whether the connection
+    /// it arrived on had proven itself first.
+    fn proving_listener(
+        secret: &str,
+        reply: impl Fn(&str) -> String + Send + 'static,
+    ) -> (SocketAddr, Arc<std::sync::Mutex<Vec<bool>>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = log.clone();
+        let secret = secret.to_string();
+        std::thread::spawn(move || {
+            for socket in listener.incoming() {
+                let Ok(mut socket) = socket else { break };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(20)))
+                    .unwrap();
+                let mut proved = false;
+                loop {
+                    let mut request = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !request.ends_with(b"\r\n\r\n") {
+                        match socket.read(&mut byte) {
+                            Ok(1) => request.push(byte[0]),
+                            _ => break,
+                        }
+                    }
+                    if !request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    let request = String::from_utf8_lossy(&request).into_owned();
+                    let header = |name: &str| {
+                        request
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix(name)
+                                    .map(|value| value.trim().to_string())
+                            })
+                            .unwrap_or_default()
+                    };
+                    let mut body = vec![0u8; header("content-length:").parse().unwrap_or(0)];
+                    if socket.read_exact(&mut body).is_err() {
+                        break;
+                    }
+                    if request.starts_with("GET /proof") {
+                        let answer = proof(
+                            &secret,
+                            &header("host:"),
+                            &header("timeschedule-challenge:"),
+                        )
+                        .unwrap();
+                        let sent = write!(
+                            socket,
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{answer}",
+                            answer.len()
+                        );
+                        if sent.is_err() {
+                            break;
+                        }
+                        proved = true;
+                    } else {
+                        record.lock().unwrap().push(proved);
+                        let _ = socket.write_all(reply(&request).as_bytes());
+                        // Keep the connection open until the client lets go of it.
+                        let _ = socket.read(&mut byte);
+                        break;
+                    }
+                }
+            }
+        });
+        (address, log)
+    }
+    fn data_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("timeschedule-proof-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+    fn memory_server(token: &str) -> Server {
+        Server::start(
+            Arc::new(Storage::open(":memory:").unwrap()),
+            Arc::new(AtomicBool::new(false)),
+            0,
+            token.into(),
+        )
+        .unwrap()
+    }
+    fn proof_request(address: SocketAddr, host: &str, headers: &str) -> (u16, String) {
+        let mut socket = std::net::TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            socket,
+            "GET /proof HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n{headers}\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        let status = response.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
+            .unwrap_or_default();
+        (status, body)
+    }
+    const INITIALIZE: &str = "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n";
+
+    #[test]
+    fn hmac_sha256_matches_the_published_test_vector() {
+        let mac = hmac_sha256(b"key", b"The quick brown fox jumps over the lazy dog").unwrap();
+        let hex: String = mac.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(
+            hex,
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
+    }
+    #[test]
+    fn proof_matches_the_vector_pinned_for_the_powershell_status_script() {
+        // tests/local-mcp.test.mjs pins the same inputs and answer for scripts/mcp-session.ps1.
+        assert_eq!(
+            proof(
+                &"0123456789abcdef".repeat(4),
+                "127.0.0.1:39281",
+                &"ab".repeat(32)
+            )
+            .unwrap(),
+            "9c488ddb357b469f4d2205932eb32a03afd257e7f518ac9ccf79326b91c6e978"
+        );
+    }
+    #[test]
+    fn auth_headers_are_withheld_from_a_listener_that_cannot_prove_the_token() {
+        let dir = data_dir();
+        let secret = token(&dir).unwrap();
+        let (address, seen) = impostor(|_| "0".repeat(64));
+        let result = crate::mcp_connection::auth_headers(&dir, &format!("http://{address}/mcp"));
+        assert!(
+            result.is_err(),
+            "the credential was released for an unverified listener"
+        );
+        assert!(!seen.lock().unwrap().contains(&secret));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn auth_headers_are_withheld_while_nothing_listens_on_the_endpoint() {
+        let dir = data_dir();
+        token(&dir).unwrap();
+        let closed = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        assert!(
+            crate::mcp_connection::auth_headers(&dir, &format!("http://{closed}/mcp")).is_err()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn auth_headers_are_released_for_the_running_server_that_proves_the_token() {
+        let dir = data_dir();
+        let secret = token(&dir).unwrap();
+        let server = memory_server(&secret);
+        let headers: Value = serde_json::from_str(
+            &crate::mcp_connection::auth_headers(&dir, &format!("http://{}/mcp", server.address))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(headers["Authorization"], format!("Bearer {secret}"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_proof_relayed_from_another_port_does_not_release_auth_headers() {
+        let dir = data_dir();
+        let secret = token(&dir).unwrap();
+        let server = memory_server(&secret);
+        let real = server.address;
+        // The impostor forwards the challenge to the genuine server on a different port.
+        let (address, seen) = impostor(move |request| {
+            let challenge = request
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("timeschedule-challenge:")
+                        .map(|value| value.trim().to_string())
+                })
+                .unwrap_or_default();
+            proof_request(
+                real,
+                &real.to_string(),
+                &format!("TimeSchedule-Challenge: {challenge}\r\n"),
+            )
+            .1
+        });
+        let result = crate::mcp_connection::auth_headers(&dir, &format!("http://{address}/mcp"));
+        assert!(result.is_err(), "a relayed proof unlocked the credential");
+        let seen = seen.lock().unwrap().to_ascii_lowercase();
+        assert!(
+            seen.contains("timeschedule-challenge:"),
+            "the relay was not exercised"
+        );
+        assert!(!seen.contains(&secret));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_registration_without_an_endpoint_gets_no_token_even_while_the_app_runs() {
+        // Registrations made before 0.13.1 do not say where the client will send
+        // the token, so proving any one server cannot make releasing it safe.
+        let dir = data_dir();
+        let secret = token(&dir).unwrap();
+        let server = memory_server(&secret);
+        let url = format!("http://{}/mcp", server.address);
+        std::fs::write(
+            dir.join("mcp-status.json"),
+            json!({"endpoint":url}).to_string(),
+        )
+        .unwrap();
+        let args = |extra: &[&str]| -> Vec<String> {
+            ["--mcp-auth-headers", "--data-dir", dir.to_str().unwrap()]
+                .iter()
+                .chain(extra)
+                .map(|value| value.to_string())
+                .collect()
+        };
+        let refused = crate::mcp_connection::helper_auth_headers(&args(&[])).unwrap_err();
+        assert!(refused.contains("다시 등록"), "{refused}");
+        assert!(!refused.contains(&secret));
+        let released =
+            crate::mcp_connection::helper_auth_headers(&args(&["--endpoint", &url])).unwrap();
+        assert!(released.contains(&secret));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_redirect_to_the_genuine_proof_does_not_release_auth_headers() {
+        let dir = data_dir();
+        let secret = token(&dir).unwrap();
+        let server = memory_server(&secret);
+        let real = server.address;
+        let (address, seen) = impostor_raw(move |_| {
+            format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{real}/proof\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        });
+        let result = crate::mcp_connection::auth_headers(&dir, &format!("http://{address}/mcp"));
+        assert!(
+            result.is_err(),
+            "a redirected proof unlocked the credential"
+        );
+        assert!(!seen.lock().unwrap().contains(&secret));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn an_authentication_failure_is_reported_without_waiting_for_its_body() {
+        // A listener that holds the token (so it passes the proof) but rejects the
+        // request with a body that never arrives in full.
+        let dir = data_dir();
+        let secret = token(&dir).unwrap();
+        // The fixture keeps the connection open after these few body bytes.
+        let (address, _) = proving_listener(&secret, |_| {
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 4000000\r\n\r\npartial".to_string()
+        });
+        std::fs::write(
+            dir.join("mcp-status.json"),
+            json!({"endpoint":format!("http://{address}/mcp")}).to_string(),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        let error = crate::mcp_connection::probe(&dir).unwrap_err();
+        assert!(error.contains("인증 실패"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the status was held back by an unfinished body"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn the_token_travels_only_on_the_connection_that_proved_itself() {
+        // Proving on one connection and sending on another would hand the token to
+        // whichever process owns the port by the time the second one is opened.
+        let dir = data_dir();
+        let secret = token(&dir).unwrap();
+        let (address, log) = proving_listener(&secret, |_| {
+            let body = r#"{"jsonrpc":"2.0","id":11,"result":{}}"#;
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        });
+        std::fs::write(
+            dir.join("mcp-status.json"),
+            json!({"endpoint":format!("http://{address}/mcp")}).to_string(),
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        crate::mcp_connection::bridge(&dir, std::io::Cursor::new(INITIALIZE), &mut output).unwrap();
+        let reply: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(reply["id"], 11, "{reply}");
+        assert_eq!(*log.lock().unwrap(), vec![true]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn bridge_does_not_send_the_token_to_an_unproven_listener() {
+        let dir = data_dir();
+        let secret = token(&dir).unwrap();
+        let (address, seen) = impostor(|_| r#"{"jsonrpc":"2.0","id":11,"result":{}}"#.to_string());
+        std::fs::write(
+            dir.join("mcp-status.json"),
+            json!({"endpoint":format!("http://{address}/mcp")}).to_string(),
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        crate::mcp_connection::bridge(&dir, std::io::Cursor::new(INITIALIZE), &mut output).unwrap();
+        let reply: Value = serde_json::from_slice(&output).unwrap();
+        assert!(reply["error"].is_object(), "{reply}");
+        assert!(!seen.lock().unwrap().contains(&secret));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn probe_does_not_send_the_token_to_an_unproven_listener() {
+        let dir = data_dir();
+        let secret = token(&dir).unwrap();
+        let (address, seen) = impostor(|_| {
+            r#"{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"TimeSchedule"},"protocolVersion":"2025-11-25"}}"#.to_string()
+        });
+        std::fs::write(
+            dir.join("mcp-status.json"),
+            json!({"endpoint":format!("http://{address}/mcp")}).to_string(),
+        )
+        .unwrap();
+        assert!(crate::mcp_connection::probe(&dir).is_err());
+        assert!(!seen.lock().unwrap().contains(&secret));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn proof_endpoint_needs_no_token_but_exact_host_no_origin_and_a_well_formed_challenge() {
+        let server = memory_server(TOKEN);
+        let host = server.address.to_string();
+        let challenge = |value: &str| format!("TimeSchedule-Challenge: {value}\r\n");
+        let (status, first) = proof_request(server.address, &host, &challenge(&"ab".repeat(32)));
+        assert_eq!(status, 200);
+        assert!(first.len() == 64 && first.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(!first.contains(TOKEN));
+        let (_, second) = proof_request(server.address, &host, &challenge(&"cd".repeat(32)));
+        assert_ne!(first, second, "the proof must depend on the challenge");
+        assert_eq!(
+            proof_request(server.address, "evil.example", &challenge(&"ab".repeat(32))).0,
+            403
+        );
+        assert_eq!(
+            proof_request(
+                server.address,
+                &host,
+                &(challenge(&"ab".repeat(32)) + "Origin: https://evil.example\r\n")
+            )
+            .0,
+            403
+        );
+        for malformed in ["", &"ab".repeat(31), &"AB".repeat(32), &"zz".repeat(32)] {
+            assert_eq!(
+                proof_request(server.address, &host, &challenge(malformed)).0,
+                400,
+                "{malformed}"
+            );
+        }
+        assert_eq!(proof_request(server.address, &host, "").0, 400);
+        assert_eq!(
+            proof_request(
+                server.address,
+                &host,
+                &(challenge(&"ab".repeat(32)) + &challenge(&"ab".repeat(32)))
+            )
+            .0,
+            400,
+            "an ambiguous repeated challenge must be rejected"
+        );
     }
     #[test]
     fn real_http_requires_auth_validates_origin_and_supports_mcp_lifecycle() {

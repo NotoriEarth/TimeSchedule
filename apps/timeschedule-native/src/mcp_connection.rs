@@ -48,6 +48,96 @@ impl Drop for AbortOnDrop {
         self.0.abort();
     }
 }
+/// One HTTP/1 connection to a loopback listener. Every request sent on it reaches
+/// the process that accepted it, whatever happens to the port afterwards.
+struct Link {
+    sender: hyper::client::conn::http1::SendRequest<Full<Bytes>>,
+    _task: AbortOnDrop,
+}
+impl Link {
+    async fn open(address: SocketAddr) -> Result<Self, &'static str> {
+        let socket = tokio::net::TcpStream::connect(address)
+            .await
+            .map_err(|_| "TimeSchedule MCP에 연결하지 못했습니다. 앱 실행 상태를 확인하세요.")?;
+        let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(socket))
+            .await
+            .map_err(|_| "MCP 연결 초기화 실패")?;
+        Ok(Self {
+            sender,
+            _task: AbortOnDrop(tokio::spawn(async move {
+                let _ = connection.await;
+            })),
+        })
+    }
+    /// Status and, for a success, at most `limit` body bytes.
+    async fn send(
+        &mut self,
+        request: Request<Full<Bytes>>,
+        limit: usize,
+    ) -> Result<(u16, Vec<u8>), &'static str> {
+        const NO_RESPONSE: &str =
+            "MCP 응답을 받지 못했습니다. 저장 요청이었다면 재시도 전에 결과를 확인하세요.";
+        self.sender.ready().await.map_err(|_| NO_RESPONSE)?;
+        let response = self
+            .sender
+            .send_request(request)
+            .await
+            .map_err(|_| NO_RESPONSE)?;
+        let status = response.status().as_u16();
+        if !response.status().is_success() {
+            // The status is the whole answer; never wait on or size-check an error body.
+            return Ok((status, Vec::new()));
+        }
+        let mut body = response.into_body();
+        let mut bytes = Vec::new();
+        while let Some(frame) = body.frame().await {
+            if let Ok(data) = frame.map_err(|_| "MCP 응답 읽기 실패")?.into_data() {
+                if bytes.len() + data.len() > limit {
+                    return Err("MCP 응답 크기 초과");
+                }
+                bytes.extend_from_slice(&data);
+            }
+        }
+        Ok((status, bytes))
+    }
+}
+/// A connection whose far end has proven that it holds `token`. A process that
+/// merely occupies the port cannot answer, and the token itself is not sent.
+/// Callers that send the token themselves must send it on the returned link:
+/// a second connection could reach a different process.
+async fn proven_link(address: SocketAddr, token: &str) -> Result<Link, String> {
+    const UNVERIFIED: &str = "이 주소에서 실행 중인 TimeSchedule을 확인하지 못했습니다. 앱 실행 상태를 확인하세요. 인증 정보는 보내지 않았습니다.";
+    let challenge = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let host = address.to_string();
+    let expected = crate::mcp::proof(token, &host, &challenge)?;
+    let request = Request::get("/proof")
+        .header("Host", &host)
+        .header(crate::mcp::CHALLENGE_HEADER, &challenge)
+        .body(Full::new(Bytes::new()))
+        .map_err(|_| UNVERIFIED)?;
+    let (link, status, answer) = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut link = Link::open(address).await?;
+        let (status, answer) = link.send(request, 256).await?;
+        Ok::<_, &'static str>((link, status, answer))
+    })
+    .await
+    .map_err(|_| UNVERIFIED)?
+    .map_err(|_| UNVERIFIED)?;
+    let matches = answer.len() == expected.len()
+        && answer
+            .iter()
+            .zip(expected.as_bytes())
+            .fold(0u8, |difference, (a, b)| difference | (a ^ b))
+            == 0;
+    if status != 200 || !matches {
+        return Err(UNVERIFIED.into());
+    }
+    Ok(link)
+}
 impl Connection {
     fn load(dir: &Path) -> Result<Self, String> {
         Ok(Self {
@@ -57,61 +147,33 @@ impl Connection {
     }
     async fn post(&self, value: &Value, protocol: &str) -> Result<Option<Value>, String> {
         tokio::time::timeout(Duration::from_secs(12), async {
-            let socket = tokio::net::TcpStream::connect(self.address)
-                .await
-                .map_err(|_| {
-                    "TimeSchedule MCP에 연결하지 못했습니다. 앱 실행 상태를 확인하세요."
-                })?;
-            let (mut sender, connection) =
-                hyper::client::conn::http1::handshake(TokioIo::new(socket))
-                    .await
-                    .map_err(|_| "MCP 연결 초기화 실패")?;
-            let task = AbortOnDrop(tokio::spawn(async move {
-                let _ = connection.await;
-            }));
-            let result = async {
-                let request = Request::post("/mcp")
-                    .header("Host", self.address.to_string())
-                    .header("Authorization", format!("Bearer {}", self.token))
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json, text/event-stream")
-                    .header("MCP-Protocol-Version", protocol)
-                    .header("Connection", "close")
-                    .body(Full::new(Bytes::from(value.to_string())))
-                    .map_err(|_| "MCP 요청 생성 실패")?;
-                let response = sender.send_request(request).await.map_err(|_| {
-                    "MCP 응답을 받지 못했습니다. 저장 요청이었다면 재시도 전에 결과를 확인하세요."
-                })?;
-                if !response.status().is_success() {
-                    return Err(match response.status().as_u16() {
-                        401 | 403 => {
-                            "MCP 인증 실패. TimeSchedule과 같은 Windows 계정인지 확인하세요."
-                        }
-                        _ => "MCP 요청 실패. 저장 요청이었다면 재시도 전에 결과를 확인하세요.",
-                    }
-                    .into());
+            // The status file can outlive a crashed app; never trust its port with the
+            // token. The request goes out on the very connection that proved itself.
+            let mut link = proven_link(self.address, &self.token).await?;
+            let request = Request::post("/mcp")
+                .header("Host", self.address.to_string())
+                .header("Authorization", format!("Bearer {}", self.token))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json, text/event-stream")
+                .header("MCP-Protocol-Version", protocol)
+                .header("Connection", "close")
+                .body(Full::new(Bytes::from(value.to_string())))
+                .map_err(|_| "MCP 요청 생성 실패")?;
+            let (status, bytes) = link.send(request, 2 * 1024 * 1024).await?;
+            if !(200..300).contains(&status) {
+                return Err(match status {
+                    401 | 403 => "MCP 인증 실패. TimeSchedule과 같은 Windows 계정인지 확인하세요.",
+                    _ => "MCP 요청 실패. 저장 요청이었다면 재시도 전에 결과를 확인하세요.",
                 }
-                let mut body = response.into_body();
-                let mut bytes = Vec::new();
-                while let Some(frame) = body.frame().await {
-                    if let Ok(data) = frame.map_err(|_| "MCP 응답 읽기 실패")?.into_data() {
-                        if bytes.len() + data.len() > 2 * 1024 * 1024 {
-                            return Err("MCP 응답 크기 초과".into());
-                        }
-                        bytes.extend_from_slice(&data);
-                    }
-                }
-                if bytes.is_empty() {
-                    Ok(None)
-                } else {
-                    serde_json::from_slice(&bytes)
-                        .map(Some)
-                        .map_err(|_| "MCP 응답 형식 오류".into())
-                }
+                .into());
             }
-            .await;
-            drop(task);
-            result
+            if bytes.is_empty() {
+                Ok(None)
+            } else {
+                serde_json::from_slice(&bytes)
+                    .map(Some)
+                    .map_err(|_| "MCP 응답 형식 오류".into())
+            }
         })
         .await
         .map_err(|_| {
@@ -182,6 +244,42 @@ pub fn bridge(dir: &Path, mut input: impl BufRead, mut output: impl Write) -> Re
         }
     }
 }
+/// Authorization header JSON for an MCP client that will send it to `url`. The
+/// token is released only after the listener at `url` proves it is this user's
+/// running TimeSchedule; a closed app or a port squatter gets an error instead.
+pub fn auth_headers(dir: &Path, url: &str) -> Result<String, String> {
+    let address = endpoint(url)?;
+    let token = crate::mcp::read_token(dir)?;
+    runtime()?.block_on(proven_link(address, &token))?;
+    Ok(json!({"Authorization":format!("Bearer {token}")}).to_string())
+}
+/// `--data-dir <absolute path> [--endpoint <url>]`. The bridge and probe read the
+/// running endpoint themselves; registrations made before 0.13.1 carry none.
+fn helper_arguments(args: &[String]) -> Result<(&Path, Option<&str>), String> {
+    if !matches!(args.len(), 3 | 5) || args[1] != "--data-dir" || !Path::new(&args[2]).is_absolute()
+    {
+        return Err("MCP 도우미에 올바른 --data-dir 절대 경로가 필요합니다.".into());
+    }
+    let url = if args.len() == 5 {
+        if args[3] != "--endpoint" {
+            return Err("MCP 도우미 인자를 확인하세요. 설정에서 AI 연결을 다시 등록하세요.".into());
+        }
+        endpoint(&args[4])?;
+        Some(args[4].as_str())
+    } else {
+        None
+    };
+    Ok((Path::new(&args[2]), url))
+}
+/// What `--mcp-auth-headers` prints for these helper arguments. The client sends
+/// the result to the URL in its own configuration, which this process cannot
+/// see: without the registered endpoint no server can be proven to be that
+/// destination, so the token stays here.
+pub(crate) fn helper_auth_headers(args: &[String]) -> Result<String, String> {
+    let (dir, url) = helper_arguments(args)?;
+    let url = url.ok_or("0.13.1 이전에 만든 등록이라 인증 정보를 보낼 주소를 확인할 수 없습니다. TimeSchedule 설정 → 로컬 일정 MCP → AI 연결 도우미에서 다시 등록하세요. 인증 정보는 보내지 않았습니다.")?;
+    auth_headers(dir, url)
+}
 pub fn try_run() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = args.first()?.as_str();
@@ -189,15 +287,11 @@ pub fn try_run() -> Option<i32> {
         return None;
     }
     let result = (|| {
-        if args.len() != 3 || args[1] != "--data-dir" || !Path::new(&args[2]).is_absolute() {
-            return Err("MCP 도우미에 올바른 --data-dir 절대 경로가 필요합니다.".into());
-        }
-        let dir = Path::new(&args[2]);
+        let (dir, _) = helper_arguments(&args)?;
         match mode {
             "--mcp-auth-headers" => {
-                let token = crate::mcp::read_token(dir)?;
                 // This stdout is the credential channel consumed by the MCP client.
-                println!("{}", json!({"Authorization":format!("Bearer {token}")}));
+                println!("{}", helper_auth_headers(&args)?);
                 Ok(())
             }
             "--mcp-probe" => {
@@ -219,6 +313,35 @@ pub fn try_run() -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn helper_reads_the_registered_endpoint_and_never_assumes_one() {
+        let dir = if cfg!(windows) { "C:\\data" } else { "/data" };
+        let args = |extra: &[&str]| -> Vec<String> {
+            ["--mcp-auth-headers", "--data-dir", dir]
+                .iter()
+                .chain(extra)
+                .map(|value| value.to_string())
+                .collect()
+        };
+        // Registrations made before 0.13.1 carry no endpoint; the bridge and
+        // probe forms never do. The destination is then unknown, not the default.
+        let legacy = args(&[]);
+        assert_eq!(helper_arguments(&legacy).unwrap(), (Path::new(dir), None));
+        let registered = args(&["--endpoint", "http://127.0.0.1:40123/mcp"]);
+        assert_eq!(
+            helper_arguments(&registered).unwrap(),
+            (Path::new(dir), Some("http://127.0.0.1:40123/mcp"))
+        );
+        for extra in [
+            &["--endpoint"][..],
+            &["--endpoint", "http://example.com:39281/mcp"],
+            &["--endpoint", "http://127.0.0.1:39281/other"],
+            &["--port", "39281"],
+            &["--endpoint", "http://127.0.0.1:40123/mcp", "extra"],
+        ] {
+            assert!(helper_arguments(&args(extra)).is_err(), "{extra:?}");
+        }
+    }
     #[test]
     fn credentials_cannot_leave_exact_loopback_endpoint() {
         assert_eq!(

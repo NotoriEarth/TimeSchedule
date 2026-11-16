@@ -1,6 +1,8 @@
 # TimeSchedule
 
-## 최신 앱: TimeSchedule 0.13.0
+## 최신 앱: TimeSchedule 0.13.1
+
+0.13.1은 **로컬 일정 MCP의 인증 토큰이 다른 프로세스로 넘어갈 수 있던 경로를 막습니다.** 앱이 꺼진 동안 같은 PC의 다른 프로세스가 MCP 포트를 먼저 열어도, AI 앱 연결 도우미·Claude Desktop 중계·연결 검사는 상대가 실행 중인 TimeSchedule임을 확인한 뒤에만 토큰을 보냅니다. **업데이트 후 Codex·ChatGPT Desktop·Claude Code 연결은 한 번 다시 등록해야 합니다.** **설정 → 로컬 일정 MCP → AI 연결 도우미**에서 등록 미리보기 → 등록 적용을 다시 실행하세요. 이전 등록은 토큰을 보낼 주소를 확인할 수 없어 토큰을 내주지 않습니다. Claude Desktop 연결은 그대로 동작합니다. [동작 방식과 한계](docs/local-mcp.md)를 참고하세요.
 
 0.13.0은 **프로젝트·공부 자료를 모으는 독립된 로컬 문서 저장소**를 추가합니다. 기본 위치는 사용자 `Documents\TimeScheduleData`이며 `document-vault.mjs init --root`로 확정한 경로를 재시도에서도 사용합니다. Markdown 원문·수정 이력·첨부 폴더를 보관하고, 개발 기록은 문서 저장 후 다이어리에 반영합니다. **Space는 기본 꺼짐**이며 로컬 저장에 Codex 로그인·Pages 연결·AI 호출이 필요 없습니다. [저장소 초기화·공부 자료 가져오기·수동 편집·백업](docs/document-vault.md), [자동 개발 기록](docs/project-records.md)을 참고하세요. 기존 일정·다이어리 DB는 이동하지 않습니다.
 
