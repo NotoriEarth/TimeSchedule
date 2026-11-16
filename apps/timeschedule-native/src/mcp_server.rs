@@ -477,18 +477,37 @@ fn profile_type() -> Option<u32> {
 fn profile_type() -> Option<u32> {
     None
 }
-fn load(dir: &Path, platform: &Platform) -> Result<String, TokenError> {
-    let mut encrypted = Vec::new();
-    match fs::File::open(dir.join(TOKEN_FILE)) {
-        Ok(file) => file
-            .take(16 * 1024 + 1)
-            .read_to_end(&mut encrypted)
-            .map_err(|_| TokenError::Unavailable)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(TokenError::Missing)
+/// Reads with `read`, trying again for a moment when it fails for a reason
+/// that can pass. While the token file is being replaced by a reissue, Windows
+/// may refuse to open it for an instant; a helper reading in that instant
+/// would otherwise fail its connection. A file that is not there is not
+/// waited for. In all at most a tenth of a second.
+fn read_patiently(read: &mut dyn FnMut() -> std::io::Result<Vec<u8>>) -> std::io::Result<Vec<u8>> {
+    const ATTEMPTS: u32 = 5;
+    let mut attempt = 1;
+    loop {
+        match read() {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound && attempt < ATTEMPTS => {
+                std::thread::sleep(Duration::from_millis(10 * u64::from(attempt)));
+                attempt += 1;
+            }
+            done => return done,
         }
-        Err(_) => return Err(TokenError::Unavailable),
-    };
+    }
+}
+fn load(dir: &Path, platform: &Platform) -> Result<String, TokenError> {
+    let path = dir.join(TOKEN_FILE);
+    let encrypted = read_patiently(&mut || {
+        let mut bytes = Vec::new();
+        fs::File::open(&path)?
+            .take(16 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+    .map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => TokenError::Missing,
+        _ => TokenError::Unavailable,
+    })?;
     if encrypted.is_empty() {
         return Err(TokenError::Damaged(Damage::Empty));
     }
@@ -1055,6 +1074,41 @@ mod tests {
         let (_, issue) = issue_at_start(&dir, &mangled).unwrap();
         assert_eq!(issue, Issue::Recovered(Damage::Undecryptable));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_read_refused_for_an_instant_is_tried_again_before_it_is_reported() {
+        use std::io::{Error, ErrorKind};
+        // While the token file is being replaced Windows can refuse to open it
+        // for an instant. On CI a helper reading in that instant failed.
+        let mut calls = 0;
+        let read = read_patiently(&mut || {
+            calls += 1;
+            if calls < 3 {
+                Err(Error::from(ErrorKind::PermissionDenied))
+            } else {
+                Ok(b"blob".to_vec())
+            }
+        });
+        assert_eq!(read.unwrap(), b"blob");
+        assert_eq!(calls, 3);
+        // A file that stays unreadable is reported after a bounded wait.
+        let mut calls = 0;
+        let started = std::time::Instant::now();
+        let read = read_patiently(&mut || {
+            calls += 1;
+            Err(Error::from(ErrorKind::PermissionDenied))
+        });
+        assert_eq!(read.unwrap_err().kind(), ErrorKind::PermissionDenied);
+        assert!((2..=8).contains(&calls), "{calls}");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        // A file that is not there is not waited for: the app creates it.
+        let mut calls = 0;
+        let read = read_patiently(&mut || {
+            calls += 1;
+            Err(Error::from(ErrorKind::NotFound))
+        });
+        assert_eq!(read.unwrap_err().kind(), ErrorKind::NotFound);
+        assert_eq!(calls, 1);
     }
     #[test]
     fn a_write_cut_off_before_the_swap_leaves_the_previous_token_in_force() {
