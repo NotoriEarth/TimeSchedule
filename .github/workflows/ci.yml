@@ -3,9 +3,18 @@
 name: CI
 
 on:
+  # Skip changes that touch only documentation no check reads: Markdown at the
+  # repository root ("*" does not cross "/") and docs/. Markdown elsewhere still
+  # runs CI, because vendored crates embed their READMEs with include_str!.
   pull_request:
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
   push:
     branches: [main]
+    paths-ignore:
+      - "*.md"
+      - "docs/**"
   workflow_dispatch:
 
 permissions:
@@ -18,37 +27,61 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
+  # Tests need no debug info. Leaving it out speeds up compiling and linking on
+  # Windows and keeps the build cache small.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
   # The toolchain this project is developed and released with.
   RUST_TOOLCHAIN: "1.99.1"
 
 jobs:
-  checks:
-    name: Format, lint and tests
+  # Runs in parallel with the tests. Lint compiles separately (check mode), so
+  # splitting it off shortens the wait instead of adding to it.
+  lint:
+    name: Format and lint
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       # Actions are pinned to reviewed commits; the comment names the release.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # build.rs calls the Windows SDK's rc.exe, which is only on PATH inside a
-      # Visual Studio developer environment (scripts/toolchain.ps1 does the same).
-      - name: Enter Visual Studio developer environment
-        run: |
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
-          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw 'Visual Studio C++ build tools were not found.' }
-          $devCmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
-          $names = '^(Path|INCLUDE|LIB|LIBPATH|UCRTVersion|UniversalCRTSdkDir|VCINSTALLDIR|VCToolsInstallDir|VCToolsVersion|VSINSTALLDIR|VisualStudioVersion|WindowsLibPath|WindowsSdkBinPath|WindowsSdkDir|WindowsSdkVerBinPath|WindowsSDKLibVersion|WindowsSDKVersion)='
-          $lines = cmd /d /s /c "`"$devCmd`" -no_logo -arch=x64 -host_arch=x64 && set"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not load the Visual Studio developer environment.' }
-          $lines | Where-Object { $_ -match $names } | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Confirm resource compiler
-        run: (Get-Command rc.exe -ErrorAction Stop).Source
+      - uses: ./.github/actions/msvc-env
 
       - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
         run: |
           rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component rustfmt,clippy
+          rustup default $env:RUST_TOOLCHAIN
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: rust-v2-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-lint-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-v2-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-lint-
+
+      # Reported, not enforced, until the existing warnings are cleared.
+      - name: Clippy (report only)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets --locked
+
+  test:
+    name: Tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: ./.github/actions/msvc-env
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
           rustup default $env:RUST_TOOLCHAIN
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -58,23 +91,13 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: rust-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: rust-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-
+          key: rust-v2-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-test-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-v2-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-test-
 
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      # Reported, not enforced, until the existing warnings are cleared.
-      - name: Clippy (report only)
-        continue-on-error: true
-        run: cargo clippy --workspace --all-targets --locked
-
-      - name: Tests
-        run: cargo test --workspace --locked
-
-      # This integration target only builds with the test-support feature.
-      - name: Desktop integration test
-        run: cargo test -p timeschedule-desktop --features test-support --test desktop_native --locked
+      # test-support only exposes the desktop_native fixture, so the integration
+      # target runs in the same pass instead of a second compile.
+      - name: Rust tests
+        run: cargo test --workspace --locked --features timeschedule-desktop/test-support
 
       - name: Build native app
         run: cargo build -p timeschedule-native --locked

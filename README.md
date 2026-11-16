@@ -59,10 +59,10 @@ PR #2–#6의 Rust 이식·테마·위젯·편집·설정·연월 선택 변경�
 
 GitHub의 모든 PR과 `main` 푸시에서 Windows 환경으로 다음을 자동 실행합니다. Rust 버전은 개발에 쓰는 1.99.1로 고정합니다.
 
-- **CI** (`.github/workflows/ci.yml`): `cargo fmt` 검사, `cargo clippy`(지금은 경고 보고만 하고 실패시키지 않음), 워크스페이스 전체 테스트와 `desktop_native` 통합 테스트, PowerShell 스크립트 테스트 2개(메모리 측정·실행 파일 교체), 방금 빌드한 실행 파일을 쓰는 Node 기록·문서 저장소 테스트.
+- **CI** (`.github/workflows/ci.yml`): 두 작업을 동시에 실행합니다. *Format and lint*는 `cargo fmt` 검사와 `cargo clippy`(지금은 경고 보고만 하고 실패시키지 않음), *Tests*는 워크스페이스 전체 테스트(`desktop_native` 통합 테스트 포함), PowerShell 스크립트 테스트 2개(메모리 측정·실행 파일 교체), 방금 빌드한 실행 파일을 쓰는 Node 기록·문서 저장소 테스트입니다. 저장소 최상위 Markdown과 `docs/`만 바뀐 변경은 실행하지 않습니다(vendor 크레이트는 README를 코드에 포함하므로 그 밖의 Markdown 변경은 실행). 테스트에는 디버그 정보가 필요 없어 꺼서 컴파일을 줄입니다.
 - **Legacy builds** (`.github/workflows/legacy.yml`): 공통 크레이트·Tauri·프런트엔드·실험 코드가 바뀐 PR에서만, 워크스페이스 밖의 기존 Tauri 앱과 UI 실험 크레이트가 계속 컴파일되는지 확인합니다.
 
-GitHub 공식 액션만 쓰고 커밋 SHA로 고정합니다. `build.rs`가 Windows SDK의 `rc.exe`를 쓰므로 CI도 로컬의 `scripts/toolchain.ps1`처럼 Visual Studio 개발자 환경을 먼저 불러옵니다. `scripts/tests/benchmark-archive.tests.ps1`과 `benchmark-fixtures.tests.ps1`은 Git에 없는 로컬 벤치마크 산출물과 `.tooling`이 필요한 수동 검사라 자동 검사에서 제외합니다. 실제 바탕화면 위젯 연결, 사용자 AI 앱 연결, 화면 체감은 여전히 사용자 확인 대상입니다.
+GitHub 공식 액션만 쓰고 커밋 SHA로 고정합니다. `build.rs`가 Windows SDK의 `rc.exe`를 쓰므로 CI도 로컬의 `scripts/toolchain.ps1`처럼 Visual Studio 개발자 환경을 먼저 불러옵니다(`.github/actions/msvc-env`). `scripts/tests/benchmark-archive.tests.ps1`과 `benchmark-fixtures.tests.ps1`은 Git에 없는 로컬 벤치마크 산출물과 `.tooling`이 필요한 수동 검사라 자동 검사에서 제외합니다. 실제 바탕화면 위젯 연결, 사용자 AI 앱 연결, 화면 체감은 여전히 사용자 확인 대상입니다.
 
 ## 기존 Tauri 앱
 
