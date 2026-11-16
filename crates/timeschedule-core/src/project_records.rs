@@ -46,7 +46,7 @@ impl ProjectRecord {
             return Err("오프라인 기록은 v2 형식이 필요합니다.".into());
         }
         if self.schema_version == 2 {
-            if !["pending", "synced"].contains(&self.delivery_state.as_str())
+            if !["local", "pending", "synced"].contains(&self.delivery_state.as_str())
                 || self.detail.trim().is_empty()
                 || self.detail.len() > 48000
                 || self.detail.contains('\0')
@@ -81,11 +81,11 @@ impl ProjectRecord {
         }
         self.status_label()?;
         validate_text(&self.space_url, "Space 링크", 2000)?;
-        if self.delivery_state == "pending" {
+        if ["local", "pending"].contains(&self.delivery_state.as_str()) {
             return if self.space_url.is_empty() {
                 Ok(())
             } else {
-                Err("대기 기록에는 미검증 Space 링크를 넣을 수 없습니다.".into())
+                Err("로컬·대기 기록에는 Space 링크를 넣을 수 없습니다.".into())
             };
         }
         let url = url::Url::parse(&self.space_url).map_err(|_| "Space 링크를 확인해 주세요.")?;
@@ -238,7 +238,9 @@ impl Storage {
                 "{}\n\n상태: {}\n\n{}",
                 record.detail.trim(),
                 record.status_label()?,
-                if record.delivery_state == "pending" {
+                if record.delivery_state == "local" {
+                    "로컬 저장 완료 — Space 연동은 선택 사항입니다."
+                } else if record.delivery_state == "pending" {
                     "Space 연결 대기 — 원문은 다이어리에 보관되어 있습니다."
                 } else {
                     "Space 연결 완료"
@@ -276,7 +278,7 @@ impl Storage {
         Ok(record.receipt(
             "saved",
             Some(entry_id),
-            "Space 요약과 링크를 다이어리에 저장했습니다.",
+            "기록 원문과 연결 상태를 다이어리에 저장했습니다.",
         ))
     }
 }
@@ -365,6 +367,24 @@ mod tests {
         assert!(pending.validate().is_ok());
         pending.space_url = record().space_url;
         assert!(pending.validate().is_err());
+    }
+
+    #[test]
+    fn local_record_is_complete_without_space_and_preserves_user_edits() {
+        let store = Storage::open(":memory:").unwrap();
+        let mut local = record();
+        local.schema_version = 2;
+        local.delivery_state = "local".into();
+        local.detail = "로컬 문서 저장소의 원문".into();
+        local.space_url.clear();
+        assert!(local.validate().is_ok());
+        let receipt = store.apply_project_record(&local).unwrap();
+        let entry = store.get_entry(receipt.entry_id.as_ref().unwrap()).unwrap();
+        assert!(entry.body.contains("로컬 저장 완료"));
+        assert!(!entry.body.contains("Space 연결 대기"));
+        assert!(entry.source_url.is_empty());
+        local.space_url = record().space_url;
+        assert!(local.validate().is_err());
     }
 
     #[test]

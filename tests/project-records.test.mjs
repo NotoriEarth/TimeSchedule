@@ -14,7 +14,7 @@ const fixtureDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'timeschedule-rec
 const fixture = gitFixture(fixtureDirectory);
 after(() => fs.rmSync(fixtureDirectory, { recursive: true, force: true }));
 const prepare = (input, options) => prepareRecord(input, { ...options, projectRoot: fixture.repo });
-const sync = options => syncRecords({ ...options, projectRoot: fixture.repo });
+const sync = options => syncRecords({ spaceEnabled: true, vaultRoot: path.join(options.stateDir, 'vault'), ...options, projectRoot: fixture.repo });
 
 const parentPageId = 'page_6ae1b18a44f08191ad2a86276972476c';
 const pageId = 'page_1234567890abcdef1234567890abcdef';
@@ -175,7 +175,7 @@ test('a stale lock observer cannot enter while another process owns delivery', a
   const moduleUrl = pathToFileURL(path.resolve('scripts/project-records.mjs')).href;
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import {sync} from ${JSON.stringify(moduleUrl)};
-    try { await sync({stateDir:process.argv[1],projectRoot:process.argv[2],importer:async r=>({outcome:'saved',workId:r.workId,revision:r.revision,entryId:'entry-1'}),publisher:async()=>{
+    try { await sync({stateDir:process.argv[1],vaultRoot:process.argv[1]+'/vault',spaceEnabled:true,projectRoot:process.argv[2],importer:async r=>({outcome:'saved',workId:r.workId,revision:r.revision,entryId:'entry-1'}),publisher:async()=>{
       process.send('entered'); await new Promise(r=>process.once('message',r)); throw Error('test finished');
     }}); } catch {} finally { process.disconnect(); }
   `, dir, fixture.repo], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });

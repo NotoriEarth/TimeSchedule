@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { publishCodex, validatePublication, runBounded } from './project-records-codex.mjs';
 import { developmentEvidence } from './project-records-git.mjs';
+import { saveDocument, vaultPreferences } from './document-vault.mjs';
 
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const PARENT_PAGE_ID = 'page_6ae1b18a44f08191ad2a86276972476c';
@@ -57,7 +58,7 @@ function loadJobs(stateDir, workId) {
       .map(f => ({ file: path.join(stateDir, e.name, f), job: readJson(path.join(stateDir, e.name, f)) })))
     .sort((a,b) => a.job.source.workId === b.job.source.workId ? a.job.revision-b.job.revision : (a.job.createdAt ?? a.job.updatedAt).localeCompare(b.job.createdAt ?? b.job.updatedAt));
 }
-const finished = job => ['complete', 'conflict', 'excluded'].includes(job.phase);
+const finished = job => ['complete', 'local_complete', 'conflict', 'excluded'].includes(job.phase);
 const uncertainPublication = job => job?.publicationUncertain === true
   || (job && job.schemaVersion !== 2 && (job.phase === 'publishing' || job.excludedFromPhase === 'publishing'));
 function writeWake(stateDir) {
@@ -120,7 +121,7 @@ function diaryPayload(job, linked) {
   const { source, space } = job;
   return { schemaVersion: 2, workId: source.workId, revision:linked?job.finalRevision:job.localRevision, projectTitle: source.projectTitle, repoPath: source.repoPath, date: source.date,
     kind: source.kind, title: source.title, summary: source.diarySummary, detail:source.detailedMarkdown,
-    deliveryState:linked?'synced':'pending', spaceUrl:linked?space.pageUrl:'', status: source.status };
+    deliveryState:linked?'synced':job.diaryMode==='local'?'local':'pending', spaceUrl:linked?space.pageUrl:'', status: source.status };
 }
 async function registerNative(options) {
   const resultFile=path.join(options.stateDir,`registration-${randomUUID()}.json`);
@@ -147,11 +148,28 @@ async function importNative(record, options) {
 export async function sync(options = {}) {
   const stateDir = path.resolve(options.stateDir ?? DEFAULT_STATE);
   return locked(stateDir, async () => {
+    const preferences = vaultPreferences(stateDir);
+    const vaultRoot = options.vaultRoot ?? preferences.root;
+    const spaceEnabled = options.spaceEnabled ?? preferences.spaceEnabled;
+    if (typeof spaceEnabled !== 'boolean') throw new Error('Space 설정을 확인해 주세요.');
     const results = []; const jobs=loadJobs(stateDir); let processed=0;
+    let registered = false;
     const now=Date.now();
+    // Reserve new delivery revisions across the entire work item, including
+    // queued/unsent newer captures. Per-job increments can reuse a revision
+    // already allocated to another body.
+    const nextDelivery = new Map();
+    for (const { job } of jobs) {
+      if (!finished(job)) upgradeJob(job);
+      const greatest = Math.max(nextDelivery.get(job.source.workId) ?? 0,
+        job.localRevision ?? 0, job.finalRevision ?? 0, job.diaryReceipt?.revision ?? 0, job.revision ?? 0);
+      nextDelivery.set(job.source.workId, greatest);
+    }
     // Apply the policy before registration, backoff and per-run limits: old
     // research jobs must stop waking the app even if their retry is not due.
     for (const { file, job } of jobs) {
+      if (options.workId && job.source.workId !== options.workId) continue;
+      if (job.phase === 'local_complete' && spaceEnabled && options.workId === job.source.workId) { job.phase = 'waiting_space'; job.nextAttemptAt = 0; }
       if (finished(job) || (options.workId && job.source.workId !== options.workId)) continue;
       upgradeJob(job);
       const evidence = developmentEvidence(job.source.repoPath, job.source.gitChanges, options.projectRoot ?? PROJECT_ROOT);
@@ -160,10 +178,18 @@ export async function sync(options = {}) {
         job.phase = 'excluded'; job.exclusionReason = evidence.reason;
         job.nextAttemptAt = null; job.updatedAt = new Date().toISOString();
         atomicJson(file, job);
+      } else if (!spaceEnabled && job.diaryMode !== 'local') {
+        // A legacy pending receipt may already be in the app's inbox. A new
+        // revision avoids changing the meaning of that accepted payload.
+        job.localRevision = nextDelivery.get(job.source.workId) + 1;
+        job.finalRevision = job.localRevision + 1;
+        nextDelivery.set(job.source.workId, job.finalRevision);
+        job.localSaved = false;
+        job.diaryMode = 'local'; job.nextAttemptAt = 0;
+        atomicJson(file, job);
       }
     }
     writeWake(stateDir);
-    if(!options.importer && jobs.some(({job})=>!finished(job) && (!options.workId || job.source.workId === options.workId))) await registerNative({...options,stateDir});
     for (const { file, job } of jobs) {
       if(options.workId && job.source.workId!==options.workId) continue;
       if (finished(job) || (!options.retryNow && (job.nextAttemptAt ?? 0)>now) || processed >= Number(options.maxJobs ?? Infinity)) {
@@ -192,9 +218,18 @@ export async function sync(options = {}) {
         return true;
       };
       try {
+        // Preserve one source revision as an independent document before any
+        // native executable or optional external publisher is required.
+        const repoIdentity = process.platform === 'win32' ? job.source.repoPath.toLowerCase() : job.source.repoPath;
+        const receipt = await saveDocument({ id: job.source.workId, collection: 'projects', group: `repo-${sha(repoIdentity).slice(0, 16)}`,
+          title: job.source.title, date: job.source.date, markdown: job.source.detailedMarkdown,
+          tags: [job.source.kind], source: { projectTitle: job.source.projectTitle, repoPath: job.source.repoPath, gitChanges: job.source.gitChanges, status: job.source.status, captureRevision: job.revision } }, { root: vaultRoot });
+        job.vaultSaved = true; job.vaultReceipt = receipt; save();
+        if (!options.importer && !registered) { await registerNative({...options,stateDir}); registered = true; }
         if(!job.localSaved){if(!await importRecord(false))continue;job.localSaved=true;job.phase='waiting_space';save();}
+        if (!spaceEnabled) { job.phase='local_complete'; job.lastError=null; job.nextAttemptAt=null; save(); continue; }
         // Keep revisions of one work item ordered, but let other work proceed.
-        const earlier=jobs.find(x=>x.job.source.workId===job.source.workId && x.job.revision<job.revision && !['complete', 'excluded'].includes(x.job.phase));
+        const earlier=jobs.find(x=>x.job.source.workId===job.source.workId && x.job.revision<job.revision && !['complete', 'local_complete', 'excluded'].includes(x.job.phase));
         if(earlier){job.phase=earlier.job.phase==='conflict'?'conflict':'waiting_prior';job.nextAttemptAt=Math.max(now+60000,earlier.job.nextAttemptAt??0);save();continue;}
         const mappingFile=path.join(stateDir,job.source.workId,'space-state.json');
         if(!job.spaceVerified && fs.existsSync(mappingFile)){
@@ -230,6 +265,7 @@ export async function sync(options = {}) {
 export function status({ stateDir = DEFAULT_STATE, workId } = {}) {
   return loadJobs(stateDir, workId).map(({ job }) => ({ workId: job.source.workId, title: job.source.title, revision: job.revision, phase: job.phase,
     pageUrl: job.spaceVerified || job.phase==='complete' ? job.space?.pageUrl ?? null : null, modelCalls: job.modelCalls, localSaved:job.localSaved,
+    vaultSaved:job.vaultSaved ?? false, localFile:job.vaultReceipt?.file ?? null,
     nextAttemptAt:job.nextAttemptAt,lastError: job.lastError, exclusionReason: job.exclusionReason, updatedAt: job.updatedAt }));
 }
 

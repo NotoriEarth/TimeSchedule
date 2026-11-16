@@ -898,7 +898,7 @@ impl App {
                         }
                         if report.saved > 0 {
                             self.notice =
-                                format!("Space 기록 {}건을 다이어리에 반영했습니다.", report.saved);
+                                format!("프로젝트 기록 {}건을 다이어리에 반영했습니다.", report.saved);
                             self.log(&format!(
                                 "project records saved={} conflicts={} failed={}",
                                 report.saved, report.conflicts, report.failed

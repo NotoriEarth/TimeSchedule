@@ -206,7 +206,7 @@ impl Runner {
             Ok(true)
         })();
         match start {
-            Ok(true) => Some("다이어리의 대기 기록만 Space에 재시도합니다.".into()),
+            Ok(true) => Some("대기 기록의 로컬 저장을 재시도합니다. Space는 선택 설정을 따릅니다.".into()),
             Ok(false) => None,
             Err(e) => Some(format!("대기 기록 재시도 실패: {e}")),
         }

@@ -610,7 +610,7 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
             |v| Message::Native(NativeAction::Opacity(v)),
         ));
     c = c.push(crate::widget_settings::view(app));
-    c=c.push(title("근거 초안과 외부 연결")).push(text("요약과 포트폴리오는 저장된 원문을 정리한 편집 가능한 초안입니다. AI 분석 결과가 아닙니다. ChatGPT/Space·모바일·여러 기기 동기화는 아직 연결되지 않았습니다.").size(14)).push(quiet("상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."));
+    c=c.push(title("문서 저장소와 외부 연결")).push(text("개발 기록은 독립된 TimeScheduleData 문서 저장소에 먼저 보관합니다. 저장 경로·문서 가져오기·Space 선택 설정은 docs/document-vault.md를 참고하세요. Space는 기본 꺼짐이며 모바일·서버 동기화는 아직 제공하지 않습니다. 다이어리와 문서의 수동 편집은 자동 동기화하지 않습니다.").size(14)).push(quiet("상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."));
     scrollable(paper(c)).height(Length::Fill).into()
 }
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,0 +1,107 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { prepare, sync, status } from '../scripts/project-records.mjs';
+import { gitFixture } from './helpers/record-git-fixture.mjs';
+import { configureVault } from '../scripts/document-vault.mjs';
+function setup(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'timeschedule-local-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const f = gitFixture(dir);
+  return { ...f, stateDir: path.join(dir, 'state'), projectRoot: f.repo, vaultRoot: path.join(dir, 'vault') };
+}
+const source = f => ({ workId: randomUUID(), projectTitle: 'TimeSchedule', repoPath: f.repo, gitChanges: f.gitChanges,
+  date: '2026-11-16', kind: 'development', title: '로컬 저장', status: 'verification_pending', detailedMarkdown: '테스트 통과. 사용자 확인 전.' });
+const saved = r => ({ outcome: 'saved', workId: r.workId, revision: r.revision, entryId: r.workId });
+test('default local capture saves Markdown and local diary state without ever invoking publisher', async t => {
+  const f = setup(t), input = source(f); await prepare(input, f); let publications = 0;
+  await sync({ ...f, publisher: async () => { publications++; throw Error('must not publish'); }, importer: async r => {
+    assert.equal(r.deliveryState, 'local'); return saved(r);
+  } });
+  const record = status(f)[0];
+  assert.equal(record.phase, 'local_complete'); assert.equal(record.vaultSaved, true);
+  assert.equal(fs.readFileSync(record.localFile, 'utf8'), input.detailedMarkdown);
+  assert.equal(record.modelCalls, 0); assert.equal(publications, 0);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(f.stateDir, 'wake.json'))).pending, 0);
+});
+test('vault persists before unavailable diary executable and explicit configuration path survives retries', async t => {
+  const f = setup(t); await configureVault(f.stateDir, { root: f.vaultRoot });
+  const input = source(f); await prepare(input, f);
+  const { vaultRoot, ...persisted } = f;
+  await sync({ ...persisted, exe: path.join(f.stateDir, 'missing.exe') });
+  const record = status(f)[0]; assert.equal(record.vaultSaved, true);
+  assert.ok(record.localFile.startsWith(vaultRoot)); assert.ok(record.lastError);
+});
+test('legacy waiting Space work switches to local with a fresh diary revision, ignoring Space backoff', async t => {
+  const f = setup(t), input = source(f); await prepare(input, f);
+  const file = path.join(f.stateDir, input.workId, 'state.json'); const old = JSON.parse(fs.readFileSync(file));
+  old.localSaved = true; old.phase = 'waiting_space'; old.nextAttemptAt = Date.now() + 3600000;
+  fs.writeFileSync(file, JSON.stringify(old));
+  let revision;
+  await sync({ ...f, publisher: async () => { throw Error('must not publish'); }, importer: async r => { revision = r.revision; return saved(r); } });
+  assert.ok(revision > old.finalRevision); assert.equal(status(f)[0].phase, 'local_complete');
+});
+test('a queued diary receipt is distinct from durable vault save and user edits remain conflicts', async t => {
+  const f = setup(t); await prepare(source(f), f);
+  await sync({ ...f, importer: async r => ({ ...saved(r), outcome: 'queued' }) });
+  const queued = status(f)[0]; assert.equal(queued.phase, 'diary_queued'); assert.equal(queued.vaultSaved, true);
+  await sync({ ...f, retryNow: true, importer: async r => ({ ...saved(r), outcome: 'conflict' }) });
+  assert.equal(status(f)[0].phase, 'conflict'); assert.ok(fs.existsSync(queued.localFile));
+});
+
+test('explicit Space opt-in publishes a locally completed record and off prevents subsequent publication', async t => {
+  const f = setup(t), input = source(f); await configureVault(f.stateDir, { root: f.vaultRoot }); await prepare(input, f);
+  await sync({ ...f, importer: async r => saved(r) });
+  await configureVault(f.stateDir, { spaceEnabled: true }); let calls = 0;
+  await sync({ ...f, workId: input.workId, importer: async r => saved(r), publisher: async j => {
+    calls++; return { pageId:'page_1234567890abcdef1234567890abcdef',pageUrl:'https://chatgpt.com/space/page_1234567890abcdef1234567890abcdef',parentPageId:j.source.parentPageId,title:j.source.title,markdown:j.pageMarkdown,indexVerified:true };
+  } });
+  assert.equal(calls, 1); assert.equal(status(f)[0].phase, 'complete');
+  await configureVault(f.stateDir, { spaceEnabled: false });
+  await prepare({ ...input, detailedMarkdown: input.detailedMarkdown + '\n\n후속 결과.' }, f);
+  await sync({ ...f, importer: async r => { assert.equal(r.deliveryState, 'local'); return saved(r); }, publisher: async () => { calls++; throw Error('must not publish'); } });
+  assert.equal(calls, 1); assert.equal(status(f)[0].phase, 'local_complete');
+});
+
+test('background retry after enabling Space never republishes local-complete history', async t => {
+  const f = setup(t), input = source(f); await configureVault(f.stateDir, { root: f.vaultRoot }); await prepare(input, f);
+  await sync({ ...f, importer: async r => saved(r) });
+  await configureVault(f.stateDir, { spaceEnabled: true }); let calls = 0;
+  await sync({ ...f, importer: async r => saved(r), publisher: async () => { calls++; throw Error('must not publish history'); } });
+  assert.equal(calls, 0); assert.equal(status(f)[0].phase, 'local_complete');
+});
+
+test('switching queued revisions from Space to local allocates unique diary revisions across the work', async t => {
+  const f = setup(t), input = source(f); let storedRevision = 0, storedBody;
+  const imported = [];
+  const importer = async r => {
+    imported.push({ revision: r.revision, body: r.detail });
+    if (r.revision === storedRevision && r.detail !== storedBody) return { ...saved(r), outcome: 'conflict' };
+    if (r.revision < storedRevision) return { ...saved(r), outcome: 'stale' };
+    storedRevision = r.revision; storedBody = r.detail; return saved(r);
+  };
+  await prepare(input, f);
+  await sync({ ...f, spaceEnabled: true, importer, publisher: async () => { throw Object.assign(Error('offline'), { publicationNotStarted: true }); } });
+  const newer = input.detailedMarkdown + '\n\n새 수정본.';
+  await prepare({ ...input, detailedMarkdown: newer }, f);
+  await sync({ ...f, importer });
+  assert.ok(status(f).every(job => job.phase === 'local_complete'));
+  assert.equal(storedBody, newer);
+  assert.equal(new Set(imported.map(r => r.revision)).size, imported.length);
+});
+
+test('built native executable completes isolated local capture without model calls', { skip: !process.env.TIMESCHEDULE_RECORD_TEST_EXE }, async t => {
+  const f = setup(t), input = source(f);
+  await configureVault(f.stateDir, { root: f.vaultRoot });
+  await prepare(input, f);
+  const { vaultRoot, ...persisted } = f;
+  await sync({ ...persisted, exe: process.env.TIMESCHEDULE_RECORD_TEST_EXE, dataDir: path.join(path.dirname(f.stateDir), 'native-data') });
+  const record = status(f)[0];
+  assert.equal(record.phase, 'local_complete', record.lastError);
+  assert.equal(record.modelCalls, 0); assert.equal(record.vaultSaved, true);
+  assert.equal(fs.readFileSync(record.localFile, 'utf8'), input.detailedMarkdown);
+  assert.ok(fs.existsSync(path.join(path.dirname(f.stateDir), 'native-data', 'schedule.db')));
+});
