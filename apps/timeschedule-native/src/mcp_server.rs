@@ -368,6 +368,10 @@ struct Platform<'a> {
     profile_type: &'a dyn Fn() -> Option<u32>,
     /// `%APPDATA%\Microsoft\Protect`, where this profile's master keys live.
     protect_dir: Option<std::path::PathBuf>,
+    /// Protects and unprotects a throwaway value. Succeeding means this account
+    /// can use its keys right now, and that it has a key store (Windows creates
+    /// one with the first protected value).
+    self_test: &'a dyn Fn() -> bool,
 }
 impl Platform<'static> {
     fn real() -> Self {
@@ -376,14 +380,19 @@ impl Platform<'static> {
             profile_type: &profile_type,
             protect_dir: std::env::var_os("APPDATA")
                 .map(|roaming| Path::new(&roaming).join("Microsoft").join("Protect")),
+            self_test: &|| {
+                dpapi(b"TimeSchedule key store check", true)
+                    .and_then(|blob| dpapi(&blob, false))
+                    .is_ok()
+            },
         }
     }
 }
 /// Whether this Windows profile holds the master key a DPAPI blob names:
 /// a file named by the key's GUID under `%APPDATA%\Microsoft\Protect\<SID>`.
 /// `None` when that cannot be told, so that an unclear case is never taken for
-/// damage: not the expected blob layout, the folder cannot be listed, or this is
-/// not an ordinary local profile. In a temporary profile (the real one failed
+/// damage: not the expected blob layout, the key store cannot be read or is not
+/// where it is expected, or this is not an ordinary local profile. In a temporary profile (the real one failed
 /// to load) the account's keys are simply elsewhere, and a roaming or mandatory
 /// one may not have received them yet; the token works again after a normal
 /// sign-in.
@@ -414,18 +423,44 @@ fn master_key_present(blob: &[u8], platform: &Platform) -> Option<bool> {
     if (platform.profile_type)()? != 0 {
         return None;
     }
-    let mut profiles = 0;
-    for entry in fs::read_dir(platform.protect_dir.as_ref()?).ok()? {
+    let store = platform.protect_dir.as_ref()?;
+    match find_key(store, &name)? {
+        Some(found) => Some(found),
+        // No key store where it is expected. An account that never protected
+        // anything has none yet (a new PC, a new account), and Windows creates
+        // it with the first protected value. So protect one and look again: if
+        // the store now exists, the blob's key is truly not this account's. If
+        // it still does not, the store is elsewhere or the keys are unusable
+        // for now, and nothing is concluded.
+        None => {
+            if !(platform.self_test)() {
+                return None;
+            }
+            find_key(store, &name)?
+        }
+    }
+}
+/// Looks for the key file `name` in the key store. Outer `None`: the store
+/// could not be read. `Some(None)`: there is no store (no folder, or no account
+/// folder in it). `Some(Some(found))`: a store exists and holds the key or not.
+fn find_key(store: &Path, name: &str) -> Option<Option<bool>> {
+    let entries = match fs::read_dir(store) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(None),
+        Err(_) => return None,
+    };
+    let mut accounts = 0;
+    for entry in entries {
         let entry = entry.ok()?;
         if !entry.file_name().to_string_lossy().starts_with("S-1-") {
             continue;
         }
-        profiles += 1;
-        if entry.path().join(&name).try_exists().ok()? {
-            return Some(true);
+        accounts += 1;
+        if entry.path().join(name).try_exists().ok()? {
+            return Some(Some(true));
         }
     }
-    (profiles > 0).then_some(false)
+    Some((accounts > 0).then_some(false))
 }
 /// `GetProfileType`: 0 for an ordinary local profile, otherwise PT_* flags.
 #[cfg(windows)]
@@ -912,6 +947,7 @@ mod tests {
                 unprotect: &|_| Err(NTE_BAD_KEY_STATE),
                 profile_type: &move || kind,
                 protect_dir: Some(other_profile.clone()),
+                self_test: &|| panic!("nothing is probed outside a local profile"),
             };
             assert_eq!(master_key_present(&bytes, &platform), None, "{kind:?}");
             let error = issue_at_start(&dir, &platform).unwrap_err();
@@ -925,11 +961,71 @@ mod tests {
             unprotect: &|_| Err(NTE_BAD_KEY_STATE),
             profile_type: &|| Some(0),
             protect_dir: Some(other_profile.clone()),
+            self_test: &|| panic!("the key store is there to be read"),
         };
         let (_, issue) = issue_at_start(&dir, &local).unwrap();
         assert_eq!(issue, Issue::Recovered(Damage::ForeignKey));
         std::fs::remove_dir_all(dir).unwrap();
         std::fs::remove_dir_all(other_profile).unwrap();
+    }
+    #[test]
+    fn a_profile_that_never_protected_anything_still_recovers_a_copied_token() {
+        // A new Windows account on a new PC: an ordinary local profile whose key
+        // store does not exist yet, because Windows creates it with the first
+        // protected value. A token copied from the old PC must still be
+        // replaced, or MCP would stay off on every start.
+        let foreign = |dir: &Path| {
+            token(dir).unwrap();
+            std::fs::read(dir.join(TOKEN_FILE)).unwrap()
+        };
+        let sid = "S-1-5-21-1-2-3-1001";
+        for store_exists_but_is_empty in [false, true] {
+            let dir = data_dir();
+            let bytes = foreign(&dir);
+            let profile = data_dir();
+            let store = profile.join("Protect");
+            if store_exists_but_is_empty {
+                std::fs::create_dir(&store).unwrap();
+            }
+            let probes = std::cell::Cell::new(0);
+            let platform = Platform {
+                unprotect: &|_| Err(NTE_BAD_KEY_STATE),
+                profile_type: &|| Some(0),
+                protect_dir: Some(store.clone()),
+                // Protecting a value makes Windows create this account's store.
+                self_test: &|| {
+                    probes.set(probes.get() + 1);
+                    std::fs::create_dir_all(store.join(sid)).unwrap();
+                    true
+                },
+            };
+            assert_eq!(master_key_present(&bytes, &platform), Some(false));
+            assert_eq!(probes.get(), 1);
+            let (_, issue) = issue_at_start(&dir, &platform).unwrap();
+            assert_eq!(issue, Issue::Recovered(Damage::ForeignKey));
+            assert_eq!(probes.get(), 1, "an existing store is not probed again");
+            std::fs::remove_dir_all(dir).unwrap();
+            std::fs::remove_dir_all(profile).unwrap();
+        }
+        // Without a store where it is expected, nothing is concluded: either this
+        // account cannot use its keys now, or the store is somewhere else.
+        for probe_works in [false, true] {
+            let dir = data_dir();
+            let bytes = foreign(&dir);
+            let profile = data_dir();
+            let platform = Platform {
+                unprotect: &|_| Err(NTE_BAD_KEY_STATE),
+                profile_type: &|| Some(0),
+                protect_dir: Some(profile.join("Protect")),
+                self_test: &move || probe_works,
+            };
+            assert_eq!(master_key_present(&bytes, &platform), None);
+            let error = issue_at_start(&dir, &platform).unwrap_err();
+            assert!(error.contains("다시 시도"), "{error}");
+            assert_eq!(std::fs::read(dir.join(TOKEN_FILE)).unwrap(), bytes);
+            std::fs::remove_dir_all(dir).unwrap();
+            std::fs::remove_dir_all(profile).unwrap();
+        }
     }
     #[test]
     fn a_decryption_failure_that_may_pass_is_reported_and_the_token_survives() {
