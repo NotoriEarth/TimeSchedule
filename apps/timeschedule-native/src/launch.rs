@@ -36,12 +36,18 @@ pub fn route(args: &[String]) -> Route {
     }
 }
 /// Whether `argument` is a switch that names MCP without being a helper mode:
-/// `--mcp_stdio`, `-mcp-stdio`, `--MCP-STDIO`. Whoever wrote it meant a helper.
+/// `--mcp_stdio`, `-mcp-stdio`, `--MCP-STDIO`, `--mcp-stdio=C:\data`. Whoever
+/// wrote it meant a helper. After a dash anything may follow the name; after a
+/// slash a further separator makes it a path (`/mcp/notes.txt`) instead.
 fn resembles_helper(argument: &str) -> bool {
-    let name = argument.trim_start_matches(['-', '/']);
-    name.len() < argument.len()
-        && !name.contains(['\\', '/', ':'])
-        && name.to_ascii_lowercase().starts_with("mcp")
+    let names_mcp = |name: &str| name.to_ascii_lowercase().starts_with("mcp");
+    if argument.starts_with('-') {
+        names_mcp(argument.trim_start_matches('-'))
+    } else if let Some(name) = argument.strip_prefix('/') {
+        names_mcp(name) && !name.contains(['\\', '/'])
+    } else {
+        false
+    }
 }
 /// `argument` on one line and not too long to show in the window.
 fn shown(argument: &str) -> String {
@@ -109,11 +115,18 @@ mod tests {
             &["-mcp-stdio"],
             &["--MCP-STDIO"],
             &["/mcp-stdio"],
+            &["--mcp:stdio"],
+            &["--mcp-stdio=C:\\data"],
+            &["-mcp", "C:\\data"],
         ] {
             assert_eq!(routed(args), Route::UnknownHelper, "{args:?}");
         }
         // A path or a word that merely contains the letters is not a switch.
-        for args in [&["C:\\tools\\mcp\\notes.txt"][..], &["mcp"]] {
+        for args in [
+            &["C:\\tools\\mcp\\notes.txt"][..],
+            &["mcp"],
+            &["/mcp/notes.txt"],
+        ] {
             assert!(matches!(routed(args), Route::Window { .. }), "{args:?}");
         }
     }
