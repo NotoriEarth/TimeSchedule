@@ -8,6 +8,7 @@ mod desktop_widget;
 mod editor;
 mod frozen;
 mod icons;
+mod launch;
 mod mcp;
 mod mcp_clients;
 mod mcp_connection;
@@ -32,13 +33,23 @@ mod worker;
 use app::App;
 use iced::Font;
 pub static DPI_INIT_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// An argument that meant nothing; the window says so once it is open.
+pub static IGNORED_ARGUMENT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn main() {
-    if let Some(code) = mcp_connection::try_run() {
-        std::process::exit(code);
-    }
-    if let Some(code) = record_cli::try_run() {
-        std::process::exit(code);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match launch::route(&args) {
+        launch::Route::Helper => std::process::exit(mcp_connection::run(&args)),
+        launch::Route::Record => std::process::exit(record_cli::run(&args)),
+        launch::Route::UnknownHelper => {
+            eprintln!("알 수 없는 MCP 도우미 모드입니다. TimeSchedule 설정 → 로컬 일정 MCP → AI 연결 도우미에서 다시 등록하세요.");
+            std::process::exit(2);
+        }
+        launch::Route::Window { ignored } => {
+            if let Some(ignored) = ignored {
+                let _ = IGNORED_ARGUMENT.set(ignored);
+            }
+        }
     }
     if let Err(error) = timeschedule_desktop::windows::initialize_process_dpi_for_shell() {
         let _ = DPI_INIT_ERROR.set(error);

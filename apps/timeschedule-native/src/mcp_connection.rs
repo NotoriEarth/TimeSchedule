@@ -309,34 +309,33 @@ pub(crate) fn helper_auth_headers(args: &[String]) -> Result<String, String> {
     let url = url.ok_or("0.13.1 이전에 만든 등록이라 인증 정보를 보낼 주소를 확인할 수 없습니다. TimeSchedule 설정 → 로컬 일정 MCP → AI 연결 도우미에서 다시 등록하세요. 인증 정보는 보내지 않았습니다.")?;
     auth_headers(dir, url)
 }
-pub fn try_run() -> Option<i32> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mode = args.first()?.as_str();
-    if !["--mcp-auth-headers", "--mcp-stdio", "--mcp-probe"].contains(&mode) {
-        return None;
-    }
+/// Runs the helper mode in `args[0]` (see `launch::HELPER_MODES`) and returns
+/// the exit code.
+pub fn run(args: &[String]) -> i32 {
+    let mode = args.first().map(String::as_str).unwrap_or_default();
     let result = (|| {
-        let (dir, _) = helper_arguments(&args)?;
+        let (dir, _) = helper_arguments(args)?;
         match mode {
             "--mcp-auth-headers" => {
                 // This stdout is the credential channel consumed by the MCP client.
-                println!("{}", helper_auth_headers(&args)?);
+                println!("{}", helper_auth_headers(args)?);
                 Ok(())
             }
             "--mcp-probe" => {
                 println!("{}", json!({"status":probe(dir)?}));
                 Ok(())
             }
-            _ => bridge(dir, std::io::stdin().lock(), std::io::stdout().lock()),
+            "--mcp-stdio" => bridge(dir, std::io::stdin().lock(), std::io::stdout().lock()),
+            _ => Err("알 수 없는 MCP 도우미 모드입니다.".into()),
         }
     })();
-    Some(match result {
+    match result {
         Ok(()) => 0,
         Err(message) => {
             eprintln!("{message}");
             1
         }
-    })
+    }
 }
 
 #[cfg(test)]
