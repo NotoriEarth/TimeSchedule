@@ -8,13 +8,15 @@ use crate::{
 };
 use chrono::{Datelike, Local};
 use iced::widget::{
-    button, column, container, mouse_area, responsive, row, scrollable, slider, space, text, Row,
+    button, column, container, mouse_area, responsive, row, scrollable, space, text, Row,
 };
 use iced::{Alignment, Border, Element, Length};
 
 // Keep the widget's typography and geometry together for later design changes.
 const SUMMARY_HEIGHT: f32 = 14.0;
-const CONTENT_GAP: f32 = 4.0;
+const CONTENT_GAP: f32 = 2.0;
+/// The unlocked resize grip is 26px square over the 8px outer padding.
+const GRIP_ROOM: f32 = 18.0;
 const WEEKDAYS: [&str; 7] = [
     "일요일",
     "월요일",
@@ -71,7 +73,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         let minimum = (a.date_height + CONTENT_GAP + SUMMARY_HEIGHT + a.padding * 2.0)
             * rows as f32
             + a.gap * rows as f32
-            + if width < 560.0 { 160.0 } else { 130.0 };
+            + if width < 560.0 { 116.0 } else { 86.0 }
+            // The grip's room and the 6px body spacing before it come out of
+            // the scrollable minimum, never out of the cells.
+            + if app.preferences.widget_locked {
+                0.0
+            } else {
+                GRIP_ROOM + 6.0
+            };
         let height = (size.height - 16.0).max(minimum);
         let base: Element<'_, Message> = container(
             scrollable(content(app, width).height(height))
@@ -159,7 +168,15 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
         control("오늘", Message::WidgetToday),
         control("›", Message::WidgetMonth(1)),
         control("다이어리", Message::ShowManager),
-        control("설정", Message::WidgetSetting(Change::Open))
+        control("설정", Message::WidgetSetting(Change::Open)),
+        control(
+            if app.preferences.widget_locked {
+                "잠금 해제"
+            } else {
+                "위치 잠금"
+            },
+            Message::Native(NativeAction::Lock(!app.preferences.widget_locked))
+        )
     ]
     .spacing(3)
     .align_y(Alignment::Center);
@@ -293,47 +310,6 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
         }
         grid = grid.push(cells);
     }
-    let mut footer = row![
-        control(
-            if app.preferences.widget_locked {
-                "잠금 해제"
-            } else {
-                "위치 잠금"
-            },
-            Message::Native(NativeAction::Lock(!app.preferences.widget_locked))
-        ),
-        space().width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
-    if width >= 680.0 {
-        footer = footer
-            .push(
-                text(if app.preferences.widget_locked {
-                    "날짜 더블클릭 · 체크로 완료"
-                } else {
-                    "이동 영역을 드래그 · 오른쪽 아래 크기 조정"
-                })
-                .size(11)
-                .color(p.muted),
-            )
-            .push(space().width(Length::Fill));
-    }
-    footer = footer
-        .push(
-            text(format!("배경 {}%", app.preferences.widget_opacity))
-                .size(11)
-                .color(p.muted),
-        )
-        .push(
-            slider(40..=100, app.preferences.widget_opacity, |v| {
-                Message::Native(NativeAction::Opacity(v))
-            })
-            .width(if width < 420.0 { 70 } else { 100 }),
-        );
-    if !app.preferences.widget_locked {
-        footer = footer.push(space().width(22));
-    }
     let min_grid_width = 7.0
         * (crate::text_layout::text_width_with_font("88", a.date_size, font)
             + 8.0
@@ -357,11 +333,7 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
             .padding(4)
             .width(Length::Fill)
             .style(panel),
-        grid,
-        container(footer)
-            .padding(4)
-            .width(Length::Fill)
-            .style(panel)
+        grid
     ]
     .spacing(6)
     .width(Length::Fill);
@@ -395,6 +367,9 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
                 .padding(4)
                 .style(panel),
         );
+    }
+    if !app.preferences.widget_locked {
+        body = body.push(space().height(GRIP_ROOM));
     }
     body
 }

@@ -160,6 +160,8 @@ pub enum Message {
     WidgetMonth(i32),
     WidgetToday,
     WidgetDate(NaiveDate),
+    /// Open the day window from the diary, placed over the diary.
+    ManagerDate(NaiveDate),
     QuickReady(window::Id),
     PopupPositioned(window::Id, window::Id, Result<(), String>),
 
@@ -220,6 +222,8 @@ pub struct App {
     pub quick_window: Option<window::Id>,
     pub placing_popups: HashMap<window::Id, window::Id>,
     pub quick_date: Option<NaiveDate>,
+    /// The window the day window was opened from; it is placed over it.
+    pub quick_source: Option<window::Id>,
 
     pub quick_generation: u64,
     pub quick_loading: bool,
@@ -381,6 +385,7 @@ impl App {
             quick_window: None,
             placing_popups: HashMap::new(),
             quick_date: None,
+            quick_source: None,
 
             quick_generation: 0,
             quick_loading: false,
@@ -1183,13 +1188,16 @@ impl App {
                 return self.jump_widget(Local::now().date_naive(), true);
             }
             Message::WidgetDate(date) => {
-                return self.open_quick(date);
+                return self.open_quick(date, self.widget.unwrap_or(self.manager));
+            }
+            Message::ManagerDate(date) => {
+                return self.open_quick(date, self.manager);
             }
             Message::PopupPositioned(id, token, result) => {
                 return self.popup_positioned(id, token, result)
             }
             Message::QuickReady(id) if Some(id) == self.quick_window => {
-                return self.place_popup(self.widget.unwrap_or(self.manager), id);
+                return self.place_popup(self.quick_anchor(), id);
             }
             Message::Project(id) if self.editor.is_none() => {
                 self.project = id;
@@ -1719,6 +1727,7 @@ mod tests {
             quick_window: None,
             placing_popups: HashMap::new(),
             quick_date: None,
+            quick_source: None,
 
             quick_generation: 0,
             quick_loading: false,
@@ -1987,7 +1996,7 @@ mod tests {
         let mut app = fixture();
         app.widget = Some(window::Id::unique());
         let date = app.selected;
-        let _ = app.open_quick(date);
+        let _ = app.open_quick(date, app.manager);
         assert_eq!(
             app.focus_quick().units(),
             0,

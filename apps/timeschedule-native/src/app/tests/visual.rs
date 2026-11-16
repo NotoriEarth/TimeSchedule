@@ -100,119 +100,403 @@ fn calendar_text_bounds(mut element: Element<'_, Message>, size: Size) -> Vec<(S
     probe.0
 }
 
-#[test]
-fn calendar_overflow_shows_record_before_more_in_short_cell() {
-    let mut app = overflowing_calendar_fixture(3);
-    app.preferences.widget.line_gap = 0;
-    let day = app
-        .snapshot
+fn selected_day(app: &App) -> &timeschedule_core::calendar::CalendarDay {
+    app.snapshot
         .days
         .iter()
         .find(|d| d.date == app.selected.to_string())
-        .unwrap();
+        .unwrap()
+}
+
+#[test]
+fn day_cell_names_hidden_items_instead_of_a_count() {
+    let mut app = overflowing_calendar_fixture(5);
+    app.preferences.widget.line_gap = 0;
+    let day = selected_day(&app);
+    assert_eq!(day.items.len(), 5);
+    // Three 14.3px lines fit (two with the diary's 1px gaps): two items and
+    // the line that names the rest.
     for quick in [false, true] {
         let labels = calendar_text_bounds(
-            crate::calendar_ui::day_items(&app, Some(day), 180., 52., 11., quick),
-            Size::new(180., 52.),
+            crate::calendar_ui::day_items(&app, Some(day), 240., 45., 11., quick),
+            Size::new(240., 45.),
         );
+        for item in &day.items[..2] {
+            assert!(labels.iter().any(|(s, _)| s == &item.title), "{labels:?}");
+        }
+        let rest = day.items[2..]
+            .iter()
+            .map(|i| i.title.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let summary = labels
+            .iter()
+            .find(|(s, _)| s == &rest)
+            .unwrap_or_else(|| panic!("hidden titles are named: {labels:?}"))
+            .1;
         assert!(
-            labels
-                .iter()
-                .any(|(s, _)| day.items.iter().any(|i| &i.title == s)),
-            "a complete two-line record fits before the footer: {labels:?}"
+            (summary.y + summary.height - 45.).abs() < 1.,
+            "the summary sits on the bottom edge: {summary:?}"
         );
+        assert!(!labels.iter().any(|(s, _)| s.ends_with("개 더")));
+    }
+}
+
+#[test]
+fn day_cell_record_is_one_line_with_project_prefix() {
+    let app = calendar_record_fixture();
+    let day = selected_day(&app);
+    for quick in [false, true] {
+        let labels = calendar_text_bounds(
+            crate::calendar_ui::day_items(&app, Some(day), 160., 60., 12., quick),
+            Size::new(160., 60.),
+        );
+        let project = labels.iter().find(|(s, _)| s == "TS").expect("prefix").1;
+        let title = labels
+            .iter()
+            .find(|(s, _)| s == "연동기록")
+            .expect("title")
+            .1;
+        assert!((project.y - title.y).abs() < 1., "{project:?} {title:?}");
+        assert!(project.x < title.x);
+    }
+}
+
+#[test]
+fn day_cell_record_without_project_has_no_prefix() {
+    let app = calendar_record_fixture();
+    let mut day = selected_day(&app).clone();
+    for item in &mut day.items {
+        item.project_id = None;
+        item.project_title.clear();
+        item.project_short_name.clear();
+    }
+    let labels = calendar_texts(
+        crate::calendar_ui::day_items(&app, Some(&day), 160., 60., 12., true),
+        Size::new(160., 60.),
+    );
+    assert_eq!(labels, ["연동기록"]);
+}
+
+#[test]
+fn day_cell_wraps_a_cut_title_when_room_remains() {
+    let app = calendar_record_fixture();
+    let mut day = selected_day(&app).clone();
+    let title = "아주 긴 작업 제목이 날짜 칸 하나에 다 들어가지 않는 경우";
+    day.items[0].title = title.into();
+    for quick in [false, true] {
+        let labels = calendar_text_bounds(
+            crate::calendar_ui::day_items(&app, Some(&day), 150., 100., 12., quick),
+            Size::new(150., 100.),
+        );
+        let lines: Vec<_> = labels.iter().filter(|(s, _)| s != "TS").collect();
+        assert_eq!(lines.len(), 2, "{labels:?}");
+        let (first, second) = (&lines[0], &lines[1]);
+        assert!(second.1.y > first.1.y + 10., "{labels:?}");
+        assert!(title.starts_with(first.0.trim_end()), "{labels:?}");
+        assert!(!first.0.ends_with('…'));
         assert!(
-            labels.iter().any(|(s, _)| s == "+2개 더"),
-            "only two records remain hidden: {labels:?}"
+            title.contains(second.0.trim_end_matches('…').trim()),
+            "{labels:?}"
         );
     }
 }
 
 #[test]
-fn calendar_overflow_footer_uses_bottom_edge_and_disappears_when_all_fit() {
+fn day_cell_keeps_one_line_per_item_when_overflowing() {
     let mut app = overflowing_calendar_fixture(5);
     app.preferences.widget.line_gap = 0;
-    let day = app
-        .snapshot
-        .days
+    let mut day = selected_day(&app).clone();
+    day.items[0].title = "아주 긴 작업 제목이 날짜 칸 하나에 다 들어가지 않는 경우".into();
+    let labels = calendar_text_bounds(
+        crate::calendar_ui::day_items(&app, Some(&day), 150., 45., 11., true),
+        Size::new(150., 45.),
+    );
+    let first = labels
         .iter()
-        .find(|d| d.date == app.selected.to_string())
-        .unwrap();
-    for quick in [false, true] {
-        let labels = calendar_text_bounds(
-            crate::calendar_ui::day_items(&app, Some(day), 180., 160., 11., quick),
-            Size::new(180., 160.),
-        );
-        let footer = labels
+        .filter(|(s, _)| s.starts_with("아주"))
+        .collect::<Vec<_>>();
+    assert_eq!(first.len(), 1, "{labels:?}");
+    assert!(first[0].0.ends_with('…'));
+}
+
+#[test]
+fn day_cell_shows_completed_line_when_room() {
+    let app = calendar_record_fixture();
+    let mut day = selected_day(&app).clone();
+    day.total += 2;
+    day.completed = 2;
+    let labels = calendar_texts(
+        crate::calendar_ui::day_items(&app, Some(&day), 160., 60., 12., true),
+        Size::new(160., 60.),
+    );
+    assert!(labels.iter().any(|s| s == "연동기록"), "{labels:?}");
+    assert!(labels.iter().any(|s| s == "완료 2"), "{labels:?}");
+    day.items.clear();
+    day.total = 2;
+    let labels = calendar_texts(
+        crate::calendar_ui::day_items(&app, Some(&day), 160., 60., 12., true),
+        Size::new(160., 60.),
+    );
+    assert_eq!(labels, ["완료 2"]);
+}
+
+#[test]
+fn day_cell_keeps_completed_line_before_wrapping_titles() {
+    let mut app = calendar_record_fixture();
+    app.preferences.widget.line_gap = 1;
+    let mut day = selected_day(&app).clone();
+    day.items[0].title = "아주 긴 작업 제목이 날짜 칸 하나에 다 들어가지 않는 경우".into();
+    day.total += 2;
+    day.completed = 2;
+    // Two 16.9px lines and one gap fit in 40px, three lines do not.
+    let labels = calendar_texts(
+        crate::calendar_ui::day_items(&app, Some(&day), 150., 40., 13., true),
+        Size::new(150., 40.),
+    );
+    assert!(labels.iter().any(|s| s == "완료 2"), "{labels:?}");
+    assert_eq!(
+        labels.iter().filter(|s| s.starts_with("아주")).count(),
+        1,
+        "{labels:?}"
+    );
+}
+
+#[test]
+fn unlocked_widget_resize_grip_covers_no_cell_text() {
+    let mut app = fixture();
+    app.widget_attached = true;
+    app.preferences.widget_locked = false;
+    let store = app.store.clone().unwrap();
+    let last = *app.widget_days().last().unwrap();
+    // Long titles, so the cell's last line runs to its right edge.
+    for title in [
+        "아침 운동과 산책 일정",
+        "점심 약속과 은행 업무",
+        "코드 리뷰와 배포 점검",
+        "저녁 장보기와 요리 준비",
+        "독서 모임 발표 자료 정리",
+        "주간 회고와 다음 주 계획",
+    ] {
+        let mut form = Form::new(Kind::Event, last.to_string(), None);
+        form.title = title.into();
+        form.save(&store).unwrap();
+    }
+    app.snapshot = worker::snapshot(&store, &app.scope()).unwrap();
+    let size = Size::new(960., 640.);
+    let grip = Rectangle::new(
+        Point::new(size.width - 26., size.height - 26.),
+        Size::new(26., 26.),
+    );
+    let labels = calendar_text_bounds(crate::desktop_widget::view(&app), size);
+    assert!(
+        labels
             .iter()
-            .find(|(s, _)| s == "+2개 더")
-            .expect("three whole records fit, leaving two hidden")
-            .1;
+            .any(|(s, _)| s.contains("독서 모임") || s.contains("+")),
+        "{labels:?}"
+    );
+    for (s, b) in labels.iter().filter(|(s, _)| s != "↘") {
         assert!(
-            (footer.y + footer.height - 160.).abs() < 1.,
-            "footer must sit at the bottom, not immediately after the rows: {footer:?}"
+            b.intersection(&grip).is_none(),
+            "{s:?} {b:?} under the grip"
         );
-        let expanded = calendar_texts(
-            crate::calendar_ui::day_items(&app, Some(day), 180., 220., 11., quick),
-            Size::new(180., 220.),
+    }
+}
+
+#[test]
+fn short_unlocked_widget_still_shows_a_line_per_cell() {
+    // A six-week month in a short widget with small text: the grip's room
+    // must come out of the scrollable minimum, not out of the cells.
+    for locked in [true, false] {
+        let mut app = fixture();
+        app.widget_attached = true;
+        app.preferences.widget_locked = locked;
+        app.preferences.widget.event_size = 9;
+        app.widget_month = NaiveDate::from_ymd_opt(2026, 5, 1).unwrap();
+        assert_eq!(app.widget_days().len(), 42, "May 2026 spans six weeks");
+        let store = app.store.clone().unwrap();
+        let mut form = Form::new(Kind::Event, "2026-05-15".into(), None);
+        form.title = "회의".into();
+        form.save(&store).unwrap();
+        app.snapshot = worker::snapshot(&store, &app.scope()).unwrap();
+        let labels = calendar_texts(crate::desktop_widget::view(&app), Size::new(960., 360.));
+        assert!(
+            labels.iter().any(|s| s == "회의"),
+            "locked={locked}: {labels:?}"
         );
-        assert!(!expanded.iter().any(|s| s.ends_with("개 더")));
-        for item in &day.items {
-            assert!(expanded.contains(&item.title));
+    }
+}
+
+fn click_text(mut element: Element<'_, Message>, size: Size, target: Rectangle) -> Vec<Message> {
+    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, size),
+    );
+    let bounds = Rectangle::new(Point::ORIGIN, size);
+    let mut messages = Vec::new();
+    for press in [true, false] {
+        let event = iced::Event::Mouse(if press {
+            mouse::Event::ButtonPressed(mouse::Button::Left)
+        } else {
+            mouse::Event::ButtonReleased(mouse::Button::Left)
+        });
+        element.as_widget_mut().update(
+            &mut tree,
+            &event,
+            layout::Layout::new(&node),
+            mouse::Cursor::Available(target.center()),
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut iced::advanced::Shell::new(&mut messages),
+            &bounds,
+        );
+    }
+    messages
+}
+
+#[test]
+fn day_cell_summary_opens_the_day_from_its_own_window() {
+    let mut app = overflowing_calendar_fixture(5);
+    app.preferences.widget.line_gap = 0;
+    let day = selected_day(&app);
+    let date = app.selected;
+    let rest = day.items[2..]
+        .iter()
+        .map(|i| i.title.as_str())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let size = Size::new(240., 45.);
+    for widget in [false, true] {
+        let summary = calendar_text_bounds(
+            crate::calendar_ui::day_items(&app, Some(day), 240., 45., 11., widget),
+            size,
+        )
+        .into_iter()
+        .find(|(s, _)| s == &rest)
+        .expect("summary line")
+        .1;
+        let messages = click_text(
+            crate::calendar_ui::day_items(&app, Some(day), 240., 45., 11., widget),
+            size,
+            summary,
+        );
+        if widget {
+            assert!(
+                matches!(&messages[..], [Message::WidgetDate(d)] if *d == date),
+                "{messages:?}"
+            );
+        } else {
+            assert!(
+                matches!(&messages[..], [Message::ManagerDate(d)] if *d == date),
+                "{messages:?}"
+            );
         }
     }
 }
 
 #[test]
-fn calendar_overflow_default_diary_and_widget_show_content_before_more() {
-    let app = overflowing_calendar_fixture(3);
-    for (view, size, right) in [
-        (
-            crate::views::view(&app, app.manager),
-            Size::new(1160., 820.),
-            870.,
-        ),
-        (
-            crate::desktop_widget::view(&app),
-            Size::new(960., 640.),
-            960.,
-        ),
-    ] {
-        let labels = calendar_text_bounds(view, size);
-        let footer = labels
-            .iter()
-            .find(|(s, b)| s == "+2개 더" && b.x < right)
-            .expect("one record and two hidden records in the calendar cell")
-            .1;
-        assert!(
-            labels
-                .iter()
-                .any(|(s, b)| (s.starts_with("기록") || s == "연동기록")
-                    && b.x < right
-                    && b.y < footer.y
-                    && b.y > footer.y - 55.),
-            "show a task title before the footer, not only a count: {labels:?}"
-        );
+fn day_window_is_placed_over_the_window_it_was_opened_from() {
+    let mut app = fixture();
+    let widget = window::Id::unique();
+    app.widget = Some(widget);
+    let date = app.selected;
+    assert_eq!(app.quick_anchor(), widget, "nothing opened yet: the widget");
+    let _ = app.update(Message::ManagerDate(date));
+    assert_eq!(app.quick_anchor(), app.manager);
+    // Reopening the same day window from the other side moves it there.
+    let _ = app.update(Message::WidgetDate(date));
+    assert_eq!(app.quick_anchor(), widget);
+    let _ = app.update(Message::ManagerDate(date));
+    assert_eq!(app.quick_anchor(), app.manager);
+    // While an edit is open the window stays where it is.
+    let _ = app.update(Message::New(Kind::Event, None));
+    assert!(app.editor.is_some());
+    let _ = app.update(Message::WidgetDate(date));
+    assert_eq!(app.quick_anchor(), app.manager);
+}
+
+#[test]
+fn day_cell_text_stays_inside_cell() {
+    let mut app = overflowing_calendar_fixture(5);
+    let mut day = selected_day(&app).clone();
+    day.items[1].title = "WWWW 한글 일정 테스트 123456 아주 긴 제목".into();
+    day.total += 3;
+    day.completed = 3;
+    for gap in [0, 3] {
+        app.preferences.widget.line_gap = gap;
+        for size in [9., 13., 24.] {
+            for (width, height) in [(120., 100.), (60., 30.), (40., 10.)] {
+                for quick in [false, true] {
+                    let labels = calendar_text_bounds(
+                        crate::calendar_ui::day_items(&app, Some(&day), width, height, size, quick),
+                        Size::new(width, height),
+                    );
+                    for (s, b) in labels {
+                        assert!(
+                            b.x + b.width <= width + 0.1 && b.y + b.height <= height + 0.1,
+                            "{s:?} {b:?} in {width}x{height} at {size}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
 #[test]
-fn calendar_overflow_large_font_footer_stays_inside_cell() {
-    let mut app = overflowing_calendar_fixture(3);
-    app.preferences.widget.line_gap = 0;
-    let day = app
-        .snapshot
-        .days
+fn default_diary_and_widget_cells_show_every_record_of_a_busy_day() {
+    let app = overflowing_calendar_fixture(3);
+    let titles: Vec<_> = selected_day(&app)
+        .items
         .iter()
-        .find(|d| d.date == app.selected.to_string())
-        .unwrap();
-    let labels = calendar_text_bounds(
-        crate::calendar_ui::day_items(&app, Some(day), 240., 165., 24., true),
-        Size::new(240., 165.),
-    );
-    assert!(labels.iter().any(|(s, _)| s == "+2개 더"));
-    for (_, bounds) in labels {
-        assert!(bounds.y + bounds.height <= 165.1);
+        .map(|i| i.title.clone())
+        .collect();
+    assert_eq!(titles.len(), 3);
+    for (view, size) in [
+        (
+            crate::views::view(&app, app.manager),
+            Size::new(1160., 820.),
+        ),
+        (crate::desktop_widget::view(&app), Size::new(960., 640.)),
+    ] {
+        let labels = calendar_texts(view, size);
+        for title in &titles {
+            assert!(labels.contains(title), "{title} hidden: {labels:?}");
+        }
+        assert!(!labels.iter().any(|s| s.ends_with("개 더")));
+    }
+}
+
+#[test]
+fn widget_has_no_bottom_bar_and_lock_sits_in_the_toolbar() {
+    let mut app = calendar_record_fixture();
+    for locked in [false, true] {
+        app.preferences.widget_locked = locked;
+        let labels = calendar_text_bounds(crate::desktop_widget::view(&app), Size::new(960., 640.));
+        assert!(
+            !labels.iter().any(|(s, _)| s.starts_with("배경 ")),
+            "{labels:?}"
+        );
+        let lock = labels
+            .iter()
+            .find(|(s, _)| {
+                s == if locked {
+                    "잠금 해제"
+                } else {
+                    "위치 잠금"
+                }
+            })
+            .expect("lock control")
+            .1;
+        let weekday = labels
+            .iter()
+            .find(|(s, _)| s == "월요일")
+            .expect("weekday heading")
+            .1;
+        assert!(lock.y < weekday.y, "{lock:?} {weekday:?}");
     }
 }
 
@@ -222,12 +506,64 @@ fn render_calendar_overflow_previews() {
     let output = PathBuf::from(std::env::var_os("TIMESCHEDULE_PREVIEW_DIR").unwrap());
     std::fs::create_dir_all(&output).unwrap();
     let mut app = overflowing_calendar_fixture(3);
-    for (name, widget, size) in [
-        ("diary", false, Size::new(1160., 820.)),
-        ("diary-tall", false, Size::new(1160., 1280.)),
-        ("widget", true, Size::new(960., 640.)),
-        ("widget-tall", true, Size::new(960., 1100.)),
+    // A busy day with timed, all-day and long items, and one that overflows.
+    let store = app.store.clone().unwrap();
+    for (day, start, title) in [
+        (12, "09:00", "팀 주간 회의"),
+        (12, "14:00", "치과 예약"),
+        (12, "", "장보기"),
+        (
+            20,
+            "10:00",
+            "아주 긴 제목의 분기 계획 검토 회의와 후속 정리",
+        ),
+        (22, "08:30", "출근 전 운동"),
+        (22, "12:00", "점심 약속"),
+        (22, "15:00", "코드 리뷰"),
+        (22, "18:00", "저녁 장보기"),
+        (22, "20:00", "독서 모임"),
+        (22, "21:00", "주간 회고"),
     ] {
+        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, day).unwrap();
+        let mut form = Form::new(Kind::Event, date.to_string(), None);
+        form.title = title.into();
+        form.all_day = start.is_empty();
+        if !start.is_empty() {
+            form.start = start.into();
+            form.end = "23:00".into();
+        }
+        form.save(&store).unwrap();
+    }
+    app.snapshot = worker::snapshot(&store, &app.scope()).unwrap();
+    for (name, widget, size, theme) in [
+        ("diary", false, Size::new(1160., 820.), AppTheme::Midnight),
+        (
+            "diary-tall",
+            false,
+            Size::new(1160., 1280.),
+            AppTheme::Midnight,
+        ),
+        ("widget", true, Size::new(960., 640.), AppTheme::Midnight),
+        (
+            "widget-tall",
+            true,
+            Size::new(960., 1100.),
+            AppTheme::Midnight,
+        ),
+        (
+            "widget-light",
+            true,
+            Size::new(960., 640.),
+            AppTheme::Porcelain,
+        ),
+        (
+            "widget-small",
+            true,
+            Size::new(640., 420.),
+            AppTheme::Midnight,
+        ),
+    ] {
+        app.preferences.theme = theme;
         app.manager_size = size;
         let mut element = if widget {
             crate::desktop_widget::view(&app)
@@ -609,11 +945,12 @@ fn category_delete_controls_move_records_and_refresh_both_surfaces() {
         crate::desktop_widget::view(&app),
     ] {
         let labels = calendar_texts(element, Size::new(1200., 1200.));
+        // A record without a project shows only its title; the moved category
+        // shows as the line's colour, checked through the snapshot above.
         assert!(
             labels.iter().any(|label| label.starts_with("분류 기록")),
             "{labels:?}"
         );
-        assert!(labels.iter().any(|label| label == "보관"), "{labels:?}");
     }
     assert!(app.categories.notice.contains("3"));
 }
@@ -2429,7 +2766,7 @@ fn diary_and_widget_headings_have_separate_year_and_month_targets() {
 }
 
 #[test]
-fn widget_checkbox_clicks_do_not_open_a_day_but_double_click_does() {
+fn widget_item_clicks_open_the_item_and_double_click_opens_the_day() {
     for busy in [false, true] {
         let mut app = fixture();
         app.busy = busy;
@@ -2442,6 +2779,11 @@ fn widget_checkbox_clicks_do_not_open_a_day_but_double_click_does() {
         app.widget_attached = true;
         let size = Size::new(960.0, 640.0);
         let bounds = Rectangle::new(Point::ORIGIN, size);
+        let title = calendar_text_bounds(app.view(app.widget.unwrap()), size)
+            .into_iter()
+            .find(|(s, _)| s == "완료할 일정")
+            .expect("the item title is drawn in its cell")
+            .1;
         let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
         let mut element = app.view(app.widget.unwrap());
         let mut tree = Tree::new(element.as_widget());
@@ -2449,22 +2791,6 @@ fn widget_checkbox_clicks_do_not_open_a_day_but_double_click_does() {
             &mut tree,
             &renderer,
             &layout::Limits::new(Size::ZERO, size),
-        );
-        fn checkboxes(node: &layout::Node, parent: Point, found: &mut Vec<Point>) {
-            let b = node.bounds();
-            let origin = Point::new(parent.x + b.x, parent.y + b.y);
-            if (b.width - 12.0).abs() < 0.1 && (b.height - 12.0).abs() < 0.1 {
-                found.push(Point::new(origin.x + 6.0, origin.y + 6.0));
-            }
-            for child in node.children() {
-                checkboxes(child, origin, found);
-            }
-        }
-        let mut points = Vec::new();
-        checkboxes(&node, Point::ORIGIN, &mut points);
-        assert!(
-            !points.is_empty(),
-            "a real completion control must be present"
         );
         let mut messages = Vec::new();
         let mut dispatch = |event, point, messages: &mut Vec<Message>| {
@@ -2486,19 +2812,21 @@ fn widget_checkbox_clicks_do_not_open_a_day_but_double_click_does() {
                 mouse::Event::ButtonReleased(mouse::Button::Left)
             })
         };
+        let on_title = title.center();
         for _ in 0..2 {
-            dispatch(click(true), points[0], &mut messages);
-            dispatch(click(false), points[0], &mut messages);
+            dispatch(click(true), on_title, &mut messages);
+            dispatch(click(false), on_title, &mut messages);
         }
         assert!(
             busy || messages.iter().any(|m| matches!(
                 m,
-                Message::Calendar(crate::calendar_ui::Action::Completed(_, _, true))
-            ))
+                Message::Calendar(crate::calendar_ui::Action::Open(_, _, true))
+            )),
+            "{messages:?}"
         );
         assert!(!messages.iter().any(|m| matches!(m, Message::WidgetDate(_))));
         messages.clear();
-        let empty = Point::new(points[0].x + 60.0, points[0].y + 20.0);
+        let empty = Point::new(title.x + 30.0, title.y + 30.0);
         dispatch(click(true), empty, &mut messages);
         dispatch(click(false), empty, &mut messages);
         assert!(

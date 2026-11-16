@@ -361,7 +361,7 @@ pub(crate) fn calendar(app: &App) -> Element<'_, Message> {
                         day,
                         size.width,
                         (size.height - 31.0).max(0.0),
-                        11.0,
+                        12.0,
                         false
                     )
                 ]
@@ -471,7 +471,7 @@ fn date_details(app: &App) -> Column<'_, Message> {
         if day.completed > 0 || day.total > day.items.len() as u32 {
             details = details.push(control(
                 format!("전체 {}개 · 완료 {}개", day.total, day.completed),
-                Message::WidgetDate(app.selected),
+                Message::ManagerDate(app.selected),
             ));
         }
     } else {
