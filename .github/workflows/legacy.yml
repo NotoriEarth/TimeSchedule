@@ -1,0 +1,107 @@
+# The Tauri app and the UI experiment live outside the Cargo workspace but
+# depend on its crates. This keeps a shared-crate change from breaking them
+# unnoticed. Runs only when something they build from changes.
+name: Legacy builds
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "vendor/**"
+      - "src-tauri/**"
+      - "src/**"
+      - "experiments/**"
+      - "index.html"
+      - "package.json"
+      - "package-lock.json"
+      - "svelte.config.js"
+      - "tsconfig.json"
+      - "vite.config.ts"
+      - ".github/workflows/legacy.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "vendor/**"
+      - "src-tauri/**"
+      - "src/**"
+      - "experiments/**"
+      - "index.html"
+      - "package.json"
+      - "package-lock.json"
+      - "svelte.config.js"
+      - "tsconfig.json"
+      - "vite.config.ts"
+      - ".github/workflows/legacy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: legacy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  legacy:
+    name: Tauri app and UI experiment compile
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      # Actions are pinned to reviewed commits; the comment names the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Resource compilation in the Tauri build expects the same environment
+      # that scripts/toolchain.ps1 sets up locally.
+      - name: Enter Visual Studio developer environment
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual Studio C++ build tools were not found.' }
+          $devCmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
+          $names = '^(Path|INCLUDE|LIB|LIBPATH|UCRTVersion|UniversalCRTSdkDir|VCINSTALLDIR|VCToolsInstallDir|VCToolsVersion|VSINSTALLDIR|VisualStudioVersion|WindowsLibPath|WindowsSdkBinPath|WindowsSdkDir|WindowsSdkVerBinPath|WindowsSDKLibVersion|WindowsSDKVersion)='
+          $lines = cmd /d /s /c "`"$devCmd`" -no_logo -arch=x64 -host_arch=x64 && set"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not load the Visual Studio developer environment.' }
+          $lines | Where-Object { $_ -match $names } | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Frontend type check
+        run: npm run check
+
+      # The Tauri build embeds dist/, which is not committed.
+      - name: Frontend build
+        run: npm run build
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
+          rustup default $env:RUST_TOOLCHAIN
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+            experiments/rust-ui-spike/target
+          key: legacy-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('src-tauri/Cargo.lock', 'experiments/rust-ui-spike/Cargo.lock') }}
+          restore-keys: legacy-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Check Tauri app
+        run: cargo check --manifest-path src-tauri/Cargo.toml --locked --all-targets
+
+      - name: Check UI experiment
+        run: cargo check --manifest-path experiments/rust-ui-spike/Cargo.toml --locked --all-targets

@@ -2,6 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+// Windows can name one folder by its long path or an 8.3 short one
+// (C:\Users\RUNNER~1\...). The native resolver returns the long form Git also
+// reports; the JS resolver keeps short names. Elsewhere the native resolver can
+// fail without /proc and short names do not exist, so the JS one is used.
+export const canonicalPath = value => process.platform === 'win32' ? fs.realpathSync.native(value) : fs.realpathSync(value);
+
 const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const DOCUMENT = /(?:^|\/)(?:docs?|notes?|research)(?:\/|$)|\.(?:md|mdx|txt|rst|adoc)$/i;
 const DEVELOPMENT = /^(?:apps\/|crates\/|src\/|src-tauri\/|scripts\/|tests\/|vendor\/|\.github\/workflows\/|Cargo\.(?:toml|lock)$|(?:package(?:-lock)?|tsconfig(?:\.[^/]+)?)\.json$|(?:svelte|vite|vitest|tailwind|postcss|eslint)\.config\.[^/]+$|(?:pnpm-lock\.yaml|yarn\.lock|rust-toolchain(?:\.toml)?|\.gitignore|\.gitattributes)$)/;
@@ -28,10 +34,11 @@ export function developmentEvidence(repoPath, evidence, projectRoot) {
   const selected = [...new Set(paths)].sort();
   if (!selected.some(p => DEVELOPMENT.test(p) && !DOCUMENT.test(p))) return skip('no_development_changes');
   try {
-    const repo = fs.realpathSync(repoPath);
+    const canonical = canonicalPath;
+    const repo = canonical(repoPath);
     const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
-    if (!samePath(repo, fs.realpathSync(projectRoot))
-        || !samePath(repo, fs.realpathSync(git(repo, 'rev-parse', '--show-toplevel').trim()))) return skip('wrong_repository');
+    if (!samePath(repo, canonical(projectRoot))
+        || !samePath(repo, canonical(git(repo, 'rev-parse', '--show-toplevel').trim()))) return skip('wrong_repository');
     for (const sha of [base, head]) if (git(repo, 'cat-file', '-t', sha).trim() !== 'commit') return skip('invalid_git_changes');
     git(repo, 'merge-base', '--is-ancestor', base, head);
     const changed = new Set(git(repo, 'diff', '--name-only', '-z', '--no-renames', '--no-ext-diff', base, head, '--').split('\0').filter(Boolean));

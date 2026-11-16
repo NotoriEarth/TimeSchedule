@@ -17,7 +17,8 @@ Assert ($expectedVersion -and $version -eq $expectedVersion) 'The native EXE mus
 Assert ((Get-Item -LiteralPath $source).VersionInfo.FileVersion -eq $expectedVersion) 'File and product versions must match.'
 . (Join-Path $PSScriptRoot '..\publish-native.ps1')
 $root = Join-Path ([IO.Path]::GetTempPath()) ('timeschedule-publish-' + [guid]::NewGuid().ToString('N'))
-$artifacts = Join-Path $root '한글 artifacts'
+# Built from code points so the non-ASCII path survives any script encoding.
+$artifacts = Join-Path $root ([string][char]0xD55C + [char]0xAE00 + ' artifacts')
 New-Item -ItemType Directory -Path $artifacts | Out-Null
 try {
     $first = Publish-NativeExecutable -SourcePath $source -ArtifactsDirectory $artifacts -ExpectedVersion $version
