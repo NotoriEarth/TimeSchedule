@@ -2492,7 +2492,7 @@ dependencies = [
 
 [[package]]
 name = "timeschedule-native"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "axum",
  "base64",

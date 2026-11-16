@@ -298,11 +298,21 @@ impl App {
                 }
             }
         };
+        if let Some(ignored) = crate::IGNORED_ARGUMENT.get() {
+            errors.push(crate::launch::notice(ignored));
+        }
         let prefs = if instance.is_some() {
-            preferences::load(&data_dir).unwrap_or_else(|e| {
-                errors.push(e);
-                Preferences::default()
-            })
+            // One unusable value goes back to its default; the rest stays.
+            match preferences::load_or_repair(&data_dir) {
+                Ok(loaded) => {
+                    errors.extend(loaded.notice());
+                    loaded.preferences
+                }
+                Err(e) => {
+                    errors.push(e);
+                    Preferences::default()
+                }
+            }
         } else {
             Preferences::default()
         };

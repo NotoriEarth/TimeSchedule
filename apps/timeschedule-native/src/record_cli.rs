@@ -96,15 +96,12 @@ pub fn execute(args: &[String]) -> Result<serde_json::Value, String> {
     }
 }
 
-pub fn try_run() -> Option<i32> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        return None;
-    }
-    let output = execute(&args)
+/// Runs the record command line in `args` (`record ...`) and returns the exit code.
+pub fn run(args: &[String]) -> i32 {
+    let output = execute(args)
         .unwrap_or_else(|message| serde_json::json!({"outcome": "error", "message": message}));
     let bytes = serde_json::to_vec_pretty(&output).expect("JSON value serialization");
-    if let Ok((_, options)) = parse(&args) {
+    if let Ok((_, options)) = parse(args) {
         if let Some(path) = options.get("--result") {
             let result = (|| -> Result<(), String> {
                 let path = Path::new(path);
@@ -130,16 +127,16 @@ pub fn try_run() -> Option<i32> {
             })();
             if let Err(error) = result {
                 eprintln!("결과 파일 저장 실패: {error}");
-                return Some(1);
+                return 1;
             }
         }
     }
     println!("{}", String::from_utf8_lossy(&bytes));
-    Some(match output["outcome"].as_str() {
+    match output["outcome"].as_str() {
         Some("error") => 1,
         Some("conflict" | "missing" | "attention") => 2,
         _ => 0,
-    })
+    }
 }
 
 #[cfg(test)]
