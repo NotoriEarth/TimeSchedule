@@ -53,9 +53,23 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to reviewed commits; the comment names the release.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      # Resource compilation in the Tauri build expects the same environment
+      # that scripts/toolchain.ps1 sets up locally.
+      - name: Enter Visual Studio developer environment
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual Studio C++ build tools were not found.' }
+          $devCmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
+          $names = '^(Path|INCLUDE|LIB|LIBPATH|UCRTVersion|UniversalCRTSdkDir|VCINSTALLDIR|VCToolsInstallDir|VCToolsVersion|VSINSTALLDIR|VisualStudioVersion|WindowsLibPath|WindowsSdkBinPath|WindowsSdkDir|WindowsSdkVerBinPath|WindowsSDKLibVersion|WindowsSDKVersion)='
+          $lines = cmd /d /s /c "`"$devCmd`" -no_logo -arch=x64 -host_arch=x64 && set"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not load the Visual Studio developer environment.' }
+          $lines | Where-Object { $_ -match $names } | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
           cache: npm
@@ -75,7 +89,7 @@ jobs:
           rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
           rustup default $env:RUST_TOOLCHAIN
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry/index
