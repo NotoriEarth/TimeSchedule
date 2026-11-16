@@ -481,8 +481,13 @@ impl Staged {
             .parent()
             .ok_or("설정 폴더가 없습니다.")?
             .to_path_buf();
-        let name = target
-            .file_name()
+        // Copies are named after the file as it is stored, however the path
+        // was typed: Windows finds one file under any capitals.
+        let stored = std::fs::canonicalize(&target).ok();
+        let name = stored
+            .as_deref()
+            .and_then(Path::file_name)
+            .or(target.file_name())
             .ok_or("설정 파일 이름이 없습니다.")?
             .to_string_lossy()
             .into_owned();
@@ -523,10 +528,15 @@ impl Staged {
         if plan.unchanged() {
             // Nothing to write, but what earlier attempts left is still tidied:
             // a stop right after a swap, or an earlier version, leaves copies.
+            let compared = identity(&original);
             sweep(&folder, &name);
-            return Ok(Stage::Unchanged {
-                kept_too_many: prune_backups(&known_as(&target, link.as_deref())),
-            });
+            let kept_too_many = prune_backups(&known_as(&target, link.as_deref()));
+            // Tidying takes a moment. If an AI app saved a version of its own
+            // over the file meanwhile, the registration is not known to be there.
+            if !compared.is_some_and(|compared| still_there(&target, link.as_deref(), &compared)) {
+                return Err(CHANGED.into());
+            }
+            return Ok(Stage::Unchanged { kept_too_many });
         }
         let compared = identity(&original).ok_or("설정 파일 정보를 확인하지 못했습니다.")?;
         if compared.links > 1 {
@@ -592,16 +602,11 @@ impl Staged {
         // no longer leads to the one file that was compared. Windows has no
         // single step that both checks this and swaps, so the check comes
         // immediately before the swap (see the limits in docs/local-mcp.md).
-        // A link the user keeps the configuration behind must still lead to
-        // the file that is about to be replaced, or the AI app reads another.
-        let led_elsewhere = self
-            .link
-            .as_ref()
-            .is_some_and(|link| real_target(link).ok().as_deref() != Some(self.target.as_path()));
+        let moved = !still_there(&self.target, self.link.as_deref(), &self.compared);
         // Rules or a label changed meanwhile (closed to others, say) are not
         // in the copies. A handle held for reading does not stop that change.
         let rules_changed = access_of(&self.original).map_or(true, |now| now != self.access);
-        if led_elsewhere || rules_changed || self.current().as_ref() != Some(&self.compared) {
+        if moved || rules_changed {
             return Err(self.discard(CHANGED));
         }
         // One step: the name leads to the old file or to the new one.
@@ -613,28 +618,6 @@ impl Staged {
             kept_too_many: prune_backups(&known_as(&self.target, self.link.as_deref())),
             backup: Some(self.backup),
         })
-    }
-    /// What the configuration's name itself is right now. A link put there is
-    /// seen as a link, not as the file it leads to.
-    fn current(&self) -> Option<Identity> {
-        let mut options = std::fs::OpenOptions::new();
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::OpenOptionsExt;
-            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-            // Metadata only, which no sharing mode refuses.
-            options
-                .access_mode(0)
-                .share_mode(7)
-                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
-        }
-        #[cfg(not(windows))]
-        options.read(true);
-        options
-            .open(&self.target)
-            .ok()
-            .and_then(|file| identity(&file))
     }
 }
 /// Backups are counted and removed by listing the folder of every name the
@@ -649,6 +632,32 @@ fn listable(names: &[&Path]) -> Result<(), String> {
         })?;
     }
     Ok(())
+}
+/// What the name `target` itself is right now. A link put there is seen as a
+/// link, not as the file it leads to.
+fn named(target: &Path) -> Option<Identity> {
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        // Metadata only, which no sharing mode refuses.
+        options
+            .access_mode(0)
+            .share_mode(7)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    #[cfg(not(windows))]
+    options.read(true);
+    options.open(target).ok().and_then(|file| identity(&file))
+}
+/// Whether the configuration's name still leads to the one file that was
+/// compared, and the link the user keeps it behind, if any, still leads to
+/// that name. Otherwise an AI app or the user has put something else there.
+fn still_there(target: &Path, link: Option<&Path>, compared: &Identity) -> bool {
+    link.is_none_or(|link| real_target(link).ok().as_deref() == Some(target))
+        && named(target).as_ref() == Some(compared)
 }
 /// The names a configuration's backups may lie beside.
 fn known_as<'a>(target: &'a Path, link: Option<&'a Path>) -> Vec<&'a Path> {
@@ -684,14 +693,34 @@ fn ours(file: &str, config: &str, extension: &str) -> bool {
         .is_some_and(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
 }
 /// This module's files for `config` in `folder`, with their modification times.
+/// Windows finds one file under any capitals, so a copy made when the path was
+/// typed differently counts too. Only a folder switched to case-sensitive
+/// names can hold two files that differ in capitals alone, and there the
+/// copies of each are kept apart.
 fn made(folder: &Path, config: &str, extension: &str) -> Vec<(std::time::SystemTime, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Vec::new();
     };
-    entries
+    let entries: Vec<(String, std::fs::DirEntry)> = entries
         .flatten()
-        .filter(|entry| ours(&entry.file_name().to_string_lossy(), config, extension))
-        .filter_map(|entry| {
+        .map(|entry| (entry.file_name().to_string_lossy().into_owned(), entry))
+        .collect();
+    let folded = config.to_lowercase();
+    let exact = entries
+        .iter()
+        .filter(|(name, _)| name.to_lowercase() == folded)
+        .count()
+        > 1;
+    entries
+        .into_iter()
+        .filter(|(name, _)| {
+            if exact {
+                ours(name, config, extension)
+            } else {
+                ours(&name.to_lowercase(), &folded, extension)
+            }
+        })
+        .filter_map(|(_, entry)| {
             // Regular files only: never follow a link out of the folder.
             let metadata = entry.metadata().ok()?;
             metadata
@@ -1443,6 +1472,20 @@ mod tests {
             Stage::Unchanged { .. } => panic!("the plan changes nothing"),
         }
     }
+    /// Makes `link` a symbolic link to the file `real`, or says that this
+    /// account may not (it takes Developer Mode or elevation). On CI that is a
+    /// failure, so these tests cannot pass there by being skipped.
+    fn linked(real: &Path, link: &Path) -> bool {
+        if std::os::windows::fs::symlink_file(real, link).is_ok() {
+            return true;
+        }
+        assert!(
+            std::env::var_os("GITHUB_ACTIONS").is_none(),
+            "CI must be able to create symbolic links"
+        );
+        eprintln!("skipped: this account may not create symbolic links");
+        false
+    }
     fn plan_for(path: &Path, dir: &Path, port: u16) -> Plan {
         prepare(
             Client::ClaudeCode,
@@ -1779,9 +1822,7 @@ mod tests {
         let real = elsewhere.join("claude.json");
         std::fs::write(&real, r#"{"keep":true}"#).unwrap();
         let link = f.0.join("client.config");
-        if std::os::windows::fs::symlink_file(&real, &link).is_err() {
-            // Needs Developer Mode or an elevated account.
-            eprintln!("skipped: this account may not create symbolic links");
+        if !linked(&real, &link) {
             return;
         }
         let backup = apply(&plan_for(&link, &f.0, 39281)).unwrap().unwrap();
@@ -2072,8 +2113,7 @@ mod tests {
         // Another program moves the file away and leaves a link to it.
         let moved = f.0.join("moved");
         std::fs::rename(&plan.path, &moved).unwrap();
-        if std::os::windows::fs::symlink_file(&moved, &plan.path).is_err() {
-            eprintln!("skipped: this account may not create symbolic links");
+        if !linked(&moved, &plan.path) {
             std::fs::rename(&moved, &plan.path).unwrap();
             return;
         }
@@ -2205,8 +2245,7 @@ mod tests {
         std::fs::write(&first, "{}").unwrap();
         std::fs::write(&second, r#"{"second":true}"#).unwrap();
         let link = f.0.join("client.config");
-        if std::os::windows::fs::symlink_file(&first, &link).is_err() {
-            eprintln!("skipped: this account may not create symbolic links");
+        if !linked(&first, &link) {
             return;
         }
         let ready = staged(&plan_for(&link, &f.0, 39281));
@@ -2347,8 +2386,7 @@ mod tests {
         let real = elsewhere.join("claude.json");
         std::fs::write(&real, "{}").unwrap();
         let link = home.join("client.config");
-        if std::os::windows::fs::symlink_file(&real, &link).is_err() {
-            eprintln!("skipped: this account may not create symbolic links");
+        if !linked(&real, &link) {
             return;
         }
         let plan = plan_for(&link, &f.0, 39281);
@@ -2370,5 +2408,50 @@ mod tests {
         assert!(error.contains("목록"), "{error}");
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "{}");
         assert_eq!(names(&elsewhere), ["claude.json"]);
+    }
+    #[test]
+    fn backups_made_under_another_spelling_of_the_same_name_count_together() {
+        // Windows finds `Client.Config` and `client.config` to be one file, so a
+        // path typed with other capitals must not start a second set of backups.
+        let f = Fixture::new();
+        let path = f.0.join("client.config");
+        std::fs::write(&path, "{}").unwrap();
+        for _ in 0..4 {
+            std::fs::write(
+                f.0.join(format!(
+                    "Client.Config.timeschedule-{}.bak",
+                    uuid::Uuid::new_v4()
+                )),
+                "{}",
+            )
+            .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let typed = f.0.join("CLIENT.CONFIG");
+        let backup = apply(&plan_for(&typed, &f.0, 39281)).unwrap().unwrap();
+        // The new backup is named after the file as it is stored.
+        assert!(
+            backup
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("client.config.timeschedule-"),
+            "{}",
+            backup.display()
+        );
+        assert_eq!(names(&f.0).len(), 1 + KEPT_BACKUPS, "{:?}", names(&f.0));
+    }
+    #[test]
+    fn a_name_that_no_longer_leads_to_the_compared_file_is_noticed() {
+        let f = Fixture::new();
+        let path = f.0.join("client.config");
+        std::fs::write(&path, "{}").unwrap();
+        let compared = identity(&std::fs::File::open(&path).unwrap()).unwrap();
+        assert!(still_there(&path, None, &compared));
+        // An AI app saves a version of its own by renaming it over the file.
+        let theirs = f.0.join("their working file");
+        std::fs::write(&theirs, r#"{"theirs":true}"#).unwrap();
+        std::fs::rename(&theirs, &path).unwrap();
+        assert!(!still_there(&path, None, &compared));
     }
 }
