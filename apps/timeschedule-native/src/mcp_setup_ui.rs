@@ -218,9 +218,11 @@ impl State {
                 if matches!(action, Action::Register) {
                     let plan = preview.ok_or("미리보기를 먼저 확인하세요.")?;
                     crate::mcp_connection::probe(&dir)?;
-                    let backup = mcp_setup::apply(&plan)?;
-                    let backup = backup.map(|p| format!("\n백업: {}", p.display())).unwrap_or_default();
-                    return Ok(Outcome::Status(format!("등록 완료. {client}에서 연결을 다시 불러오거나 앱을 재시작하세요.\nAI 앱의 실제 연결 승인은 해당 앱에서 확인하세요.{backup}")));
+                    let applied = mcp_setup::register(&plan)?;
+                    let backup = applied.backup.map(|p| format!("\n백업: {}", p.display())).unwrap_or_default();
+                    // Each is a full copy of the configuration that should be gone.
+                    let untidy = applied.kept_too_many.first().map(|p| format!("\n지우지 못한 이전 백업(설정 사본) {}개가 남았습니다. 직접 지우세요: {}", applied.kept_too_many.len(), p.display())).unwrap_or_default();
+                    return Ok(Outcome::Status(format!("등록 완료. {client}에서 연결을 다시 불러오거나 앱을 재시작하세요.\nAI 앱의 실제 연결 승인은 해당 앱에서 확인하세요.{backup}{untidy}")));
                 }
                 let endpoint = crate::mcp_connection::current_endpoint(&dir)?;
                 let exe = std::env::current_exe().map_err(|_| "실행 파일 위치 확인 실패")?;
