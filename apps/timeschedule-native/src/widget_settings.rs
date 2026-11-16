@@ -214,9 +214,9 @@ impl App {
             Change::LineGap(v) => w.line_gap = v.min(12),
             Change::Density(v) => {
                 let (date, event, gap, padding, line) = match v {
-                    Density::Compact => (13, 10, 0, 3, 1),
-                    Density::Default => (15, 11, 1, 6, 3),
-                    Density::Comfortable => (18, 14, 4, 10, 5),
+                    Density::Compact => (12, 11, 0, 2, 0),
+                    Density::Default => (13, 13, 1, 4, 1),
+                    Density::Comfortable => (16, 15, 3, 8, 3),
                 };
                 w.date_size = date;
                 w.event_size = event;
@@ -468,7 +468,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .style(crate::theme::danger),
         )
         .push(quiet(
-            "설정은 위젯에 바로 반영됩니다. 표시할 공간이 부족한 일정은 +N개 더로 표시합니다.",
+            "설정은 위젯에 바로 반영됩니다. 칸에 다 들어가지 않는 일정은 마지막 줄에 제목으로 이어 씁니다.",
         ));
     c.into()
 }

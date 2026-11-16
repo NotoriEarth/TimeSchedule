@@ -51,9 +51,11 @@ pub fn fit_label_with_font(content: &str, width: f32, size: f32, font: iced::Fon
             high = mid - 1;
         }
     }
+    // A cut right after a space would leave "계획 …"; the trimmed form is
+    // never wider than the one that was measured.
     format!(
         "{}…",
-        &content[..boundaries.get(low).copied().unwrap_or(content.len())]
+        content[..boundaries.get(low).copied().unwrap_or(content.len())].trim_end()
     )
 }
 
@@ -148,6 +150,7 @@ mod tests {
                         "{fitted}: {width}"
                     );
                     assert!(!fitted.contains('\n'));
+                    assert!(!fitted.contains(" …"), "{fitted}");
                 }
             }
         }

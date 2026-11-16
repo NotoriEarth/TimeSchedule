@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(p.widget.dark.text.as_deref(), Some("#FAFAFA"));
         // Only the three unusable values are back at their defaults.
         assert_eq!(p.widget_opacity, 82);
-        assert_eq!(p.widget.event_size, 11);
+        assert_eq!(p.widget.event_size, 13);
         assert_eq!(p.widget.dark.background, None);
         assert_eq!(
             loaded.reset,

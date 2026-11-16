@@ -361,7 +361,7 @@ pub(crate) fn calendar(app: &App) -> Element<'_, Message> {
                         day,
                         size.width,
                         (size.height - 31.0).max(0.0),
-                        11.0,
+                        12.0,
                         false
                     )
                 ]
