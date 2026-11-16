@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { createServer } from 'node:net';
+import { execFileSync } from 'node:child_process';
 import { initVault, saveDocument, adoptDocument, vaultStatus, configureVault, vaultPreferences } from '../scripts/document-vault.mjs';
 
 function fixture(t) {
@@ -124,4 +126,32 @@ test('manual changes after an interrupted save remain untouched during recovery'
   fs.writeFileSync(first.file, '중단 후 직접 편집');
   await assert.rejects(saveDocument(next, f), /충돌/);
   assert.equal(fs.readFileSync(first.file, 'utf8'), '중단 후 직접 편집');
+});
+
+// A vault process from before the canonical-path change named its lock after the
+// JS-resolved spelling it was given. Given either spelling, the current version
+// must be locked out by such a holder of the same vault.
+test('vault locks from the earlier naming still exclude writers for both spellings', { skip: process.platform !== 'win32' }, async t => {
+  const f = fixture(t);
+  await initVault(f.root);
+  const script = `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${f.root.replaceAll("'", "''")}').ShortPath`;
+  const short = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true }).trim();
+  if (short.toLowerCase() === f.root.toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
+  const open = new Set();
+  t.after(() => Promise.all([...open].map(holder => new Promise(resolve => holder.close(resolve)))));
+  const hold = async spelling => {
+    const legacy = createHash('sha256').update(fs.realpathSync(spelling).toLowerCase()).digest('hex');
+    const holder = createServer(socket => socket.destroy());
+    await new Promise((resolve, reject) => { holder.once('error', reject); holder.listen({ path: `\\\\.\\pipe\\timeschedule-vault-${legacy}`, exclusive: true }, resolve); });
+    open.add(holder);
+    return () => new Promise(resolve => { open.delete(holder); holder.close(resolve); });
+  };
+  let release = await hold(short);
+  await assert.rejects(saveDocument(source(), { root: short }), /다른 문서 작업이 실행 중/);
+  await release();
+  release = await hold(fs.realpathSync.native(f.root));
+  await assert.rejects(saveDocument(source(), { root: short }), /다른 문서 작업이 실행 중/);
+  await release();
+  assert.equal((await saveDocument(source(), { root: short })).revision, 1);
+  assert.equal((await saveDocument(source(), f)).revision, 1);
 });

@@ -108,8 +108,13 @@ async function locked(stateDir, action) {
     return await action();
   } finally { await release(); }
 }
+// Windows paths are case-insensitive; elsewhere /work/Repo and /work/repo can
+// be different repositories.
+export function sameResolvedPath(a, b, platform = process.platform) {
+  return platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
 function samePlace(a, b) {
-  try { return canonicalPath(a).toLowerCase() === canonicalPath(b).toLowerCase(); } catch { return false; }
+  try { return sameResolvedPath(canonicalPath(a), canonicalPath(b)); } catch { return false; }
 }
 
 export async function prepare(input, { stateDir = DEFAULT_STATE, projectRoot = PROJECT_ROOT } = {}) {

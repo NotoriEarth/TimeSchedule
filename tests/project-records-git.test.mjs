@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { createServer } from 'node:net';
-import { prepare, sync, status, PARENT_PAGE_ID } from '../scripts/project-records.mjs';
+import { prepare, sync, status, PARENT_PAGE_ID, sameResolvedPath } from '../scripts/project-records.mjs';
 import { gitFixture } from './helpers/record-git-fixture.mjs';
 import { developmentEvidence } from '../scripts/project-records-git.mjs';
 import { execFileSync } from 'node:child_process';
@@ -228,7 +228,9 @@ test('locks from the earlier naming still exclude delivery for both spellings', 
   await assert.rejects(prepare(input(f), { ...f, stateDir: short }), /다른 기록 작업이 실행 중/);
   await release();
   // An earlier process given the long spelling; this one given the short one.
-  release = await hold(f.stateDir);
+  // os.tmpdir() can itself be partly short (C:\Users\RUNNER~1\...), so take the
+  // fully long spelling.
+  release = await hold(fs.realpathSync.native(f.stateDir));
   await assert.rejects(prepare(input(f), { ...f, stateDir: short }), /다른 기록 작업이 실행 중/);
   await release();
   // Nothing held: delivery proceeds, and releases every name it took.
@@ -252,4 +254,10 @@ test('re-preparing keeps the repository spelling an earlier version saved', { sk
   const again = await prepare(candidate, f);
   assert.equal(again.unchanged, true, JSON.stringify(again));
   assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).source.repoPath, short);
+});
+
+test('saved repository spellings fold case only on Windows', () => {
+  assert.equal(sameResolvedPath('C:\\Work\\Repo', 'c:\\work\\repo', 'win32'), true);
+  assert.equal(sameResolvedPath('/work/Repo', '/work/repo', 'linux'), false);
+  assert.equal(sameResolvedPath('/work/repo', '/work/repo', 'linux'), true);
 });
