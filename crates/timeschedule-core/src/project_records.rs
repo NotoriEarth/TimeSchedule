@@ -560,7 +560,7 @@ mod tests {
         let path = dir.join("schedule.db");
         {
             let store = Storage::open(&path).unwrap();
-            store.connection().unwrap().execute_batch("DROP TABLE IF EXISTS project_record_receipts; DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; PRAGMA user_version = 2; INSERT INTO notes VALUES ('128b13cb-0cf2-41da-84c4-db20dca65d73','기존 노트','보존할 본문','2026-10-30');").unwrap();
+            store.connection().unwrap().execute_batch("DROP TABLE IF EXISTS project_record_receipts; DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; PRAGMA user_version = 2; INSERT INTO notes VALUES ('128b13cb-0cf2-41da-84c4-db20dca65d73','기존 노트','보존할 본문','2026-10-30'); DROP TABLE search_order;").unwrap();
         }
         {
             let store = Storage::open(&path).unwrap();

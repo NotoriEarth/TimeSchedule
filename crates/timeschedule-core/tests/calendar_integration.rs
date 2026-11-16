@@ -256,7 +256,7 @@ fn migration_keeps_backup_and_category_settings_survive_restart() {
     };
     {
         let c = rusqlite::Connection::open(&path).unwrap();
-        c.execute_batch("DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; PRAGMA user_version=3;").unwrap();
+        c.execute_batch("DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; DROP TABLE search_order; PRAGMA user_version=3;").unwrap();
     }
     let custom = {
         let s = Storage::open(&path).unwrap();
@@ -286,7 +286,7 @@ fn migration_keeps_backup_and_category_settings_survive_restart() {
     let backups = std::fs::read_dir(&dir)
         .unwrap()
         .map(|p| p.unwrap().path())
-        .filter(|p| p.to_string_lossy().contains("pre-v5-"))
+        .filter(|p| p.to_string_lossy().contains("pre-v6-"))
         .collect::<Vec<_>>();
     assert_eq!(backups.len(), 1);
     {
@@ -624,7 +624,7 @@ fn category_schema_v5_preserves_v4_data() {
     };
     {
         let raw = rusqlite::Connection::open(&path).unwrap();
-        raw.execute_batch("DROP INDEX IF EXISTS entry_display_category; PRAGMA user_version=4;")
+        raw.execute_batch("DROP INDEX IF EXISTS entry_display_category; DROP TABLE search_order; PRAGMA user_version=4;")
             .unwrap();
     }
     {
@@ -635,7 +635,7 @@ fn category_schema_v5_preserves_v4_data() {
         assert_eq!(
             raw.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            5
+            6
         );
         let query_plan: String = raw.query_row("EXPLAIN QUERY PLAN SELECT entry_id FROM entry_display WHERE category_id=?1 ORDER BY entry_id", [&source.id], |r| r.get(3)).unwrap();
         assert!(
@@ -645,7 +645,7 @@ fn category_schema_v5_preserves_v4_data() {
         let backups = std::fs::read_dir(&dir)
             .unwrap()
             .map(|v| v.unwrap().path())
-            .filter(|p| p.to_string_lossy().contains("pre-v5-"))
+            .filter(|p| p.to_string_lossy().contains("pre-v6-"))
             .collect::<Vec<_>>();
         assert_eq!(backups.len(), 1);
         let backup = rusqlite::Connection::open(&backups[0]).unwrap();
