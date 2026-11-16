@@ -250,8 +250,10 @@ mod tests {
         .unwrap();
         runner.next_check = Instant::now();
         assert!(runner.poll(&dir.0).unwrap().contains("재시도"));
+        // Generous: a cold Node start on a busy CI machine took over 5s. The
+        // loop ends as soon as the child does.
         let started = Instant::now();
-        while runner.child.is_some() && started.elapsed() < Duration::from_secs(5) {
+        while runner.child.is_some() && started.elapsed() < Duration::from_secs(30) {
             runner.next_check = Instant::now();
             runner.poll(&dir.0);
             std::thread::sleep(Duration::from_millis(10));
