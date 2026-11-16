@@ -10,7 +10,7 @@ const fixtureDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'timeschedule-off
 const fixture = gitFixture(fixtureDirectory);
 after(() => fs.rmSync(fixtureDirectory, { recursive: true, force: true }));
 const prepare = (input, options) => prepareRecord(input, { ...options, projectRoot: fixture.repo });
-const sync = options => syncRecords({ ...options, projectRoot: fixture.repo });
+const sync = options => syncRecords({ spaceEnabled: true, vaultRoot: path.join(options.stateDir, 'vault'), ...options, projectRoot: fixture.repo });
 const pageId='page_1234567890abcdef1234567890abcdef';
 const saved=r=>({outcome:'saved',workId:r.workId,revision:r.revision,entryId:r.workId});
 const published=j=>({pageId,pageUrl:`https://chatgpt.com/space/${pageId}`,parentPageId:PARENT_PAGE_ID,title:j.source.title,markdown:j.pageMarkdown,indexVerified:true});

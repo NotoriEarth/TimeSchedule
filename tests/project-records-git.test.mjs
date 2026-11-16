@@ -11,7 +11,7 @@ function setup(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'timeschedule-git-records-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const fixture = gitFixture(dir);
-  return { ...fixture, stateDir: path.join(dir, 'state'), projectRoot: fixture.repo };
+  return { ...fixture, stateDir: path.join(dir, 'state'), projectRoot: fixture.repo, vaultRoot: path.join(dir, 'vault'), spaceEnabled: true };
 }
 function input(f, gitChanges = f.gitChanges) {
   return { workId: randomUUID(), projectTitle: 'TimeSchedule', repoPath: f.repo, date: '2026-11-02',
