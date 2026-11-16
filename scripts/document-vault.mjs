@@ -39,14 +39,17 @@ const atomicJson = (file, value) => atomicWrite(file, JSON.stringify(value, null
 
 async function withLock(directory, action) {
   fs.mkdirSync(directory, { recursive: true });
-  // Windows can name one folder by a long or an 8.3 short path; the native
-  // resolver returns the long one (elsewhere it can fail without /proc).
-  // Earlier versions named the lock after the JS-resolved spelling, so hold that
-  // name too: such a process given the same or the long spelling stays excluded.
-  const legacy = fs.realpathSync(directory);
-  const root = process.platform === 'win32' ? fs.realpathSync.native(directory) : legacy;
+  // The vault keeps working with the spelling it was given (JS resolver), as
+  // before, so stored and returned paths do not change. Only the lock names use
+  // the canonical spelling as well: Windows can name one folder by a long or an
+  // 8.3 short path, and the native resolver returns the long one (elsewhere it
+  // can fail without /proc). Holding both names keeps an earlier version's
+  // process, which named its lock after the JS spelling, excluded when it was
+  // given the same or the long spelling.
+  const root = fs.realpathSync(directory);
+  const canonical = process.platform === 'win32' ? fs.realpathSync.native(directory) : root;
   const fold = value => process.platform === 'win32' ? value.toLowerCase() : value;
-  const identities = [...new Set([legacy, root].map(value => hash(fold(value))))];
+  const identities = [...new Set([root, canonical].map(value => hash(fold(value))))];
   const held = [];
   try {
     for (const identity of identities) {

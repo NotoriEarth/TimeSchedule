@@ -193,7 +193,7 @@ test('a short Windows path to the repository is the same repository', { skip: pr
   const f = setup(t);
   const script = `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${f.repo.replaceAll("'", "''")}').ShortPath`;
   const short = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true }).trim();
-  if (short.toLowerCase() === f.repo.toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
+  if (short.toLowerCase() === fs.realpathSync.native(f.repo).toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
   assert.deepEqual(developmentEvidence(short, f.gitChanges, short), { eligible: true, gitChanges: f.gitChanges });
   assert.deepEqual(developmentEvidence(short, f.gitChanges, f.repo), { eligible: true, gitChanges: f.gitChanges });
   const prepared = await prepare(input(f), { ...f, projectRoot: short });
@@ -213,7 +213,7 @@ test('locks from the earlier naming still exclude delivery for both spellings', 
   const f = setup(t);
   fs.mkdirSync(f.stateDir, { recursive: true });
   const short = shortPath(f.stateDir);
-  if (short.toLowerCase() === f.stateDir.toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
+  if (short.toLowerCase() === fs.realpathSync.native(f.stateDir).toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
   const open = new Set();
   t.after(() => Promise.all([...open].map(holder => new Promise(resolve => holder.close(resolve)))));
   const hold = async spelling => {
@@ -243,7 +243,7 @@ test('locks from the earlier naming still exclude delivery for both spellings', 
 test('re-preparing keeps the repository spelling an earlier version saved', { skip: process.platform !== 'win32' }, async t => {
   const f = setup(t);
   const short = shortPath(f.repo);
-  if (short.toLowerCase() === f.repo.toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
+  if (short.toLowerCase() === fs.realpathSync.native(f.repo).toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
   const candidate = input(f);
   await prepare(candidate, f);
   const file = path.join(f.stateDir, candidate.workId, 'state.json');

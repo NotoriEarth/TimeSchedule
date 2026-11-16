@@ -136,7 +136,7 @@ test('vault locks from the earlier naming still exclude writers for both spellin
   await initVault(f.root);
   const script = `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${f.root.replaceAll("'", "''")}').ShortPath`;
   const short = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true }).trim();
-  if (short.toLowerCase() === f.root.toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
+  if (short.toLowerCase() === fs.realpathSync.native(f.root).toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
   const open = new Set();
   t.after(() => Promise.all([...open].map(holder => new Promise(resolve => holder.close(resolve)))));
   const hold = async spelling => {
