@@ -760,6 +760,14 @@ mod tests {
             .open(path)
             .unwrap()
     }
+    /// Send a whole request in one write. `write!` on a socket sends each
+    /// formatted piece separately, so the body can arrive after the server has
+    /// already rejected the headers (401/403) and closed; Windows then resets
+    /// the connection and the rejection is lost (os error 10053). A busy CI
+    /// machine widens that gap.
+    fn send_whole(socket: &mut std::net::TcpStream, request: &str) {
+        socket.write_all(request.as_bytes()).unwrap();
+    }
     /// One request on a connection that stays open; returns the status.
     fn exchange(
         reader: &mut std::io::BufReader<std::net::TcpStream>,
@@ -767,7 +775,7 @@ mod tests {
         token: &str,
     ) -> u16 {
         use std::io::BufRead;
-        write!(reader.get_mut(), "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n{}\r\n{LIST}", LIST.len(), bearer(token)).unwrap();
+        send_whole(reader.get_mut(), &format!("POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n{}\r\n{LIST}", LIST.len(), bearer(token)));
         let mut status = String::new();
         reader.read_line(&mut status).unwrap();
         let mut length = 0;
@@ -1533,7 +1541,7 @@ mod tests {
         socket
             .set_read_timeout(Some(std::time::Duration::from_secs(15)))
             .unwrap();
-        write!(socket, "{method} /mcp HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n{headers}\r\n{body}",body.len()).unwrap();
+        send_whole(&mut socket, &format!("{method} /mcp HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n{headers}\r\n{body}",body.len()));
         let mut response = String::new();
         socket.read_to_string(&mut response).unwrap();
         (
