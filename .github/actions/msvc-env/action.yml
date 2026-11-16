@@ -1,0 +1,23 @@
+name: Visual Studio developer environment
+description: >-
+  Exports the x64 MSVC and Windows SDK environment to later steps, as
+  scripts/toolchain.ps1 does locally. build.rs needs the SDK's rc.exe, which is
+  only on PATH inside this environment.
+runs:
+  using: composite
+  steps:
+    - name: Enter Visual Studio developer environment
+      shell: pwsh
+      run: |
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+        $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw 'Visual Studio C++ build tools were not found.' }
+        $devCmd = Join-Path $vs 'Common7/Tools/VsDevCmd.bat'
+        $names = '^(Path|INCLUDE|LIB|LIBPATH|UCRTVersion|UniversalCRTSdkDir|VCINSTALLDIR|VCToolsInstallDir|VCToolsVersion|VSINSTALLDIR|VisualStudioVersion|WindowsLibPath|WindowsSdkBinPath|WindowsSdkDir|WindowsSdkVerBinPath|WindowsSDKLibVersion|WindowsSDKVersion)='
+        $lines = cmd /d /s /c "`"$devCmd`" -no_logo -arch=x64 -host_arch=x64 && set"
+        if ($LASTEXITCODE -ne 0) { throw 'Could not load the Visual Studio developer environment.' }
+        $lines | Where-Object { $_ -match $names } | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+    - name: Confirm resource compiler
+      shell: pwsh
+      run: (Get-Command rc.exe -ErrorAction Stop).Source
