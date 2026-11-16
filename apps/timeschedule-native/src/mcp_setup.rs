@@ -48,18 +48,27 @@ impl Plan {
 }
 
 pub fn default_path(client: Client) -> Result<PathBuf, String> {
+    let mut candidates = config_candidates(client)?;
+    match candidates.len() {
+        1 => Ok(candidates.remove(0)),
+        _ => Err("Claude Desktop 설정 위치가 여러 개입니다. Claude의 설정 → Developer → Edit Config에서 경로를 확인해 입력하세요.".into()),
+    }
+}
+/// Every configuration file this client may read on this PC. Only Claude
+/// Desktop can have more than one (a regular and a Microsoft Store install).
+pub fn config_candidates(client: Client) -> Result<Vec<PathBuf>, String> {
     let profile = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .ok_or("Windows 사용자 폴더를 찾지 못했습니다. 설정 경로를 직접 입력하세요.")?;
     match client {
-        Client::Codex | Client::ChatGptDesktop => Ok(std::env::var_os("CODEX_HOME")
+        Client::Codex | Client::ChatGptDesktop => Ok(vec![std::env::var_os("CODEX_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| profile.join(".codex"))
-            .join("config.toml")),
-        Client::ClaudeCode => Ok(std::env::var_os("CLAUDE_CONFIG_DIR")
+            .join("config.toml")]),
+        Client::ClaudeCode => Ok(vec![std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .unwrap_or(profile)
-            .join(".claude.json")),
+            .join(".claude.json")]),
         Client::ClaudeDesktop => {
             let roaming = std::env::var_os("APPDATA")
                 .map(PathBuf::from)
@@ -90,11 +99,10 @@ pub fn default_path(client: Client) -> Result<PathBuf, String> {
             }
             candidates.sort();
             candidates.dedup();
-            match candidates.len() {
-                0 => Ok(roaming),
-                1 => Ok(candidates.remove(0)),
-                _ => Err("Claude Desktop 설정 위치가 여러 개입니다. Claude의 설정 → Developer → Edit Config에서 경로를 확인해 입력하세요.".into()),
+            if candidates.is_empty() {
+                candidates.push(roaming);
             }
+            Ok(candidates)
         }
     }
 }

@@ -1571,6 +1571,125 @@ fn render_scaled_frame(
 }
 
 #[test]
+fn connection_board_keeps_its_height_and_names_each_state() {
+    use crate::mcp_clients::{Registration as R, Seen};
+    use chrono::TimeZone;
+    let now = Local.with_ymd_and_hms(2026, 11, 16, 15, 30, 0).unwrap();
+    let seen = |name: &str, minutes: i64| Seen {
+        name: name.into(),
+        title: None,
+        version: "1.0".into(),
+        last_seen: now - Duration::minutes(minutes),
+    };
+    let cases: Vec<(&str, bool, [R; 3], bool, Vec<Seen>, Vec<&str>)> = vec![
+        (
+            "server-off",
+            false,
+            [R::Current, R::Current, R::Current],
+            false,
+            vec![seen("claude-code", 1)],
+            vec!["서버 꺼짐"],
+        ),
+        (
+            "checking",
+            true,
+            [R::Unchecked, R::Unchecked, R::Unchecked],
+            true,
+            vec![],
+            vec!["확인 중"],
+        ),
+        (
+            "mixed",
+            true,
+            [R::Current, R::Missing, R::Outdated],
+            false,
+            vec![seen("codex-mcp-client", 3)],
+            vec![
+                "연결됨",
+                "3분 전",
+                "미등록",
+                "등록 준비",
+                "재등록 필요",
+                "다시 등록",
+            ],
+        ),
+        (
+            "registered",
+            true,
+            [
+                R::Current,
+                R::Current,
+                R::Error("설정 파일의 JSON 형식이 잘못되었습니다.".into()),
+            ],
+            false,
+            vec![seen("claude-code", 90), seen("cursor-vscode", 1)],
+            vec![
+                "등록됨",
+                "다시 시작",
+                "오늘 14:00",
+                "확인 실패",
+                "cursor-vscode",
+            ],
+        ),
+    ];
+    for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+        for width in [800., 1160.] {
+            let mut app = fixture();
+            app.preferences.theme = mode;
+            let mut renderer =
+                iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+            let mut height = None;
+            for (name, running, registrations, checking, log, expected) in &cases {
+                app.mcp_setup.registrations = registrations.clone();
+                app.mcp_setup.checking = *checking;
+                let mut element = crate::mcp_setup_ui::board(&app.mcp_setup, *running, log, now);
+                let mut tree = Tree::new(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, Size::new(width, 2000.)),
+                );
+                let mut probe = SettingsProbe::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    layout::Layout::new(&node),
+                    &renderer,
+                    &mut probe,
+                );
+                let all = probe.texts.join(" | ");
+                for text in expected {
+                    assert!(all.contains(text), "{name}: missing {text:?} in {all}");
+                }
+                for app_name in ["Codex · ChatGPT Desktop", "Claude Code", "Claude Desktop"] {
+                    assert!(all.contains(app_name), "{name}: row {app_name} missing");
+                }
+                let measured = node.size().height;
+                match height {
+                    None => height = Some(measured),
+                    Some(first) => assert_eq!(
+                        measured, first,
+                        "{name}: the board changed height, moving every control below it"
+                    ),
+                }
+                if let Some(output) = std::env::var_os("TIMESCHEDULE_MCP_SETUP_PREVIEW_DIR") {
+                    let output = PathBuf::from(output);
+                    std::fs::create_dir_all(&output).unwrap();
+                    render_settings_frame(
+                        &app,
+                        &mut element,
+                        &mut tree,
+                        &node,
+                        &mut renderer,
+                        Size::new(width, measured),
+                        &output.join(format!("board-{mode:?}-{width}-{name}.png")),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn mcp_assistant_keeps_controls_and_outer_scroll_fixed_during_results() {
     for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
         for size in [Size::new(800., 620.), Size::new(1160., 820.)] {

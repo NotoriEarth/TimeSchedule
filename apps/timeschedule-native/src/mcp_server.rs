@@ -36,11 +36,28 @@ impl Server {
             .as_ref()
             .is_some_and(|thread| !thread.is_finished())
     }
+    /// A server whose connection log lives only in memory (tests).
+    #[cfg(test)]
     pub fn start(
         store: Arc<Storage>,
         changed: Arc<AtomicBool>,
         port: u16,
         token: String,
+    ) -> Result<Self, String> {
+        Self::start_with_clients(
+            store,
+            changed,
+            port,
+            token,
+            Arc::new(crate::mcp_clients::ClientLog::memory()),
+        )
+    }
+    pub fn start_with_clients(
+        store: Arc<Storage>,
+        changed: Arc<AtomicBool>,
+        port: u16,
+        token: String,
+        clients: Arc<crate::mcp_clients::ClientLog>,
     ) -> Result<Self, String> {
         let listener = TcpListener::bind(("127.0.0.1", port))
             .map_err(|_| "MCP 포트를 열 수 없습니다. 다른 앱의 사용 여부를 확인하세요.")?;
@@ -66,6 +83,7 @@ impl Server {
             store,
             changed,
             work: Arc::new(tokio::sync::Semaphore::new(4)),
+            clients,
         };
         let service = StreamableHttpService::new(
             move || Ok(api.clone()),
@@ -709,6 +727,56 @@ mod tests {
     }
     const INITIALIZE: &str = "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n";
 
+    #[test]
+    fn each_ai_app_connection_is_recorded_but_the_self_check_is_not() {
+        use crate::mcp_clients::{AiApp, ClientLog};
+        let dir = data_dir();
+        let secret = token(&dir).unwrap();
+        let clients = Arc::new(ClientLog::memory());
+        let server = Server::start_with_clients(
+            Arc::new(Storage::open(":memory:").unwrap()),
+            Arc::new(AtomicBool::new(false)),
+            0,
+            secret.clone(),
+            clients.clone(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("mcp-status.json"),
+            json!({"endpoint":format!("http://{}/mcp", server.address)}).to_string(),
+        )
+        .unwrap();
+        // TimeSchedule's own connection check initializes too, under its own name.
+        crate::mcp_connection::probe(&dir).unwrap();
+        assert!(clients.snapshot().is_empty(), "{:?}", clients.snapshot());
+        // Claude Desktop reaches the server through the stdio bridge.
+        let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"claude-ai","version":"1.2.3"}}}"#;
+        let mut output = Vec::new();
+        crate::mcp_connection::bridge(&dir, std::io::Cursor::new(format!("{init}\n")), &mut output)
+            .unwrap();
+        // Claude Code talks HTTP directly.
+        let direct = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"claude-code","version":"2.0.0"}}}"#;
+        let auth =
+            format!("Authorization: Bearer {secret}\r\nMCP-Protocol-Version: 2025-11-25\r\n");
+        assert_eq!(request(server.address, "POST", &auth, direct).0, 200);
+        let desktop = clients
+            .last_for(AiApp::ClaudeDesktop)
+            .expect("bridge connection");
+        assert_eq!(
+            (desktop.name.as_str(), desktop.version.as_str()),
+            ("claude-ai", "1.2.3")
+        );
+        let code = clients
+            .last_for(AiApp::ClaudeCode)
+            .expect("direct connection");
+        assert_eq!(code.version, "2.0.0");
+        assert!(clients.last_for(AiApp::CodexChatGpt).is_none());
+        // A rejected (unauthenticated) initialize is not a connection.
+        let stranger = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"codex-mcp-client","version":"9"}}}"#;
+        assert_eq!(request(server.address, "POST", "", stranger).0, 401);
+        assert!(clients.last_for(AiApp::CodexChatGpt).is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn hmac_sha256_matches_the_published_test_vector() {
         let mac = hmac_sha256(b"key", b"The quick brown fox jumps over the lazy dog").unwrap();
