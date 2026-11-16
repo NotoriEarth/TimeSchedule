@@ -318,8 +318,11 @@ impl App {
             None
         };
         let mcp_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut mcp_recovered = None;
         let (mcp, mcp_status) = if let Some(store) = store.clone() {
-            match crate::mcp::LocalMcp::start(store, mcp_changed.clone(), &data_dir) {
+            let started = crate::mcp::LocalMcp::start(store, mcp_changed.clone(), &data_dir);
+            mcp_recovered = started.recovered;
+            match started.server {
                 Ok(Some(server)) => {
                     let status = server.status.clone();
                     (Some(server), status)
@@ -329,6 +332,17 @@ impl App {
             }
         } else {
             (None, "꺼짐 · 데이터 저장소를 사용할 수 없습니다.".into())
+        };
+        // The settings screen reissues the token through the running server.
+        let mcp_setup = crate::mcp_setup_ui::State {
+            token_control: crate::mcp::TokenControl::for_app(mcp.as_ref(), instance.is_some()),
+            // Shown even if the server then failed to start: the old token is gone.
+            token: if mcp_recovered.is_some() {
+                crate::mcp_setup_ui::TokenPanel::Recovered
+            } else {
+                Default::default()
+            },
+            ..Default::default()
         };
         let tray = match NativeTray::new() {
             Ok(t) => Some(t),
@@ -365,7 +379,7 @@ impl App {
             _mcp: mcp,
             mcp_changed,
             mcp_status,
-            mcp_setup: Default::default(),
+            mcp_setup,
             data_dir,
             preferences: prefs,
             snapshot: Snapshot::default(),
@@ -415,6 +429,10 @@ impl App {
             app.store.is_some(),
             app.error
         ));
+        if let Some(reason) = mcp_recovered {
+            // The reason only: the unusable file's content is not kept anywhere.
+            app.log(&format!("mcp token file unusable ({reason}); reissued"));
+        }
         let widget = app.open_widget();
         let load = app.refresh();
         (
@@ -865,6 +883,7 @@ impl App {
                     | Message::NativeDone(..)
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Finished(_))
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Loaded(..))
+                    | Message::McpSetup(crate::mcp_setup_ui::Action::Reissued(..))
                     | Message::Category(
                         crate::category_ui::Action::Deleted(_)
                             | crate::category_ui::Action::DeletePreviewed { .. }

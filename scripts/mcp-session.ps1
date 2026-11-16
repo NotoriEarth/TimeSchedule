@@ -28,7 +28,7 @@ finally { if ($mcpPlain) { [Array]::Clear($mcpPlain, 0, $mcpPlain.Length) } }
 $env:TIMESCHEDULE_MCP_TOKEN = $mcpToken
 if ($PersistToken) {
     [Environment]::SetEnvironmentVariable('TIMESCHEDULE_MCP_TOKEN', $mcpToken, 'User')
-    Write-Host 'Saved token to your Windows user environment (not encrypted there). Sign out/in, then restart Codex to inherit it.'
+    Write-Host 'Saved token to your Windows user environment (not encrypted there). Sign out/in, then restart Codex to inherit it. Run this again after the token is reissued in TimeSchedule settings: the saved copy stops working.'
 }
 if ($Status) {
     # mcp-status.json can outlive a crashed app, so another process may own this port.

@@ -21,6 +21,26 @@ pub struct State {
     pub registrations: [Registration; 3],
     pub checking: bool,
     pub generation: u64,
+    /// What the token panel shows.
+    pub token: TokenPanel,
+    /// Set by the app once the server has started; empty while it is off.
+    pub token_control: crate::mcp::TokenControl,
+}
+/// The token panel's state. Every state renders at the same height.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum TokenPanel {
+    #[default]
+    Idle,
+    /// The token file was unreadable when the app started and was replaced.
+    Recovered,
+    /// The first click: waiting for the user to confirm or cancel.
+    Confirming,
+    Working,
+    /// Done. `running` says whether the server took the new token at once.
+    Reissued {
+        running: bool,
+    },
+    Failed(String),
 }
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -38,6 +58,12 @@ pub enum Action {
     Prepare(Client),
     /// A board row's button: check the server and that app's registration.
     Inspect(Client),
+    /// The token panel: ask before reissuing, then cancel or go ahead.
+    ReissueAsk,
+    ReissueCancel,
+    ReissueConfirm,
+    /// Whether the server was running when it began, and how it ended.
+    Reissued(bool, Result<(), String>),
 }
 #[derive(Clone, Debug)]
 pub enum Outcome {
@@ -61,6 +87,47 @@ impl State {
                     self.registrations = registrations;
                     self.checking = false;
                 }
+                return Task::none();
+            }
+            Action::ReissueAsk => {
+                if !self.busy {
+                    self.token = TokenPanel::Confirming;
+                }
+                return Task::none();
+            }
+            Action::ReissueCancel => {
+                if self.token == TokenPanel::Confirming {
+                    self.token = TokenPanel::Idle;
+                }
+                return Task::none();
+            }
+            Action::ReissueConfirm => {
+                // Only as the answer to the question, and never beside a
+                // registration or check that is using the current token.
+                if self.busy || self.token != TokenPanel::Confirming {
+                    return Task::none();
+                }
+                self.busy = true;
+                self.token = TokenPanel::Working;
+                let control = self.token_control.clone();
+                let running = endpoint.is_some();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || control.reissue(&dir))
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err("재발급 작업을 완료하지 못했습니다. 연결 검사로 현재 상태를 확인하세요.".into())
+                            })
+                    },
+                    move |result| Message::McpSetup(Action::Reissued(running, result)),
+                );
+            }
+            Action::Reissued(running, result) => {
+                self.busy = false;
+                self.token = match result {
+                    Ok(()) => TokenPanel::Reissued { running },
+                    Err(error) => TokenPanel::Failed(error),
+                };
                 return Task::none();
             }
             _ => {}
@@ -373,6 +440,78 @@ pub fn board<'a>(
         .into()
 }
 
+const TOKEN_DETAIL_HEIGHT: f32 = 34.0;
+/// The token panel: what reissuing does, a two-step button, and the outcome.
+/// The header and the two-line detail have fixed heights, so no state moves
+/// the controls below.
+pub fn token_panel(state: &State) -> Element<'_, Message> {
+    let (detail, tone): (String, Option<Tone>) = match &state.token {
+        TokenPanel::Idle => (
+            "토큰이 유출됐다고 의심되면 새 토큰으로 바꿉니다. 도우미로 등록한 AI 앱은 다시 연결할 때 새 토큰을 받습니다.".into(),
+            None,
+        ),
+        TokenPanel::Recovered => (
+            "시작할 때 인증 파일을 읽을 수 없어 새 토큰으로 바꿨습니다. 도우미로 등록한 AI 앱은 그대로 쓰고, 환경변수 수동 연결은 다시 설정하세요.".into(),
+            Some(|c| c.amber),
+        ),
+        TokenPanel::Confirming => (
+            "재발급하면 이전 토큰은 즉시 거절됩니다. 토큰을 환경변수에 넣은 수동 연결(mcp-session.ps1)은 끊기므로 다시 설정해야 합니다.".into(),
+            Some(|c| c.danger),
+        ),
+        TokenPanel::Working => ("새 토큰을 저장하고 있습니다…".into(), None),
+        TokenPanel::Reissued { running: true } => (
+            "재발급했습니다. 이전 토큰은 거절됩니다. AI 앱은 다시 연결하면 새 토큰을 받고, 환경변수 수동 연결은 다시 설정해야 합니다.".into(),
+            Some(|c| c.green),
+        ),
+        TokenPanel::Reissued { running: false } => (
+            "새 토큰을 저장했습니다. MCP 서버가 꺼져 있으므로 앱을 다시 시작하면 새 토큰으로 시작합니다.".into(),
+            Some(|c| c.amber),
+        ),
+        TokenPanel::Failed(error) => (
+            format!("재발급하지 못했습니다. {error}"),
+            Some(|c| c.danger),
+        ),
+    };
+    let small = |label: &'static str, message: Option<Action>| {
+        button(text(label).size(12))
+            .padding([5, 10])
+            .style(crate::theme::secondary)
+            .on_press_maybe(message.map(Message::McpSetup))
+    };
+    let enabled = !state.busy;
+    let mut header = row![
+        text("인증 토큰").size(18),
+        iced::widget::space().width(Length::Fill)
+    ]
+    .spacing(8)
+    .height(ROW_HEIGHT)
+    .align_y(iced::Alignment::Center);
+    if state.token == TokenPanel::Confirming {
+        header = header
+            .push(small("취소", Some(Action::ReissueCancel)))
+            .push(small(
+                "재발급 확인",
+                enabled.then_some(Action::ReissueConfirm),
+            ));
+    } else {
+        header = header.push(small("토큰 재발급", enabled.then_some(Action::ReissueAsk)));
+    }
+    let detail = text(detail).size(12);
+    let detail = match tone {
+        Some(tone) => detail.style(toned(tone)),
+        None => detail.style(crate::theme::muted),
+    };
+    column![
+        header,
+        iced::widget::container(detail)
+            .width(Length::Fill)
+            .height(TOKEN_DETAIL_HEIGHT)
+            .clip(true)
+    ]
+    .spacing(4)
+    .into()
+}
+
 pub fn view(state: &State) -> Element<'_, Message> {
     let msg = Message::McpSetup;
     let enabled = !state.busy;
@@ -427,6 +566,59 @@ mod tests {
         assert_eq!(state.status, "failure");
         let _ = state.update(Action::Client(Client::ClaudeDesktop), PathBuf::new(), None);
         assert!(state.path.is_empty());
+    }
+    #[test]
+    fn reissue_needs_a_second_click_and_reports_how_it_ended() {
+        let mut state = State::default();
+        let dir = PathBuf::new;
+        // Confirming without having been asked does nothing: no one-click reissue.
+        let _ = state.update(Action::ReissueConfirm, dir(), running());
+        assert_eq!(state.token, TokenPanel::Idle);
+        assert!(!state.busy);
+        let _ = state.update(Action::ReissueAsk, dir(), running());
+        assert_eq!(state.token, TokenPanel::Confirming);
+        assert!(!state.busy, "asking starts nothing");
+        let _ = state.update(Action::ReissueCancel, dir(), running());
+        assert_eq!(state.token, TokenPanel::Idle);
+        let _ = state.update(Action::ReissueAsk, dir(), running());
+        let _ = state.update(Action::ReissueConfirm, dir(), running());
+        assert_eq!(state.token, TokenPanel::Working);
+        assert!(
+            state.busy,
+            "registrations and quitting wait for the reissue"
+        );
+        // Nothing else starts, and a second confirm does not queue another one.
+        let _ = state.update(Action::Inspect(Client::ClaudeCode), dir(), running());
+        let _ = state.update(Action::ReissueConfirm, dir(), running());
+        assert_eq!(state.client, Client::Codex);
+        assert_eq!(state.token, TokenPanel::Working);
+        let _ = state.update(Action::Reissued(true, Ok(())), dir(), running());
+        assert_eq!(state.token, TokenPanel::Reissued { running: true });
+        assert!(!state.busy);
+        // With the server off the result says a restart is needed.
+        let _ = state.update(Action::ReissueAsk, dir(), None);
+        let _ = state.update(Action::ReissueConfirm, dir(), None);
+        let _ = state.update(Action::Reissued(false, Ok(())), dir(), None);
+        assert_eq!(state.token, TokenPanel::Reissued { running: false });
+        let _ = state.update(Action::ReissueAsk, dir(), running());
+        let _ = state.update(Action::ReissueConfirm, dir(), running());
+        let _ = state.update(
+            Action::Reissued(true, Err("파일 사용 중".into())),
+            dir(),
+            running(),
+        );
+        assert_eq!(state.token, TokenPanel::Failed("파일 사용 중".into()));
+        assert!(!state.busy);
+        // While a registration or check runs, the question is not even asked.
+        state.busy = true;
+        let _ = state.update(Action::ReissueAsk, dir(), running());
+        assert_eq!(state.token, TokenPanel::Failed("파일 사용 중".into()));
+        // A question left open is withdrawn by cancelling, even while busy.
+        state.token = TokenPanel::Confirming;
+        let _ = state.update(Action::ReissueConfirm, dir(), running());
+        assert_eq!(state.token, TokenPanel::Confirming, "ignored while busy");
+        let _ = state.update(Action::ReissueCancel, dir(), running());
+        assert_eq!(state.token, TokenPanel::Idle);
     }
     #[test]
     fn a_row_check_reads_every_install_location_instead_of_demanding_one() {

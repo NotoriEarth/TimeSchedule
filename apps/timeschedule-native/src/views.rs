@@ -553,6 +553,7 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
             &app.mcp_clients(),
             chrono::Local::now()
         ),
+        crate::mcp_setup_ui::token_panel(&app.mcp_setup),
         crate::mcp_setup_ui::view(&app.mcp_setup),
         title("바탕화면 위젯"),
         scrollable(text(app.widget_status_text()).size(13))
