@@ -100,119 +100,196 @@ fn calendar_text_bounds(mut element: Element<'_, Message>, size: Size) -> Vec<(S
     probe.0
 }
 
-#[test]
-fn calendar_overflow_shows_record_before_more_in_short_cell() {
-    let mut app = overflowing_calendar_fixture(3);
-    app.preferences.widget.line_gap = 0;
-    let day = app
-        .snapshot
+fn selected_day(app: &App) -> &timeschedule_core::calendar::CalendarDay {
+    app.snapshot
         .days
         .iter()
         .find(|d| d.date == app.selected.to_string())
-        .unwrap();
+        .unwrap()
+}
+
+#[test]
+fn day_cell_names_hidden_items_instead_of_a_count() {
+    let mut app = overflowing_calendar_fixture(5);
+    app.preferences.widget.line_gap = 0;
+    let day = selected_day(&app);
+    assert_eq!(day.items.len(), 5);
+    // Three 14.3px lines fit (two with the diary's 1px gaps): two items and
+    // the line that names the rest.
     for quick in [false, true] {
         let labels = calendar_text_bounds(
-            crate::calendar_ui::day_items(&app, Some(day), 180., 52., 11., quick),
-            Size::new(180., 52.),
+            crate::calendar_ui::day_items(&app, Some(day), 240., 45., 11., quick),
+            Size::new(240., 45.),
         );
+        for item in &day.items[..2] {
+            assert!(labels.iter().any(|(s, _)| s == &item.title), "{labels:?}");
+        }
+        let rest = day.items[2..]
+            .iter()
+            .map(|i| i.title.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let summary = labels
+            .iter()
+            .find(|(s, _)| s == &rest)
+            .unwrap_or_else(|| panic!("hidden titles are named: {labels:?}"))
+            .1;
         assert!(
-            labels
-                .iter()
-                .any(|(s, _)| day.items.iter().any(|i| &i.title == s)),
-            "a complete two-line record fits before the footer: {labels:?}"
+            (summary.y + summary.height - 45.).abs() < 1.,
+            "the summary sits on the bottom edge: {summary:?}"
         );
+        assert!(!labels.iter().any(|(s, _)| s.ends_with("개 더")));
+    }
+}
+
+#[test]
+fn day_cell_record_is_one_line_with_project_prefix() {
+    let app = calendar_record_fixture();
+    let day = selected_day(&app);
+    for quick in [false, true] {
+        let labels = calendar_text_bounds(
+            crate::calendar_ui::day_items(&app, Some(day), 160., 60., 12., quick),
+            Size::new(160., 60.),
+        );
+        let project = labels.iter().find(|(s, _)| s == "TS").expect("prefix").1;
+        let title = labels
+            .iter()
+            .find(|(s, _)| s == "연동기록")
+            .expect("title")
+            .1;
+        assert!((project.y - title.y).abs() < 1., "{project:?} {title:?}");
+        assert!(project.x < title.x);
+    }
+}
+
+#[test]
+fn day_cell_record_without_project_has_no_prefix() {
+    let app = calendar_record_fixture();
+    let mut day = selected_day(&app).clone();
+    for item in &mut day.items {
+        item.project_id = None;
+        item.project_title.clear();
+        item.project_short_name.clear();
+    }
+    let labels = calendar_texts(
+        crate::calendar_ui::day_items(&app, Some(&day), 160., 60., 12., true),
+        Size::new(160., 60.),
+    );
+    assert_eq!(labels, ["연동기록"]);
+}
+
+#[test]
+fn day_cell_wraps_a_cut_title_when_room_remains() {
+    let app = calendar_record_fixture();
+    let mut day = selected_day(&app).clone();
+    let title = "아주 긴 작업 제목이 날짜 칸 하나에 다 들어가지 않는 경우";
+    day.items[0].title = title.into();
+    for quick in [false, true] {
+        let labels = calendar_text_bounds(
+            crate::calendar_ui::day_items(&app, Some(&day), 150., 100., 12., quick),
+            Size::new(150., 100.),
+        );
+        let lines: Vec<_> = labels.iter().filter(|(s, _)| s != "TS").collect();
+        assert_eq!(lines.len(), 2, "{labels:?}");
+        let (first, second) = (&lines[0], &lines[1]);
+        assert!(second.1.y > first.1.y + 10., "{labels:?}");
+        assert!(title.starts_with(first.0.trim_end()), "{labels:?}");
+        assert!(!first.0.ends_with('…'));
         assert!(
-            labels.iter().any(|(s, _)| s == "+2개 더"),
-            "only two records remain hidden: {labels:?}"
+            title.contains(second.0.trim_end_matches('…').trim()),
+            "{labels:?}"
         );
     }
 }
 
 #[test]
-fn calendar_overflow_footer_uses_bottom_edge_and_disappears_when_all_fit() {
+fn day_cell_keeps_one_line_per_item_when_overflowing() {
     let mut app = overflowing_calendar_fixture(5);
     app.preferences.widget.line_gap = 0;
-    let day = app
-        .snapshot
-        .days
+    let mut day = selected_day(&app).clone();
+    day.items[0].title = "아주 긴 작업 제목이 날짜 칸 하나에 다 들어가지 않는 경우".into();
+    let labels = calendar_text_bounds(
+        crate::calendar_ui::day_items(&app, Some(&day), 150., 45., 11., true),
+        Size::new(150., 45.),
+    );
+    let first = labels
         .iter()
-        .find(|d| d.date == app.selected.to_string())
-        .unwrap();
-    for quick in [false, true] {
-        let labels = calendar_text_bounds(
-            crate::calendar_ui::day_items(&app, Some(day), 180., 160., 11., quick),
-            Size::new(180., 160.),
-        );
-        let footer = labels
-            .iter()
-            .find(|(s, _)| s == "+2개 더")
-            .expect("three whole records fit, leaving two hidden")
-            .1;
-        assert!(
-            (footer.y + footer.height - 160.).abs() < 1.,
-            "footer must sit at the bottom, not immediately after the rows: {footer:?}"
-        );
-        let expanded = calendar_texts(
-            crate::calendar_ui::day_items(&app, Some(day), 180., 220., 11., quick),
-            Size::new(180., 220.),
-        );
-        assert!(!expanded.iter().any(|s| s.ends_with("개 더")));
-        for item in &day.items {
-            assert!(expanded.contains(&item.title));
+        .filter(|(s, _)| s.starts_with("아주"))
+        .collect::<Vec<_>>();
+    assert_eq!(first.len(), 1, "{labels:?}");
+    assert!(first[0].0.ends_with('…'));
+}
+
+#[test]
+fn day_cell_shows_completed_line_when_room() {
+    let app = calendar_record_fixture();
+    let mut day = selected_day(&app).clone();
+    day.total += 2;
+    day.completed = 2;
+    let labels = calendar_texts(
+        crate::calendar_ui::day_items(&app, Some(&day), 160., 60., 12., true),
+        Size::new(160., 60.),
+    );
+    assert!(labels.iter().any(|s| s == "연동기록"), "{labels:?}");
+    assert!(labels.iter().any(|s| s == "완료 2"), "{labels:?}");
+    day.items.clear();
+    day.total = 2;
+    let labels = calendar_texts(
+        crate::calendar_ui::day_items(&app, Some(&day), 160., 60., 12., true),
+        Size::new(160., 60.),
+    );
+    assert_eq!(labels, ["완료 2"]);
+}
+
+#[test]
+fn day_cell_text_stays_inside_cell() {
+    let mut app = overflowing_calendar_fixture(5);
+    let mut day = selected_day(&app).clone();
+    day.items[1].title = "WWWW 한글 일정 테스트 123456 아주 긴 제목".into();
+    day.total += 3;
+    day.completed = 3;
+    for gap in [0, 3] {
+        app.preferences.widget.line_gap = gap;
+        for size in [9., 13., 24.] {
+            for (width, height) in [(120., 100.), (60., 30.), (40., 10.)] {
+                for quick in [false, true] {
+                    let labels = calendar_text_bounds(
+                        crate::calendar_ui::day_items(&app, Some(&day), width, height, size, quick),
+                        Size::new(width, height),
+                    );
+                    for (s, b) in labels {
+                        assert!(
+                            b.x + b.width <= width + 0.1 && b.y + b.height <= height + 0.1,
+                            "{s:?} {b:?} in {width}x{height} at {size}"
+                        );
+                    }
+                }
+            }
         }
     }
 }
 
 #[test]
-fn calendar_overflow_default_diary_and_widget_show_content_before_more() {
+fn default_diary_and_widget_cells_show_every_record_of_a_busy_day() {
     let app = overflowing_calendar_fixture(3);
-    for (view, size, right) in [
+    let titles: Vec<_> = selected_day(&app)
+        .items
+        .iter()
+        .map(|i| i.title.clone())
+        .collect();
+    assert_eq!(titles.len(), 3);
+    for (view, size) in [
         (
             crate::views::view(&app, app.manager),
             Size::new(1160., 820.),
-            870.,
         ),
-        (
-            crate::desktop_widget::view(&app),
-            Size::new(960., 640.),
-            960.,
-        ),
+        (crate::desktop_widget::view(&app), Size::new(960., 640.)),
     ] {
-        let labels = calendar_text_bounds(view, size);
-        let footer = labels
-            .iter()
-            .find(|(s, b)| s == "+2개 더" && b.x < right)
-            .expect("one record and two hidden records in the calendar cell")
-            .1;
-        assert!(
-            labels
-                .iter()
-                .any(|(s, b)| (s.starts_with("기록") || s == "연동기록")
-                    && b.x < right
-                    && b.y < footer.y
-                    && b.y > footer.y - 55.),
-            "show a task title before the footer, not only a count: {labels:?}"
-        );
-    }
-}
-
-#[test]
-fn calendar_overflow_large_font_footer_stays_inside_cell() {
-    let mut app = overflowing_calendar_fixture(3);
-    app.preferences.widget.line_gap = 0;
-    let day = app
-        .snapshot
-        .days
-        .iter()
-        .find(|d| d.date == app.selected.to_string())
-        .unwrap();
-    let labels = calendar_text_bounds(
-        crate::calendar_ui::day_items(&app, Some(day), 240., 165., 24., true),
-        Size::new(240., 165.),
-    );
-    assert!(labels.iter().any(|(s, _)| s == "+2개 더"));
-    for (_, bounds) in labels {
-        assert!(bounds.y + bounds.height <= 165.1);
+        let labels = calendar_texts(view, size);
+        for title in &titles {
+            assert!(labels.contains(title), "{title} hidden: {labels:?}");
+        }
+        assert!(!labels.iter().any(|s| s.ends_with("개 더")));
     }
 }
 

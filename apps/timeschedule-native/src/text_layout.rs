@@ -57,9 +57,68 @@ pub fn fit_label_with_font(content: &str, width: f32, size: f32, font: iced::Fon
     )
 }
 
+/// Split `content` into the part that fits on one line of `width` and the
+/// rest. A space in the latter half of the fitting part is preferred as the
+/// break, so a word is cut only when the line holds no break worth using.
+pub fn split_first_line(
+    content: &str,
+    width: f32,
+    size: f32,
+    font: iced::Font,
+) -> (String, String) {
+    let content = content.replace(['\n', '\r', '\t'], " ");
+    if text_width_with_font(&content, size, font) <= width {
+        return (content, String::new());
+    }
+    let boundaries: Vec<_> = content
+        .grapheme_indices(true)
+        .map(|(index, _)| index)
+        .collect();
+    let (mut low, mut high) = (0, boundaries.len());
+    while low < high {
+        let mid = (low + high + 1) / 2;
+        let end = boundaries.get(mid).copied().unwrap_or(content.len());
+        if text_width_with_font(&content[..end], size, font) <= width {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    let mut end = boundaries.get(low).copied().unwrap_or(content.len());
+    if let Some(space) = content[..end].rfind(' ') {
+        if space > 0 && space * 2 >= end {
+            end = space;
+        }
+    }
+    (
+        content[..end].trim_end().to_owned(),
+        content[end..].trim_start().to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn first_line_fits_and_breaks_at_a_space() {
+        let font = iced::Font::with_name("Malgun Gothic");
+        let title = "아주 긴 작업 제목이 날짜 칸 하나에 다 들어가지 않는 경우";
+        for width in [0.0, 30.0, 90.0, 140.0] {
+            let (first, rest) = split_first_line(title, width, 12.0, font);
+            assert!(text_width_with_font(&first, 12.0, font) <= width + 0.1);
+            assert_eq!(format!("{first} {rest}").trim(), title, "{width}");
+        }
+        let (first, _) = split_first_line(title, 90.0, 12.0, font);
+        assert!(title.starts_with(&format!("{first} ")), "{first}");
+        assert_eq!(
+            split_first_line("짧은 제목", 500.0, 12.0, font),
+            ("짧은 제목".into(), String::new())
+        );
+        assert_eq!(
+            split_first_line("한 줄\n둘째", 500.0, 12.0, font).0,
+            "한 줄 둘째"
+        );
+    }
     #[test]
     fn chosen_font_bounds_match_the_rendered_title() {
         for name in ["Malgun Gothic", "Arial", "Consolas"] {

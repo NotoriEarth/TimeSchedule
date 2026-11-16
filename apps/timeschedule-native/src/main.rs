@@ -4,6 +4,7 @@ mod calendar_ui;
 mod calendar_viewport;
 mod category_drag;
 mod category_ui;
+mod day_cell;
 mod desktop_widget;
 mod editor;
 mod frozen;

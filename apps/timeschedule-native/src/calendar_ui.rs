@@ -4,7 +4,7 @@ use crate::{
     editor::{Form, Kind},
     theme, worker,
 };
-use iced::widget::{button, checkbox, column, container, row, scrollable, space, text, Column};
+use iced::widget::{button, checkbox, column, container, row, scrollable, space, text};
 use iced::{Color, Element, Length, Task};
 use timeschedule_core::calendar::{CalendarDay, CalendarItem, CalendarPage, CalendarSource};
 
@@ -355,60 +355,7 @@ pub fn day_items<'a>(
     size: f32,
     quick: bool,
 ) -> Element<'a, Message> {
-    let Some(day) = day else {
-        return space().into();
-    };
-    let mut items = Column::new().spacing(0).height(height);
-    // Reserve the footer's actual line height. A fixed 18px budget used to
-    // hide the first two-line record even when it and the footer both fit.
-    let footer_height = size * 1.3;
-    let mut used = 0.0;
-    let mut shown = 0;
-    for (index, item) in day.items.iter().enumerate() {
-        let next = item_height(item, size)
-            + if quick {
-                f32::from(app.preferences.widget.line_gap)
-            } else {
-                0.0
-            };
-        let reserve =
-            if day.completed > 0 || day.total.saturating_sub(day.completed) > index as u32 + 1 {
-                footer_height
-            } else {
-                0.0
-            };
-        if used + next + reserve > height {
-            break;
-        }
-        items = items.push(item_view(app, item, size, quick));
-        used += next;
-        shown += 1;
-    }
-    let pending = day
-        .total
-        .saturating_sub(day.completed)
-        .saturating_sub(shown);
-    if height - used >= footer_height && (pending > 0 || day.completed > 0) {
-        let caption = match (pending, day.completed) {
-            (0, n) => format!("완료 {n}개"),
-            (n, 0) => format!("+{n}개 더"),
-            (n, c) => format!("+{n} · 완료 {c}개"),
-        };
-        if let Ok(date) = day.date.parse() {
-            items = items.push(space().height(Length::Fill)).push(
-                button(
-                    text(crate::text_layout::fit_label(&caption, width - 4.0, size))
-                        .size(size)
-                        .line_height(text::LineHeight::Relative(1.3)),
-                )
-                .padding(0)
-                .height(footer_height)
-                .style(theme::text_button)
-                .on_press(Message::WidgetDate(date)),
-            )
-        }
-    }
-    items.into()
+    crate::day_cell::view(app, day, width, height, size, quick)
 }
 pub fn detail_view(app: &App) -> Element<'_, Message> {
     let form = app.calendar.detail.as_ref().unwrap();
