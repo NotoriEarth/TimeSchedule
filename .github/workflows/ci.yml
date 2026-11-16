@@ -3,15 +3,17 @@
 name: CI
 
 on:
-  # Changes that touch only documentation have nothing for these checks to run.
+  # Skip changes that touch only documentation no check reads: Markdown at the
+  # repository root ("*" does not cross "/") and docs/. Markdown elsewhere still
+  # runs CI, because vendored crates embed their READMEs with include_str!.
   pull_request:
     paths-ignore:
-      - "**/*.md"
+      - "*.md"
       - "docs/**"
   push:
     branches: [main]
     paths-ignore:
-      - "**/*.md"
+      - "*.md"
       - "docs/**"
   workflow_dispatch:
 
