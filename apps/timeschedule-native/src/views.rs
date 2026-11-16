@@ -545,8 +545,14 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         text(app.data_dir.display().to_string()).size(14),
         quiet("기존 Tauri 앱과 분리된 네이티브 데이터 폴더입니다."),
         title("로컬 일정 MCP"),
-        text(&app.mcp_status).size(13),
+        crate::mcp_setup_ui::server_line(&app.mcp_status, app.mcp_endpoint().is_some()),
         quiet("앱이 트레이에 있는 동안에도 연결됩니다. 완전 종료하면 중지됩니다."),
+        crate::mcp_setup_ui::board(
+            &app.mcp_setup,
+            app.mcp_endpoint().is_some(),
+            &app.mcp_clients(),
+            chrono::Local::now()
+        ),
         crate::mcp_setup_ui::view(&app.mcp_setup),
         title("바탕화면 위젯"),
         scrollable(text(app.widget_status_text()).size(13))

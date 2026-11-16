@@ -443,6 +443,21 @@ impl App {
             }
         }
     }
+    /// The running MCP server's endpoint, used to judge whether each AI app's
+    /// registration points at it.
+    pub fn mcp_endpoint(&self) -> Option<String> {
+        self._mcp
+            .as_ref()
+            .filter(|server| server.is_running())
+            .map(crate::mcp::LocalMcp::endpoint)
+    }
+    /// Which AI apps have connected, newest first. Empty while MCP is off.
+    pub fn mcp_clients(&self) -> Vec<crate::mcp_clients::Seen> {
+        self._mcp
+            .as_ref()
+            .map(|server| server.clients.snapshot())
+            .unwrap_or_default()
+    }
     pub fn log(&self, value: &str) {
         use std::io::Write;
         if self.data_dir.as_os_str().is_empty() || self._instance.is_none() {
@@ -849,6 +864,7 @@ impl App {
                     | Message::RecordsDrained(_)
                     | Message::NativeDone(..)
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Finished(_))
+                    | Message::McpSetup(crate::mcp_setup_ui::Action::Loaded(..))
                     | Message::Category(
                         crate::category_ui::Action::Deleted(_)
                             | crate::category_ui::Action::DeletePreviewed { .. }
@@ -876,7 +892,10 @@ impl App {
             Message::Calendar(action) => return crate::calendar_ui::update(self, action),
             Message::Category(action) => return crate::category_ui::update(self, action),
             Message::McpSetup(action) => {
-                return self.mcp_setup.update(action, self.data_dir.clone())
+                let endpoint = self.mcp_endpoint();
+                return self
+                    .mcp_setup
+                    .update(action, self.data_dir.clone(), endpoint);
             }
             Message::RecordsDue => {
                 self.records_due = true;
@@ -1069,6 +1088,16 @@ impl App {
                 self.search.clear();
                 self.search_generation += 1;
                 self.search_results.clear();
+                if page == Page::Settings {
+                    // Opening settings re-reads every AI app's registration.
+                    let endpoint = self.mcp_endpoint();
+                    let board = self.mcp_setup.update(
+                        crate::mcp_setup_ui::Action::Refresh,
+                        self.data_dir.clone(),
+                        endpoint,
+                    );
+                    return Task::batch([self.refresh(), board]);
+                }
                 return self.refresh();
             }
             Message::Month(delta) if self.editor.is_none() => {

@@ -17,6 +17,8 @@ pub struct LocalMcp {
     server: Option<server::Server>,
     status_path: std::path::PathBuf,
     pub status: String,
+    /// AI apps that completed an authenticated `initialize`.
+    pub clients: Arc<crate::mcp_clients::ClientLog>,
 }
 impl LocalMcp {
     pub fn start(
@@ -31,7 +33,14 @@ impl LocalMcp {
             .unwrap_or_else(|_| "39281".into())
             .parse::<u16>()
             .map_err(|_| "TIMESCHEDULE_MCP_PORT는 0..65535 정수여야 합니다.")?;
-        let server = server::Server::start(store, changed, port, server::token(dir)?)?;
+        let clients = Arc::new(crate::mcp_clients::ClientLog::load(dir));
+        let server = server::Server::start_with_clients(
+            store,
+            changed,
+            port,
+            server::token(dir)?,
+            clients.clone(),
+        )?;
         let endpoint = format!("http://{}/mcp", server.address);
         let status_path = dir.join("mcp-status.json");
         std::fs::write(&status_path,json!({"endpoint":endpoint,"pid":std::process::id(),"version":env!("CARGO_PKG_VERSION")}).to_string()).map_err(|_|"MCP 상태 파일 저장 실패")?;
@@ -39,10 +48,17 @@ impl LocalMcp {
             server: Some(server),
             status_path,
             status: format!("실행 중 · {endpoint} · 토큰 인증"),
+            clients,
         }))
     }
     pub fn is_running(&self) -> bool {
         self.server.as_ref().is_some_and(server::Server::is_running)
+    }
+    pub fn endpoint(&self) -> String {
+        self.server
+            .as_ref()
+            .map(|server| format!("http://{}/mcp", server.address))
+            .unwrap_or_default()
     }
 }
 impl Drop for LocalMcp {
@@ -57,6 +73,8 @@ struct CalendarTools {
     store: Arc<Storage>,
     changed: Arc<AtomicBool>,
     work: Arc<tokio::sync::Semaphore>,
+    /// Which AI apps connected; fed only by authenticated `initialize` requests.
+    clients: Arc<crate::mcp_clients::ClientLog>,
 }
 impl CalendarTools {
     fn execute(&self, name: &str, args: Value) -> Result<Value, String> {
@@ -219,6 +237,31 @@ impl ServerHandler for CalendarTools {
         info.server_info = Implementation::new("TimeSchedule", env!("CARGO_PKG_VERSION"));
         info
     }
+    /// `initialize` is the only request that names the client: in stateless
+    /// mode later tool calls carry no identity, so the connection board's
+    /// "last connected" time is taken here.
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, ErrorData> {
+        context.peer.set_peer_info(request.clone());
+        let result = self.negotiate_initialize(&request);
+        if result.is_ok() {
+            let clients = self.clients.clone();
+            let info = request.client_info;
+            let _ = tokio::task::spawn_blocking(move || {
+                clients.record(
+                    &info.name,
+                    info.title.as_deref(),
+                    &info.version,
+                    chrono::Local::now(),
+                )
+            })
+            .await;
+        }
+        result
+    }
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
         Cow::Owned(vec![
             ProtocolVersion::V_2025_11_25,
@@ -286,6 +329,7 @@ mod tests {
             store: Arc::new(Storage::open(":memory:").unwrap()),
             changed: Arc::new(AtomicBool::new(false)),
             work: Arc::new(tokio::sync::Semaphore::new(4)),
+            clients: Arc::new(crate::mcp_clients::ClientLog::memory()),
         }
     }
     #[test]

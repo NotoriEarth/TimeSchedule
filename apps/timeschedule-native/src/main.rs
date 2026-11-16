@@ -9,6 +9,7 @@ mod editor;
 mod frozen;
 mod icons;
 mod mcp;
+mod mcp_clients;
 mod mcp_connection;
 mod mcp_setup;
 mod mcp_setup_ui;
