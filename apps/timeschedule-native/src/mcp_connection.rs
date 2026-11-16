@@ -38,9 +38,9 @@ pub fn current_endpoint(dir: &Path) -> Result<String, String> {
     let address = endpoint(value["endpoint"].as_str().ok_or("MCP 주소가 없습니다.")?)?;
     Ok(format!("http://{address}/mcp"))
 }
-struct Connection {
+struct Connection<'a> {
     address: SocketAddr,
-    token: String,
+    dir: &'a Path,
 }
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 impl Drop for AbortOnDrop {
@@ -138,21 +138,45 @@ async fn proven_link(address: SocketAddr, token: &str) -> Result<Link, String> {
     }
     Ok(link)
 }
-impl Connection {
-    fn load(dir: &Path) -> Result<Self, String> {
+/// `proven_link` with the token `read` returns, and that token. The token file
+/// can be reissued between reading it and asking for the proof; the server then
+/// answers with the new token and the proof fails. So after a failure the token
+/// is read once more and, only if it changed, tried once more. Each attempt
+/// must prove itself before anything is sent, exactly like the first.
+async fn proven(
+    address: SocketAddr,
+    read: &mut dyn FnMut() -> Result<String, String>,
+) -> Result<(Link, String), String> {
+    let token = read()?;
+    match proven_link(address, &token).await {
+        Ok(link) => Ok((link, token)),
+        Err(error) => {
+            let reread = read()?;
+            if reread == token {
+                return Err(error);
+            }
+            Ok((proven_link(address, &reread).await?, reread))
+        }
+    }
+}
+impl<'a> Connection<'a> {
+    /// The token is read for each request, so a long-lived bridge follows a
+    /// reissue without being restarted.
+    fn load(dir: &'a Path) -> Result<Self, String> {
         Ok(Self {
             address: endpoint(&current_endpoint(dir)?)?,
-            token: crate::mcp::read_token(dir)?,
+            dir,
         })
     }
     async fn post(&self, value: &Value, protocol: &str) -> Result<Option<Value>, String> {
         tokio::time::timeout(Duration::from_secs(12), async {
             // The status file can outlive a crashed app; never trust its port with the
             // token. The request goes out on the very connection that proved itself.
-            let mut link = proven_link(self.address, &self.token).await?;
+            let (mut link, token) =
+                proven(self.address, &mut || crate::mcp::read_token(self.dir)).await?;
             let request = Request::post("/mcp")
                 .header("Host", self.address.to_string())
-                .header("Authorization", format!("Bearer {}", self.token))
+                .header("Authorization", format!("Bearer {token}"))
                 .header("Content-Type", "application/json")
                 .header("Accept", "application/json, text/event-stream")
                 .header("MCP-Protocol-Version", protocol)
@@ -248,9 +272,14 @@ pub fn bridge(dir: &Path, mut input: impl BufRead, mut output: impl Write) -> Re
 /// token is released only after the listener at `url` proves it is this user's
 /// running TimeSchedule; a closed app or a port squatter gets an error instead.
 pub fn auth_headers(dir: &Path, url: &str) -> Result<String, String> {
-    let address = endpoint(url)?;
-    let token = crate::mcp::read_token(dir)?;
-    runtime()?.block_on(proven_link(address, &token))?;
+    released(endpoint(url)?, &mut || crate::mcp::read_token(dir))
+}
+/// `auth_headers` over any source of the token, read as often as `proven` asks.
+pub(crate) fn released(
+    address: SocketAddr,
+    read: &mut dyn FnMut() -> Result<String, String>,
+) -> Result<String, String> {
+    let (_, token) = runtime()?.block_on(proven(address, read))?;
     Ok(json!({"Authorization":format!("Bearer {token}")}).to_string())
 }
 /// `--data-dir <absolute path> [--endpoint <url>]`. The bridge and probe read the

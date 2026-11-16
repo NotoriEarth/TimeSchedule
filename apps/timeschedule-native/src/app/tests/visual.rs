@@ -1689,6 +1689,185 @@ fn connection_board_keeps_its_height_and_names_each_state() {
     }
 }
 
+type TokenPanelCase = (
+    &'static str,
+    crate::mcp_setup_ui::TokenPanel,
+    bool,
+    Vec<&'static str>,
+);
+fn token_panel_cases() -> Vec<TokenPanelCase> {
+    use crate::mcp_setup_ui::TokenPanel as T;
+    vec![
+        (
+            "idle",
+            T::Idle,
+            false,
+            vec!["인증 토큰", "토큰 재발급", "유출"],
+        ),
+        (
+            "confirming",
+            T::Confirming,
+            false,
+            vec!["취소", "재발급 확인", "즉시 거절", "환경변수"],
+        ),
+        ("working", T::Working, true, vec!["토큰 재발급", "저장하고"]),
+        (
+            "reissued",
+            T::Reissued { running: true },
+            false,
+            vec!["이전 토큰은 거절", "다시 연결", "환경변수"],
+        ),
+        (
+            "reissued-off",
+            T::Reissued { running: false },
+            false,
+            vec!["앱을 다시 시작"],
+        ),
+        (
+            "failed",
+            T::Failed(
+                "MCP 인증 파일을 교체하지 못했습니다. 다른 프로그램이 파일을 사용 중인지 확인하세요. 이전 토큰은 그대로입니다."
+                    .into(),
+            ),
+            false,
+            vec!["재발급하지 못했습니다", "이전 토큰은 그대로"],
+        ),
+        (
+            "recovered",
+            T::Recovered,
+            false,
+            vec!["읽을 수 없어", "새 토큰", "환경변수"],
+        ),
+    ]
+}
+
+#[test]
+fn token_panel_keeps_its_height_and_says_what_each_state_means() {
+    for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+        for width in [560., 900.] {
+            let mut app = fixture();
+            app.preferences.theme = mode;
+            let mut renderer =
+                iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+            let mut height = None;
+            for (name, token, busy, expected) in token_panel_cases() {
+                app.mcp_setup.token = token;
+                app.mcp_setup.busy = busy;
+                let mut element = crate::mcp_setup_ui::token_panel(&app.mcp_setup);
+                let mut tree = Tree::new(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, Size::new(width, 2000.)),
+                );
+                let mut probe = SettingsProbe::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    layout::Layout::new(&node),
+                    &renderer,
+                    &mut probe,
+                );
+                let all = probe.texts.join(" | ");
+                for text in expected {
+                    assert!(all.contains(text), "{name}: missing {text:?} in {all}");
+                }
+                let measured = node.size().height;
+                assert!(measured > 40., "{name}: the panel is missing");
+                match height {
+                    None => height = Some(measured),
+                    Some(first) => assert_eq!(
+                        measured, first,
+                        "{name}: the panel changed height, moving every control below it"
+                    ),
+                }
+                if let Some(output) = std::env::var_os("TIMESCHEDULE_MCP_SETUP_PREVIEW_DIR") {
+                    let output = PathBuf::from(output);
+                    std::fs::create_dir_all(&output).unwrap();
+                    render_settings_frame(
+                        &app,
+                        &mut element,
+                        &mut tree,
+                        &node,
+                        &mut renderer,
+                        Size::new(width, measured),
+                        &output.join(format!("token-{mode:?}-{width}-{name}.png")),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn reissuing_the_token_does_not_move_the_settings_controls() {
+    for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
+        for size in [Size::new(800., 620.), Size::new(1160., 820.)] {
+            let mut app = fixture();
+            app.page = Page::Settings;
+            app.preferences.theme = mode;
+            let mut renderer =
+                iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+            let mut tree = Tree::empty();
+            let mut baseline = None;
+            for (frame, (name, token, busy, _)) in token_panel_cases().into_iter().enumerate() {
+                app.mcp_setup.token = token;
+                app.mcp_setup.busy = busy;
+                let mut element = app.view(app.manager);
+                tree.diff(element.as_widget());
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                if frame == 0 {
+                    let mut set = SettingsProbe {
+                        set_scroll: Some(280.),
+                        set_scroll_index: 1,
+                        ..Default::default()
+                    };
+                    element.as_widget_mut().operate(
+                        &mut tree,
+                        layout::Layout::new(&node),
+                        &renderer,
+                        &mut set,
+                    );
+                }
+                let mut probe = SettingsProbe::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    layout::Layout::new(&node),
+                    &renderer,
+                    &mut probe,
+                );
+                assert!(
+                    probe.texts.iter().any(|text| text == "인증 토큰"),
+                    "{name}: the settings page has no token panel"
+                );
+                let bounds: Vec<_> = probe.scrolls.iter().map(|s| s.0).collect();
+                let actual = (probe.scrolls[1], bounds, probe.controls);
+                if let Some(expected) = &baseline {
+                    assert_eq!(&actual, expected, "{name}: the token panel moved controls");
+                } else {
+                    baseline = Some(actual);
+                }
+                if let Some(output) = std::env::var_os("TIMESCHEDULE_MCP_SETUP_PREVIEW_DIR") {
+                    let output = PathBuf::from(output);
+                    std::fs::create_dir_all(&output).unwrap();
+                    render_settings_frame(
+                        &app,
+                        &mut element,
+                        &mut tree,
+                        &node,
+                        &mut renderer,
+                        size,
+                        &output.join(format!("settings-token-{mode:?}-{}-{name}.png", size.width)),
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn mcp_assistant_keeps_controls_and_outer_scroll_fixed_during_results() {
     for mode in [AppTheme::Midnight, AppTheme::Porcelain] {

@@ -29,12 +29,17 @@ pub struct Server {
     cancel: CancellationToken,
     thread: Option<JoinHandle<()>>,
     pub address: SocketAddr,
+    live: Arc<LiveToken>,
 }
 impl Server {
     pub fn is_running(&self) -> bool {
         self.thread
             .as_ref()
             .is_some_and(|thread| !thread.is_finished())
+    }
+    /// The token this server checks requests against; `reissue` replaces it.
+    pub(crate) fn live_token(&self) -> Arc<LiveToken> {
+        self.live.clone()
     }
     /// A server whose connection log lives only in memory (tests).
     #[cfg(test)]
@@ -90,9 +95,9 @@ impl Server {
             Arc::new(LocalSessionManager::default()),
             config,
         );
+        let live = Arc::new(LiveToken::new(token));
         let guard = Arc::new(Guard {
-            token: format!("Bearer {token}"),
-            secret: token,
+            live: live.clone(),
             host: address.to_string(),
             slots: tokio::sync::Semaphore::new(8),
         });
@@ -121,6 +126,7 @@ impl Server {
             cancel,
             thread: Some(thread),
             address,
+            live,
         })
     }
 }
@@ -176,9 +182,49 @@ impl Drop for Server {
     }
 }
 
-struct Guard {
-    token: String,
+struct Credential {
+    /// The exact `Authorization` header value.
+    bearer: String,
+    /// The token itself, the key of the server proof.
     secret: String,
+}
+/// The token a running server accepts. A reissue replaces it as a whole, so
+/// every request is checked against either the previous token or the new one.
+pub(crate) struct LiveToken {
+    current: std::sync::RwLock<Arc<Credential>>,
+    /// Held while a reissue stores the new token and then swaps it in, so two
+    /// reissues cannot leave the file and the server holding different tokens.
+    reissuing: std::sync::Mutex<()>,
+}
+impl LiveToken {
+    fn new(token: String) -> Self {
+        Self {
+            current: std::sync::RwLock::new(Arc::new(Self::credential(token))),
+            reissuing: std::sync::Mutex::new(()),
+        }
+    }
+    fn credential(token: String) -> Credential {
+        Credential {
+            bearer: format!("Bearer {token}"),
+            secret: token,
+        }
+    }
+    /// Never held across an await or I/O: the lock only guards the pointer.
+    fn current(&self) -> Arc<Credential> {
+        self.current
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    fn replace(&self, token: String) {
+        *self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(Self::credential(token));
+    }
+}
+struct Guard {
+    live: Arc<LiveToken>,
     host: String,
     slots: tokio::sync::Semaphore,
 }
@@ -211,7 +257,7 @@ async fn prove(State(guard): State<Arc<Guard>>, headers: HeaderMap) -> Response 
     let Some(challenge) = challenge else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    match proof(&guard.secret, &guard.host, challenge) {
+    match proof(&guard.live.current().secret, &guard.host, challenge) {
         Ok(value) => ([("cache-control", "no-store")], value).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
@@ -221,10 +267,13 @@ async fn protect(State(guard): State<Arc<Guard>>, request: Request<Body>, next: 
     if !addressed_locally(&guard, headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    // Read for every request: after a reissue the old token is refused even on
+    // a connection that was opened with it.
+    let credential = guard.live.current();
     let authenticated = headers.get_all("authorization").iter().count() == 1
         && headers.get("authorization").is_some_and(|value| {
             let supplied = value.as_bytes();
-            let expected = guard.token.as_bytes();
+            let expected = credential.bearer.as_bytes();
             supplied.len() == expected.len()
                 && supplied
                     .iter()
@@ -249,55 +298,188 @@ async fn protect(State(guard): State<Arc<Guard>>, request: Request<Body>, next: 
     response
 }
 
-pub(super) fn token(dir: &Path) -> Result<String, String> {
-    let path = dir.join("mcp-token.dpapi");
-    if path.exists() {
-        return read_token(dir);
+pub(crate) const TOKEN_FILE: &str = "mcp-token.dpapi";
+/// Where an unreadable token file is moved when a new token replaces it. It is
+/// still the encrypted blob (or whatever damaged bytes were there), never
+/// plaintext; one slot, overwritten by the next recovery.
+pub(crate) const SET_ASIDE: &str = "mcp-token.dpapi.corrupt";
+
+enum TokenError {
+    Missing,
+    /// The file was read in full and is not this account's token: cut off,
+    /// mangled, or protected by another PC or Windows account. Waiting cannot
+    /// fix it, so the app may replace it.
+    Damaged,
+    /// The file may be fine but could not be read now (access denied, held by
+    /// another program, I/O or protection service failure). Never replaced.
+    Unavailable,
+}
+impl TokenError {
+    fn message(&self) -> String {
+        match self {
+            Self::Missing => "MCP 인증 파일이 없습니다. TimeSchedule을 실행해 새로 만드세요.",
+            Self::Damaged => "MCP 인증 파일이 손상되었거나 다른 PC·Windows 계정의 것입니다. TimeSchedule을 다시 실행하면 새 토큰을 발급합니다.",
+            Self::Unavailable => "MCP 인증 파일을 지금 읽을 수 없습니다(접근 거부 또는 다른 프로그램이 사용 중). 잠시 후 다시 시도하세요.",
+        }
+        .into()
     }
-    let value = format!(
+}
+/// Whether a failed `CryptUnprotectData` means the blob itself is unusable
+/// here. Measured on Windows 10: a mangled or cut-off blob is
+/// `ERROR_INVALID_DATA`, one too short to parse `ERROR_INVALID_PARAMETER`, and
+/// one whose master key this profile does not have (another PC or account)
+/// `NTE_BAD_KEY_STATE`. Anything else may pass, so it does not cost the token.
+fn says_damaged(code: u32) -> bool {
+    const ERROR_INVALID_DATA: u32 = 13;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    const NTE_BAD_KEY_STATE: u32 = 0x8009_000b;
+    matches!(
+        code,
+        ERROR_INVALID_DATA | ERROR_INVALID_PARAMETER | NTE_BAD_KEY_STATE
+    )
+}
+fn load(dir: &Path) -> Result<String, TokenError> {
+    let mut encrypted = Vec::new();
+    match fs::File::open(dir.join(TOKEN_FILE)) {
+        Ok(file) => file
+            .take(16 * 1024 + 1)
+            .read_to_end(&mut encrypted)
+            .map_err(|_| TokenError::Unavailable)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(TokenError::Missing)
+        }
+        Err(_) => return Err(TokenError::Unavailable),
+    };
+    if encrypted.is_empty() || encrypted.len() > 16 * 1024 {
+        return Err(TokenError::Damaged);
+    }
+    let plain = dpapi(&encrypted, false).map_err(|code| {
+        if says_damaged(code) {
+            TokenError::Damaged
+        } else {
+            TokenError::Unavailable
+        }
+    })?;
+    let value = String::from_utf8(plain).map_err(|_| TokenError::Damaged)?;
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(TokenError::Damaged);
+    }
+    Ok(value)
+}
+/// Read-only: helper processes report a problem and leave the file to the app.
+pub(crate) fn read_token(dir: &Path) -> Result<String, String> {
+    load(dir).map_err(|error| error.message())
+}
+fn new_token() -> String {
+    format!(
         "{}{}",
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
-    );
-    let encrypted = protect_token(value.as_bytes(), true)?;
-    let mut file = OpenOptions::new()
+    )
+}
+fn temporary_name(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    name.strip_prefix(TOKEN_FILE)
+        .is_some_and(|rest| rest.starts_with('.') && rest.ends_with(".tmp"))
+}
+/// Stores `value` so that the token file always holds one whole token: the new
+/// blob is written and flushed beside it, then renamed over it. A crash leaves
+/// the previous file (and a stray temporary one) or the new file, never a mix,
+/// and a reader keeps the complete file it opened.
+fn store(dir: &Path, value: &str) -> Result<(), String> {
+    let encrypted = dpapi(value.as_bytes(), true).map_err(|_| "MCP 인증 정보 보호 실패")?;
+    let path = dir.join(TOKEN_FILE);
+    let temporary = dir.join(format!(
+        "{TOKEN_FILE}.{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let written = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&path)
-        .map_err(|_| "MCP 인증 파일 생성 실패")?;
-    if file
-        .write_all(&encrypted)
-        .and_then(|_| file.sync_all())
-        .is_err()
-    {
-        drop(file);
-        let _ = fs::remove_file(path);
-        return Err("MCP 인증 파일 저장 실패".into());
+        .open(&temporary)
+        .and_then(|mut file| file.write_all(&encrypted).and_then(|_| file.sync_all()));
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err("MCP 인증 파일 저장 실패. 이전 토큰은 그대로입니다.".into());
     }
-    Ok(value)
+    // A reader that opened the file without sharing deletion (PowerShell's
+    // ReadAllBytes, a scanner) blocks the rename for a moment.
+    for attempt in 0..6 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        if fs::rename(&temporary, &path).is_ok() {
+            return Ok(());
+        }
+    }
+    let _ = fs::remove_file(&temporary);
+    Err("MCP 인증 파일을 교체하지 못했습니다. 다른 프로그램이 파일을 사용 중인지 확인하세요. 이전 토큰은 그대로입니다.".into())
 }
 
-pub(crate) fn read_token(dir: &Path) -> Result<String, String> {
-    let path = dir.join("mcp-token.dpapi");
-    let mut encrypted = Vec::new();
-    fs::File::open(path)
-        .and_then(|file| file.take(16 * 1024 + 1).read_to_end(&mut encrypted))
-        .map_err(|_| "MCP 인증 파일 읽기 실패")?;
-    if encrypted.len() > 16 * 1024 {
-        return Err("MCP 인증 파일 크기가 잘못되었습니다.".into());
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Issue {
+    Existing,
+    Created,
+    /// The file was damaged; it was set aside and a new token issued.
+    Recovered,
+}
+/// The app's token at start: the stored one, or a new one when there is none or
+/// the stored one is damaged. A file that merely cannot be read now is an
+/// error, so a passing lock never costs the user their registered token.
+pub(super) fn load_or_issue(dir: &Path) -> Result<(String, Issue), String> {
+    // Left by a write that was cut off before its rename; the token file itself
+    // was not touched. Only this single app instance writes here.
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if temporary_name(&entry.file_name()) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
-    let plain = protect_token(&encrypted, false)?;
-    let value = String::from_utf8(plain).map_err(|_| "MCP 인증 파일 형식 오류")?;
-    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("MCP 인증 파일 형식 오류".into());
+    let issue = match load(dir) {
+        Ok(value) => return Ok((value, Issue::Existing)),
+        Err(TokenError::Missing) => Issue::Created,
+        Err(TokenError::Damaged) => {
+            // Best effort: the new token below replaces the file either way.
+            let _ = fs::rename(dir.join(TOKEN_FILE), dir.join(SET_ASIDE));
+            Issue::Recovered
+        }
+        Err(error @ TokenError::Unavailable) => return Err(error.message()),
+    };
+    let value = new_token();
+    store(dir, &value)?;
+    Ok((value, issue))
+}
+#[cfg(test)]
+pub(super) fn token(dir: &Path) -> Result<String, String> {
+    load_or_issue(dir).map(|(value, _)| value)
+}
+/// Replaces the token. The file is swapped first; only then does the running
+/// server (`live`) start checking the new token, from which moment the old one
+/// is refused. On any error both still hold the old token. Without a server
+/// the new token takes effect when the app next starts.
+pub(crate) fn reissue(dir: &Path, live: Option<&LiveToken>) -> Result<(), String> {
+    if !dir.is_absolute() {
+        return Err("데이터 폴더를 확인할 수 없어 토큰을 재발급하지 못했습니다.".into());
     }
-    Ok(value)
+    let _serial = live.map(|live| {
+        live.reissuing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    });
+    let value = new_token();
+    store(dir, &value)?;
+    if let Some(live) = live {
+        live.replace(value);
+    }
+    Ok(())
 }
 
+/// DPAPI, CurrentUser scope. The error is the Win32 code.
 #[cfg(windows)]
-fn protect_token(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
+fn dpapi(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, u32> {
     use windows_sys::Win32::{
-        Foundation::LocalFree,
+        Foundation::{GetLastError, LocalFree},
         Security::Cryptography::{
             CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
         },
@@ -310,7 +492,7 @@ fn protect_token(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
         cbData: 0,
         pbData: std::ptr::null_mut(),
     };
-    // DPAPI CurrentUser scope; Windows allocates output with LocalAlloc.
+    // Windows allocates output with LocalAlloc.
     let ok = unsafe {
         if encrypt {
             CryptProtectData(
@@ -335,7 +517,7 @@ fn protect_token(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
         }
     };
     if ok == 0 {
-        return Err("MCP 인증 보호/복호화 실패: 같은 Windows 계정을 사용하세요.".into());
+        return Err(unsafe { GetLastError() });
     }
     let result =
         unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec() };
@@ -346,8 +528,8 @@ fn protect_token(bytes: &[u8], encrypt: bool) -> Result<Vec<u8>, String> {
     Ok(result)
 }
 #[cfg(not(windows))]
-fn protect_token(_: &[u8], _: bool) -> Result<Vec<u8>, String> {
-    Err("MCP 인증 저장은 Windows에서 지원됩니다.".into())
+fn dpapi(_: &[u8], _: bool) -> Result<Vec<u8>, u32> {
+    Err(0)
 }
 
 #[cfg(windows)]
@@ -381,6 +563,400 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     const TOKEN: &str = "fixture-only-secret-not-a-real-credential";
+    const LIST: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
+    fn bearer(token: &str) -> String {
+        format!("Authorization: Bearer {token}\r\nMCP-Protocol-Version: 2025-11-25\r\n")
+    }
+    /// Every file in a data folder, so a test can prove nothing else was left.
+    fn files(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+    fn holds_plaintext(dir: &Path, token: &str) -> bool {
+        files(dir).iter().any(|name| {
+            std::fs::read(dir.join(name))
+                .unwrap()
+                .windows(token.len())
+                .any(|bytes| bytes == token.as_bytes())
+        })
+    }
+    /// Another program holding the file without sharing it, as a scanner or
+    /// PowerShell's `ReadAllBytes` does for a moment.
+    fn held_exclusively(path: &Path) -> std::fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap()
+    }
+    /// One request on a connection that stays open; returns the status.
+    fn exchange(
+        reader: &mut std::io::BufReader<std::net::TcpStream>,
+        address: SocketAddr,
+        token: &str,
+    ) -> u16 {
+        use std::io::BufRead;
+        write!(reader.get_mut(), "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\n{}\r\n{LIST}", LIST.len(), bearer(token)).unwrap();
+        let mut status = String::new();
+        reader.read_line(&mut status).unwrap();
+        let mut length = 0;
+        loop {
+            let mut header = String::new();
+            reader.read_line(&mut header).unwrap();
+            if header == "\r\n" {
+                break;
+            }
+            if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        let mut body = vec![0u8; length];
+        reader.read_exact(&mut body).unwrap();
+        status.split_whitespace().nth(1).unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn a_damaged_token_file_is_replaced_at_start_and_set_aside_without_plaintext() {
+        type Damage = Box<dyn Fn(Vec<u8>) -> Vec<u8>>;
+        let cases: Vec<(&str, Damage)> = vec![
+            (
+                "cut off before any byte was written",
+                Box::new(|_| Vec::new()),
+            ),
+            (
+                "cut off part way",
+                Box::new(|blob| blob[..blob.len() / 2].to_vec()),
+            ),
+            (
+                "not a protected blob",
+                Box::new(|_| b"plain text, not DPAPI ".repeat(8)),
+            ),
+            (
+                // The master key named in the blob does not exist in this profile:
+                // what a data folder copied from another PC or account looks like.
+                "another PC or Windows account",
+                Box::new(|mut blob| {
+                    for byte in &mut blob[24..40] {
+                        *byte ^= 0x5a;
+                    }
+                    blob
+                }),
+            ),
+            (
+                "protected, but not a token",
+                Box::new(|_| dpapi(b"not-a-token", true).unwrap()),
+            ),
+            ("far too large", Box::new(|_| vec![7u8; 16 * 1024 + 1])),
+        ];
+        for (name, damage) in cases {
+            let dir = data_dir();
+            token(&dir).unwrap();
+            let damaged = damage(std::fs::read(dir.join(TOKEN_FILE)).unwrap());
+            std::fs::write(dir.join(TOKEN_FILE), &damaged).unwrap();
+            // A helper process only reads: it reports the damage and changes nothing.
+            assert!(read_token(&dir).is_err(), "{name}");
+            assert_eq!(std::fs::read(dir.join(TOKEN_FILE)).unwrap(), damaged);
+            let (issued, issue) = load_or_issue(&dir).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(issue, Issue::Recovered, "{name}");
+            assert!(issued.len() == 64 && issued.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert_eq!(read_token(&dir).unwrap(), issued, "{name}");
+            assert_eq!(
+                load_or_issue(&dir).unwrap(),
+                (issued.clone(), Issue::Existing),
+                "{name}: the next start must reuse the new token"
+            );
+            assert_eq!(
+                std::fs::read(dir.join(SET_ASIDE)).unwrap(),
+                damaged,
+                "{name}: the unreadable file was not kept as evidence"
+            );
+            assert_eq!(files(&dir), [TOKEN_FILE, SET_ASIDE], "{name}");
+            assert!(!holds_plaintext(&dir, &issued), "{name}");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+    #[test]
+    fn a_token_file_that_cannot_be_read_right_now_is_reported_and_left_alone() {
+        let dir = data_dir();
+        let original = token(&dir).unwrap();
+        let path = dir.join(TOKEN_FILE);
+        let bytes = std::fs::read(&path).unwrap();
+        let held = held_exclusively(&path);
+        let error = load_or_issue(&dir).unwrap_err();
+        assert!(error.contains("다시 시도"), "{error}");
+        assert!(read_token(&dir).unwrap_err().contains("다시 시도"));
+        drop(held);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "a busy file was replaced"
+        );
+        assert_eq!(files(&dir), [TOKEN_FILE]);
+        assert_eq!(load_or_issue(&dir).unwrap(), (original, Issue::Existing));
+        std::fs::remove_dir_all(dir).unwrap();
+        // Access denied: Windows refuses to open a directory as a file.
+        let dir = data_dir();
+        std::fs::create_dir(dir.join(TOKEN_FILE)).unwrap();
+        let error = load_or_issue(&dir).unwrap_err();
+        assert!(error.contains("다시 시도"), "{error}");
+        assert!(dir.join(TOKEN_FILE).is_dir());
+        assert_eq!(files(&dir), [TOKEN_FILE]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn only_decryption_errors_that_mean_damage_lead_to_a_new_token() {
+        // Measured on Windows 10: a mangled or cut blob is ERROR_INVALID_DATA, a
+        // tiny one ERROR_INVALID_PARAMETER, an unknown master key NTE_BAD_KEY_STATE.
+        for code in [13, 87, 0x8009_000b] {
+            assert!(says_damaged(code), "{code:#x}");
+        }
+        // Access denied, out of memory, the protection service not answering.
+        for code in [0, 5, 8, 14, 1722, 1723] {
+            assert!(!says_damaged(code), "{code:#x}");
+        }
+    }
+    #[test]
+    fn a_write_cut_off_before_the_swap_leaves_the_previous_token_in_force() {
+        let dir = data_dir();
+        let original = token(&dir).unwrap();
+        // What a power cut during a reissue leaves behind: an unfinished
+        // temporary file beside the untouched token.
+        let stale = dir.join(format!(
+            "{TOKEN_FILE}.{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::write(&stale, b"half a blob").unwrap();
+        assert_eq!(read_token(&dir).unwrap(), original);
+        assert_eq!(
+            load_or_issue(&dir).unwrap(),
+            (original, Issue::Existing),
+            "an unfinished write must not cost the user their token"
+        );
+        assert_eq!(files(&dir), [TOKEN_FILE], "the leftover was not cleaned up");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn reissue_swaps_in_a_whole_new_file_instead_of_rewriting_the_old_one() {
+        let dir = data_dir();
+        let original = token(&dir).unwrap();
+        let before = std::fs::read(dir.join(TOKEN_FILE)).unwrap();
+        // A helper that opened the file just before the reissue.
+        let mut reader = std::fs::File::open(dir.join(TOKEN_FILE)).unwrap();
+        reissue(&dir, None).unwrap();
+        let mut seen = Vec::new();
+        reader.read_to_end(&mut seen).unwrap();
+        assert_eq!(seen, before, "the old file was rewritten under its reader");
+        drop(reader);
+        let fresh = read_token(&dir).unwrap();
+        assert_ne!(fresh, original);
+        assert_eq!(files(&dir), [TOKEN_FILE]);
+        assert!(!holds_plaintext(&dir, &fresh));
+        // Without a usable folder there is nowhere safe to write.
+        assert!(reissue(Path::new(""), None).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn reissue_makes_the_running_server_refuse_the_old_token_at_once() {
+        let dir = data_dir();
+        let old = token(&dir).unwrap();
+        let server = memory_server(&old);
+        let host = server.address.to_string();
+        let url = format!("http://{host}/mcp");
+        std::fs::write(
+            dir.join("mcp-status.json"),
+            json!({"endpoint":url}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(request(server.address, "POST", &bearer(&old), LIST).0, 200);
+        // A connection that authenticated with the old token and stays open.
+        let mut kept =
+            std::io::BufReader::new(std::net::TcpStream::connect(server.address).unwrap());
+        kept.get_ref()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        assert_eq!(exchange(&mut kept, server.address, &old), 200);
+
+        reissue(&dir, Some(&server.live_token())).unwrap();
+
+        let new = read_token(&dir).unwrap();
+        assert_ne!(new, old);
+        assert_eq!(request(server.address, "POST", &bearer(&old), LIST).0, 401);
+        assert_eq!(
+            exchange(&mut kept, server.address, &old),
+            401,
+            "an open connection kept the old token alive"
+        );
+        assert_eq!(request(server.address, "POST", &bearer(&new), LIST).0, 200);
+        // The proof is keyed by the new token: the old one no longer verifies.
+        let challenge = "ab".repeat(32);
+        let (_, answer) = proof_request(
+            server.address,
+            &host,
+            &format!("TimeSchedule-Challenge: {challenge}\r\n"),
+        );
+        assert_eq!(answer, proof(&new, &host, &challenge).unwrap());
+        // The helper, the connection check and the Claude Desktop bridge all
+        // read the file again, so they follow without re-registering.
+        let headers: Value =
+            serde_json::from_str(&crate::mcp_connection::auth_headers(&dir, &url).unwrap())
+                .unwrap();
+        assert_eq!(headers["Authorization"], format!("Bearer {new}"));
+        assert!(crate::mcp_connection::probe(&dir).unwrap().contains("4"));
+        let mut output = Vec::new();
+        crate::mcp_connection::bridge(&dir, std::io::Cursor::new(INITIALIZE), &mut output).unwrap();
+        let reply: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(reply["result"]["serverInfo"]["name"], "TimeSchedule");
+        assert_eq!(files(&dir), ["mcp-status.json", TOKEN_FILE]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_reissue_that_cannot_replace_the_file_keeps_the_old_token_in_force() {
+        let dir = data_dir();
+        let old = token(&dir).unwrap();
+        let server = memory_server(&old);
+        let held = held_exclusively(&dir.join(TOKEN_FILE));
+        let error = reissue(&dir, Some(&server.live_token())).unwrap_err();
+        assert!(error.contains("이전 토큰"), "{error}");
+        drop(held);
+        assert_eq!(read_token(&dir).unwrap(), old);
+        assert_eq!(request(server.address, "POST", &bearer(&old), LIST).0, 200);
+        assert_eq!(files(&dir), [TOKEN_FILE], "a temporary file was left");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn readers_see_a_whole_token_while_it_is_being_reissued() {
+        let dir = data_dir();
+        token(&dir).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let (dir, stop) = (dir.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let mut reads = 0u32;
+                    while !stop.load(Ordering::Acquire) {
+                        let value = read_token(&dir).expect("a reader met a torn token");
+                        assert!(value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()));
+                        reads += 1;
+                    }
+                    reads
+                })
+            })
+            .collect();
+        let mut issued = std::collections::HashSet::new();
+        for _ in 0..60 {
+            reissue(&dir, None).expect("a reader blocked the reissue");
+            issued.insert(read_token(&dir).unwrap());
+        }
+        stop.store(true, Ordering::Release);
+        for reader in readers {
+            assert!(reader.join().unwrap() > 0);
+        }
+        assert_eq!(issued.len(), 60, "every reissue must produce a new token");
+        assert_eq!(files(&dir), [TOKEN_FILE]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn the_bridge_follows_a_token_reissued_between_two_requests() {
+        use std::io::BufRead;
+        /// Hands out one line at a time and runs `between` before the second.
+        struct Stepped {
+            current: std::io::Cursor<Vec<u8>>,
+            next: Option<Vec<u8>>,
+            between: Option<Box<dyn FnOnce()>>,
+        }
+        impl Read for Stepped {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let data = self.fill_buf()?;
+                let n = data.len().min(buffer.len());
+                buffer[..n].copy_from_slice(&data[..n]);
+                self.consume(n);
+                Ok(n)
+            }
+        }
+        impl BufRead for Stepped {
+            fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+                if self.current.position() as usize >= self.current.get_ref().len() {
+                    if let Some(next) = self.next.take() {
+                        if let Some(between) = self.between.take() {
+                            between();
+                        }
+                        self.current = std::io::Cursor::new(next);
+                    }
+                }
+                self.current.fill_buf()
+            }
+            fn consume(&mut self, amount: usize) {
+                self.current.consume(amount)
+            }
+        }
+        let dir = data_dir();
+        let old = token(&dir).unwrap();
+        let server = memory_server(&old);
+        std::fs::write(
+            dir.join("mcp-status.json"),
+            json!({"endpoint":format!("http://{}/mcp", server.address)}).to_string(),
+        )
+        .unwrap();
+        let (live, folder) = (server.live_token(), dir.clone());
+        let input = Stepped {
+            current: std::io::Cursor::new(INITIALIZE.as_bytes().to_vec()),
+            next: Some(format!("{LIST}\n").into_bytes()),
+            between: Some(Box::new(move || reissue(&folder, Some(&live)).unwrap())),
+        };
+        let mut output = Vec::new();
+        crate::mcp_connection::bridge(&dir, input, &mut output).unwrap();
+        let replies: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0]["result"]["serverInfo"]["name"], "TimeSchedule");
+        assert_eq!(
+            replies[1]["result"]["tools"].as_array().map(Vec::len),
+            Some(4),
+            "{}",
+            replies[1]
+        );
+        assert_ne!(read_token(&dir).unwrap(), old);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_token_reissued_between_reading_and_proving_is_read_once_more() {
+        let current = "0123456789abcdef".repeat(4);
+        let stale = "fedcba9876543210".repeat(4);
+        let server = memory_server(&current);
+        // The helper read the file just before the reissue replaced it.
+        let mut reads = vec![current.clone(), stale.clone()];
+        let headers: Value = serde_json::from_str(
+            &crate::mcp_connection::released(server.address, &mut || Ok(reads.pop().unwrap()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(headers["Authorization"], format!("Bearer {current}"));
+        assert!(reads.is_empty());
+        // An unchanged token is not tried again, and a changed one only once.
+        let mut count = 0;
+        let refused = crate::mcp_connection::released(server.address, &mut || {
+            count += 1;
+            Ok(stale.clone())
+        });
+        assert!(refused.is_err());
+        assert_eq!(count, 2);
+        // Reading again never releases a token to a listener that proves nothing.
+        let (address, seen) = impostor(|_| "0".repeat(64));
+        let mut reads = vec![current.clone(), stale.clone()];
+        assert!(
+            crate::mcp_connection::released(address, &mut || Ok(reads.pop().unwrap())).is_err()
+        );
+        let seen = seen.lock().unwrap();
+        assert!(!seen.contains(&current) && !seen.contains(&stale));
+    }
     #[test]
     #[ignore = "requires freshly built release EXE in TIMESCHEDULE_MCP_TEST_EXE; isolated client/process integration"]
     fn release_connection_helper_and_desktop_bridge_round_trip() {
@@ -1339,8 +1915,14 @@ mod tests {
     fn protected_token_is_reused_and_never_stored_as_plaintext() {
         let dir = std::env::temp_dir().join(format!("timeschedule-mcp-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
-        let first = token(&dir).unwrap();
+        let (first, issue) = load_or_issue(&dir).unwrap();
+        assert_eq!(issue, Issue::Created);
+        assert_eq!(
+            load_or_issue(&dir).unwrap(),
+            (first.clone(), Issue::Existing)
+        );
         assert_eq!(first, token(&dir).unwrap());
+        assert_eq!(files(&dir), [TOKEN_FILE]);
         assert_eq!(first.len(), 64);
         assert!(!std::fs::read(dir.join("mcp-token.dpapi"))
             .unwrap()

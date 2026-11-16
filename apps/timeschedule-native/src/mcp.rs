@@ -13,12 +13,23 @@ use timeschedule_core::storage::Storage;
 mod server;
 pub(crate) use server::{proof, read_token, CHALLENGE_HEADER};
 
+/// Replaces the MCP token: on disk, and in the running server when there is one.
+#[derive(Clone, Default)]
+pub struct TokenControl(Option<Arc<server::LiveToken>>);
+impl TokenControl {
+    pub fn reissue(&self, dir: &std::path::Path) -> Result<(), String> {
+        server::reissue(dir, self.0.as_deref())
+    }
+}
+
 pub struct LocalMcp {
     server: Option<server::Server>,
     status_path: std::path::PathBuf,
     pub status: String,
     /// AI apps that completed an authenticated `initialize`.
     pub clients: Arc<crate::mcp_clients::ClientLog>,
+    /// The token file was unreadable at start and a new token replaced it.
+    pub recovered: bool,
 }
 impl LocalMcp {
     pub fn start(
@@ -33,23 +44,41 @@ impl LocalMcp {
             .unwrap_or_else(|_| "39281".into())
             .parse::<u16>()
             .map_err(|_| "TIMESCHEDULE_MCP_PORT는 0..65535 정수여야 합니다.")?;
+        Self::start_on(store, changed, dir, port).map(Some)
+    }
+    fn start_on(
+        store: Arc<Storage>,
+        changed: Arc<AtomicBool>,
+        dir: &std::path::Path,
+        port: u16,
+    ) -> Result<Self, String> {
         let clients = Arc::new(crate::mcp_clients::ClientLog::load(dir));
-        let server = server::Server::start_with_clients(
-            store,
-            changed,
-            port,
-            server::token(dir)?,
-            clients.clone(),
-        )?;
+        let (token, issue) = server::load_or_issue(dir)?;
+        let recovered = issue == server::Issue::Recovered;
+        let server =
+            server::Server::start_with_clients(store, changed, port, token, clients.clone())
+                .map_err(|error| {
+                    if recovered {
+                        // The old token is gone even though the server is not up.
+                        format!("{error} 읽을 수 없던 인증 파일은 새 토큰으로 바꿨습니다.")
+                    } else {
+                        error
+                    }
+                })?;
         let endpoint = format!("http://{}/mcp", server.address);
         let status_path = dir.join("mcp-status.json");
         std::fs::write(&status_path,json!({"endpoint":endpoint,"pid":std::process::id(),"version":env!("CARGO_PKG_VERSION")}).to_string()).map_err(|_|"MCP 상태 파일 저장 실패")?;
-        Ok(Some(Self {
+        Ok(Self {
             server: Some(server),
             status_path,
             status: format!("실행 중 · {endpoint} · 토큰 인증"),
             clients,
-        }))
+            recovered,
+        })
+    }
+    /// The handle the settings screen uses to reissue the token.
+    pub fn token_control(&self) -> TokenControl {
+        TokenControl(self.server.as_ref().map(server::Server::live_token))
     }
     pub fn is_running(&self) -> bool {
         self.server.as_ref().is_some_and(server::Server::is_running)
@@ -331,6 +360,39 @@ mod tests {
             work: Arc::new(tokio::sync::Semaphore::new(4)),
             clients: Arc::new(crate::mcp_clients::ClientLog::memory()),
         }
+    }
+    #[test]
+    fn a_damaged_token_file_no_longer_keeps_the_server_from_starting() {
+        let dir = std::env::temp_dir().join(format!("timeschedule-start-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A data folder copied from another PC: the file is there but unreadable here.
+        std::fs::write(dir.join("mcp-token.dpapi"), b"copied from another PC").unwrap();
+        let start = || {
+            LocalMcp::start_on(
+                Arc::new(Storage::open(":memory:").unwrap()),
+                Arc::new(AtomicBool::new(false)),
+                &dir,
+                0,
+            )
+        };
+        let mcp = start().unwrap();
+        assert!(mcp.is_running());
+        assert!(mcp.recovered, "the settings screen must be told");
+        assert!(crate::mcp_connection::probe(&dir).unwrap().contains("4"));
+        // The settings screen's handle swaps the token under the running server.
+        let before = read_token(&dir).unwrap();
+        mcp.token_control().reissue(&dir).unwrap();
+        assert_ne!(read_token(&dir).unwrap(), before);
+        assert!(crate::mcp_connection::probe(&dir).unwrap().contains("4"));
+        drop(mcp);
+        let mcp = start().unwrap();
+        assert!(!mcp.recovered, "a healthy file is reused, not reissued");
+        drop(mcp);
+        // With the server off the handle still replaces the file for the next start.
+        let before = read_token(&dir).unwrap();
+        TokenControl::default().reissue(&dir).unwrap();
+        assert_ne!(read_token(&dir).unwrap(), before);
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn tools_preserve_omitted_fields_reject_stale_writes_and_exclude_notes_from_lists() {

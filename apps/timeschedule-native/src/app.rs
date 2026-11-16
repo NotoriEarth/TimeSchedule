@@ -330,6 +330,19 @@ impl App {
         } else {
             (None, "꺼짐 · 데이터 저장소를 사용할 수 없습니다.".into())
         };
+        // The settings screen reissues the token through the running server.
+        let mcp_setup = crate::mcp_setup_ui::State {
+            token_control: mcp
+                .as_ref()
+                .map(crate::mcp::LocalMcp::token_control)
+                .unwrap_or_default(),
+            token: if mcp.as_ref().is_some_and(|server| server.recovered) {
+                crate::mcp_setup_ui::TokenPanel::Recovered
+            } else {
+                Default::default()
+            },
+            ..Default::default()
+        };
         let tray = match NativeTray::new() {
             Ok(t) => Some(t),
             Err(e) => {
@@ -365,7 +378,7 @@ impl App {
             _mcp: mcp,
             mcp_changed,
             mcp_status,
-            mcp_setup: Default::default(),
+            mcp_setup,
             data_dir,
             preferences: prefs,
             snapshot: Snapshot::default(),
@@ -415,6 +428,9 @@ impl App {
             app.store.is_some(),
             app.error
         ));
+        if app.mcp_setup.token == crate::mcp_setup_ui::TokenPanel::Recovered {
+            app.log("mcp token file was unreadable; set aside and reissued");
+        }
         let widget = app.open_widget();
         let load = app.refresh();
         (
@@ -865,6 +881,7 @@ impl App {
                     | Message::NativeDone(..)
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Finished(_))
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Loaded(..))
+                    | Message::McpSetup(crate::mcp_setup_ui::Action::Reissued(..))
                     | Message::Category(
                         crate::category_ui::Action::Deleted(_)
                             | crate::category_ui::Action::DeletePreviewed { .. }
