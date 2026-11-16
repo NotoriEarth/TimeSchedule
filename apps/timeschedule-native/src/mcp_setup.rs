@@ -476,18 +476,15 @@ impl Staged {
         let link = std::fs::symlink_metadata(&plan.path)
             .is_ok_and(|metadata| metadata.file_type().is_symlink())
             .then(|| plan.path.clone());
-        let target = real_target(&plan.path)?;
+        let target = as_stored(&real_target(&plan.path)?);
         let folder = target
             .parent()
             .ok_or("설정 폴더가 없습니다.")?
             .to_path_buf();
         // Copies are named after the file as it is stored, however the path
         // was typed: Windows finds one file under any capitals.
-        let stored = std::fs::canonicalize(&target).ok();
-        let name = stored
-            .as_deref()
-            .and_then(Path::file_name)
-            .or(target.file_name())
+        let name = target
+            .file_name()
             .ok_or("설정 파일 이름이 없습니다.")?
             .to_string_lossy()
             .into_owned();
@@ -602,11 +599,11 @@ impl Staged {
         // no longer leads to the one file that was compared. Windows has no
         // single step that both checks this and swaps, so the check comes
         // immediately before the swap (see the limits in docs/local-mcp.md).
-        let moved = !still_there(&self.target, self.link.as_deref(), &self.compared);
         // Rules or a label changed meanwhile (closed to others, say) are not
         // in the copies. A handle held for reading does not stop that change.
         let rules_changed = access_of(&self.original).map_or(true, |now| now != self.access);
-        if moved || rules_changed {
+        // Last of all, so that as little as possible lies between it and the swap.
+        if rules_changed || !still_there(&self.target, self.link.as_deref(), &self.compared) {
             return Err(self.discard(CHANGED));
         }
         // One step: the name leads to the old file or to the new one.
@@ -663,6 +660,16 @@ fn still_there(target: &Path, link: Option<&Path>, compared: &Identity) -> bool 
 fn known_as<'a>(target: &'a Path, link: Option<&'a Path>) -> Vec<&'a Path> {
     std::iter::once(target).chain(link).collect()
 }
+/// `path` with its file name spelled as the file is stored, if it exists.
+fn as_stored(path: &Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(stored) => match stored.file_name() {
+            Some(name) => path.with_file_name(name),
+            None => path.into(),
+        },
+        Err(_) => path.into(),
+    }
+}
 /// Removes `path`, a copy of the configuration this module made and no longer
 /// needs, and returns `message`, with the path added if it is still there.
 fn removing(mut message: String, path: &Path) -> String {
@@ -693,34 +700,18 @@ fn ours(file: &str, config: &str, extension: &str) -> bool {
         .is_some_and(|id| id.len() == 36 && uuid::Uuid::parse_str(id).is_ok())
 }
 /// This module's files for `config` in `folder`, with their modification times.
-/// Windows finds one file under any capitals, so a copy made when the path was
-/// typed differently counts too. Only a folder switched to case-sensitive
-/// names can hold two files that differ in capitals alone, and there the
-/// copies of each are kept apart.
+/// Names are matched exactly. Copies are named after the file as it is stored
+/// (see `Staged::with_id`), so one file has one set whatever capitals its path
+/// was typed with, and in a folder with case-sensitive names two files that
+/// differ in capitals alone never share one.
 fn made(folder: &Path, config: &str, extension: &str) -> Vec<(std::time::SystemTime, PathBuf)> {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Vec::new();
     };
-    let entries: Vec<(String, std::fs::DirEntry)> = entries
-        .flatten()
-        .map(|entry| (entry.file_name().to_string_lossy().into_owned(), entry))
-        .collect();
-    let folded = config.to_lowercase();
-    let exact = entries
-        .iter()
-        .filter(|(name, _)| name.to_lowercase() == folded)
-        .count()
-        > 1;
     entries
-        .into_iter()
-        .filter(|(name, _)| {
-            if exact {
-                ours(name, config, extension)
-            } else {
-                ours(&name.to_lowercase(), &folded, extension)
-            }
-        })
-        .filter_map(|(_, entry)| {
+        .flatten()
+        .filter(|entry| ours(&entry.file_name().to_string_lossy(), config, extension))
+        .filter_map(|entry| {
             // Regular files only: never follow a link out of the folder.
             let metadata = entry.metadata().ok()?;
             metadata
@@ -766,7 +757,7 @@ fn gone(path: &Path) -> bool {
 }
 /// `message`, naming the newest backup when there is one to restore from.
 fn with_backup_hint(path: &Path, message: &str) -> String {
-    let target = real_target(path).unwrap_or_else(|_| path.into());
+    let target = as_stored(&real_target(path).unwrap_or_else(|_| path.into()));
     match backups(&[&target, path]).first() {
         Some(backup) => format!(
             "{message}\nTimeSchedule이 만든 가장 최근 백업: {}",
@@ -2410,36 +2401,38 @@ mod tests {
         assert_eq!(names(&elsewhere), ["claude.json"]);
     }
     #[test]
-    fn backups_made_under_another_spelling_of_the_same_name_count_together() {
-        // Windows finds `Client.Config` and `client.config` to be one file, so a
-        // path typed with other capitals must not start a second set of backups.
+    fn one_file_has_one_set_of_backups_whatever_capitals_its_path_is_typed_with() {
+        // Windows finds `CLIENT.CONFIG` and `client.config` to be one file, so
+        // a path typed with other capitals must not start a second set.
         let f = Fixture::new();
-        let path = f.0.join("client.config");
-        std::fs::write(&path, "{}").unwrap();
-        for _ in 0..4 {
-            std::fs::write(
-                f.0.join(format!(
-                    "Client.Config.timeschedule-{}.bak",
-                    uuid::Uuid::new_v4()
-                )),
-                "{}",
-            )
-            .unwrap();
+        std::fs::write(f.0.join("client.config"), "{}").unwrap();
+        let spellings = ["CLIENT.CONFIG", "client.config", "Client.Config"];
+        for (round, port) in (40001..40007).enumerate() {
+            let typed = f.0.join(spellings[round % spellings.len()]);
+            let backup = apply(&plan_for(&typed, &f.0, port)).unwrap().unwrap();
+            assert!(
+                backup
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("client.config.timeschedule-"),
+                "not named after the file as stored: {}",
+                backup.display()
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let typed = f.0.join("CLIENT.CONFIG");
-        let backup = apply(&plan_for(&typed, &f.0, 39281)).unwrap().unwrap();
-        // The new backup is named after the file as it is stored.
-        assert!(
-            backup
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("client.config.timeschedule-"),
-            "{}",
-            backup.display()
-        );
         assert_eq!(names(&f.0).len(), 1 + KEPT_BACKUPS, "{:?}", names(&f.0));
+        // A backup that only resembles this file's in other capitals is left
+        // alone: in a folder with case-sensitive names it is another file's.
+        let other = f.0.join(format!(
+            "Client.Config.timeschedule-{}.bak",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&other, "another file's backup").unwrap();
+        apply(&plan_for(&f.0.join("client.config"), &f.0, 40010))
+            .unwrap()
+            .unwrap();
+        assert!(other.exists());
     }
     #[test]
     fn a_name_that_no_longer_leads_to_the_compared_file_is_noticed() {
