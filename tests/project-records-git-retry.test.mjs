@@ -173,3 +173,47 @@ test('once Git answers again, a record held back only by Git is delivered withou
   await sync({ ...space, importer: async r => saved(r) });
   assert.equal(readState(f, candidate.workId).phase, 'complete');
 });
+
+test('an earlier revision that resumes after Git recovers cannot overwrite a newer diary revision', async t => {
+  const f = setup(t), candidate = input(f);
+  await prepare(candidate, f);
+  await prepare({ ...candidate, detailedMarkdown: candidate.detailedMarkdown + '\n\n후속 수정도 완료했다.' }, f);
+  // Only the earlier capture cannot be checked in this run.
+  const earlierFile = path.join(f.stateDir, candidate.workId, 'pending-1.json');
+  const earlier = JSON.parse(fs.readFileSync(earlierFile, 'utf8'));
+  const realRepo = earlier.source.repoPath;
+  earlier.source.repoPath = path.join(f.dir, 'briefly-missing');
+  fs.writeFileSync(earlierFile, JSON.stringify(earlier));
+  // Like the app: a lower delivery revision than the saved one is stale.
+  const diary = { revision: 0, detail: null };
+  const app = async r => {
+    if (r.revision <= diary.revision) return { outcome: 'stale', workId: r.workId, revision: r.revision, entryId: 'entry-1' };
+    Object.assign(diary, { revision: r.revision, detail: r.detail });
+    return saved(r);
+  };
+  await sync({ ...f, importer: app });
+  assert.match(diary.detail, /후속 수정/);
+  const resumed = JSON.parse(fs.readFileSync(earlierFile, 'utf8'));
+  resumed.source.repoPath = realRepo;
+  fs.writeFileSync(earlierFile, JSON.stringify(resumed));
+  await sync({ ...f, retryNow: true, importer: app });
+  assert.match(diary.detail, /후속 수정/);
+  assert.deepEqual(status(f).map(s => s.phase), ['local_complete', 'local_complete']);
+});
+
+test('Git checks stop at the run budget, leaving unchecked records undelivered and unpenalised with the wake file current', async t => {
+  const f = setup(t), candidate = input(f);
+  await prepare(candidate, f);
+  fs.rmSync(path.join(f.stateDir, 'wake.json'));
+  const results = await sync({ ...f, gitCheckBudgetMs: 0, importer: refuse });
+  assert.equal(results[0].skipped, true);
+  // Unchecked is not failed: no failure counted, no error, retry time kept.
+  const state = readState(f, candidate.workId);
+  assert.equal(state.phase, 'prepared');
+  assert.equal(state.gitFailures, undefined);
+  assert.equal(state.lastError, null);
+  assert.equal(state.localSaved, false);
+  assert.deepEqual(wake(f), { pending: 1, nextAttemptAt: 0 });
+  await sync({ ...f, importer: async r => saved(r) });
+  assert.equal(readState(f, candidate.workId).phase, 'local_complete');
+});

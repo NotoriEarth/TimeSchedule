@@ -208,21 +208,53 @@ export async function sync(options = {}) {
         job.localRevision ?? 0, job.finalRevision ?? 0, job.diaryReceipt?.revision ?? 0, job.revision ?? 0);
       nextDelivery.set(job.source.workId, greatest);
     }
+    // A legacy pending receipt may already be in the app's inbox. A new
+    // revision avoids changing the meaning of that accepted payload.
+    const toLocal = job => {
+      job.localRevision = nextDelivery.get(job.source.workId) + 1;
+      job.finalRevision = job.localRevision + 1;
+      nextDelivery.set(job.source.workId, job.finalRevision);
+      job.localSaved = false;
+      job.diaryMode = 'local'; job.nextAttemptAt = 0;
+    };
+    const unverified = new Set(), failedNow = new Set();
+    // An unverified job still reserves its delivery revision now, in capture
+    // order with the other revisions of its work. Reserved later, after a newer
+    // revision was delivered, it would outrank that one and overwrite the diary.
+    // Its retry time is kept. Returns whether the job changed.
+    const holdUnverified = job => {
+      unverified.add(job);
+      if (spaceEnabled || job.diaryMode === 'local') return false;
+      const next = job.nextAttemptAt; toLocal(job); job.nextAttemptAt = next;
+      return true;
+    };
+    // Each check can wait up to Git's 10-second timeout. The app stops a run
+    // after 240 seconds, so checking stops at a budget and wake.json is still
+    // written. Unchecked jobs are left as they are and stay undelivered.
+    const checkDeadline = Date.now() + Number(options.gitCheckBudgetMs ?? 60000);
+    let gitFailing = false;
     // Apply the policy before registration, backoff and per-run limits: old
     // research jobs must stop waking the app even if their retry is not due.
-    const unverified = new Set(), failedNow = new Set();
     for (const { file, job } of jobs) {
       if (options.workId && job.source.workId !== options.workId) continue;
       if (job.phase === 'local_complete' && spaceEnabled && options.workId === job.source.workId) { job.phase = 'waiting_space'; job.nextAttemptAt = 0; }
       if (finished(job) || (options.workId && job.source.workId !== options.workId)) continue;
       upgradeJob(job);
+      const due = job.phase !== 'git_paused' && (options.retryNow || (job.nextAttemptAt ?? 0) <= now);
+      // Once Git has failed in this run, jobs only waiting out a Git delay are
+      // not checked again: a hanging Git must not spend the run on them.
+      if (Date.now() >= checkDeadline || (gitFailing && !due && (job.gitFailures || job.phase === 'git_paused'))) {
+        if (holdUnverified(job)) atomicJson(file, job);
+        continue;
+      }
       const evidence = developmentEvidence(job.source.repoPath, job.source.gitChanges, options.projectRoot ?? PROJECT_ROOT);
       if (evidence.transient) {
         // Nothing is known about this work yet: never deliver it unverified,
         // even on --retry-now. Only a check that was due counts as a failed
         // attempt, so rechecking waiting jobs does not push their retry back.
-        unverified.add(job);
-        if (job.phase === 'git_paused' || (!options.retryNow && (job.nextAttemptAt ?? 0) > now)) continue;
+        gitFailing = true;
+        const reserved = holdUnverified(job);
+        if (!due) { if (reserved) atomicJson(file, job); continue; }
         failedNow.add(job);
         job.gitFailures = (job.gitFailures ?? 0) + 1;
         job.lastError = `Git 확인 일시 실패 ${job.gitFailures}회 (${evidence.detail}).`;
@@ -246,13 +278,7 @@ export async function sync(options = {}) {
         job.nextAttemptAt = null; job.updatedAt = new Date().toISOString();
         atomicJson(file, job);
       } else if (!spaceEnabled && job.diaryMode !== 'local') {
-        // A legacy pending receipt may already be in the app's inbox. A new
-        // revision avoids changing the meaning of that accepted payload.
-        job.localRevision = nextDelivery.get(job.source.workId) + 1;
-        job.finalRevision = job.localRevision + 1;
-        nextDelivery.set(job.source.workId, job.finalRevision);
-        job.localSaved = false;
-        job.diaryMode = 'local'; job.nextAttemptAt = 0;
+        toLocal(job);
         atomicJson(file, job);
       }
     }
