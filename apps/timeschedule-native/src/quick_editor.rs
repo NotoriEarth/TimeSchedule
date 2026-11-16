@@ -33,7 +33,7 @@ impl App {
 
         self.error.clear();
         let open = if let Some(id) = self.quick_window {
-            self.place_popup(source, id)
+            self.place_popup(self.quick_anchor(), id)
         } else {
             let (id, open) = window::open(window::Settings {
                 size: crate::views::EDITOR_SIZE,
@@ -47,6 +47,13 @@ impl App {
             open.map(Message::QuickReady)
         };
         Task::batch([open, self.load_quick(true)])
+    }
+
+    /// The window the day window is placed over: where it was last opened
+    /// from, or the widget (the diary when there is no widget).
+    pub(crate) fn quick_anchor(&self) -> window::Id {
+        self.quick_source
+            .unwrap_or(self.widget.unwrap_or(self.manager))
     }
 
     pub(crate) fn focus_quick(&self) -> Task<Message> {

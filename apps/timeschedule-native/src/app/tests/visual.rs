@@ -403,13 +403,19 @@ fn day_window_is_placed_over_the_window_it_was_opened_from() {
     let widget = window::Id::unique();
     app.widget = Some(widget);
     let date = app.selected;
+    assert_eq!(app.quick_anchor(), widget, "nothing opened yet: the widget");
     let _ = app.update(Message::ManagerDate(date));
-    assert_eq!(app.quick_source, Some(app.manager));
+    assert_eq!(app.quick_anchor(), app.manager);
     // Reopening the same day window from the other side moves it there.
     let _ = app.update(Message::WidgetDate(date));
-    assert_eq!(app.quick_source, Some(widget));
+    assert_eq!(app.quick_anchor(), widget);
     let _ = app.update(Message::ManagerDate(date));
-    assert_eq!(app.quick_source, Some(app.manager));
+    assert_eq!(app.quick_anchor(), app.manager);
+    // While an edit is open the window stays where it is.
+    let _ = app.update(Message::New(Kind::Event, None));
+    assert!(app.editor.is_some());
+    let _ = app.update(Message::WidgetDate(date));
+    assert_eq!(app.quick_anchor(), app.manager);
 }
 
 #[test]

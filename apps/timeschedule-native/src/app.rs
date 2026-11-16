@@ -1197,10 +1197,7 @@ impl App {
                 return self.popup_positioned(id, token, result)
             }
             Message::QuickReady(id) if Some(id) == self.quick_window => {
-                let source = self
-                    .quick_source
-                    .unwrap_or(self.widget.unwrap_or(self.manager));
-                return self.place_popup(source, id);
+                return self.place_popup(self.quick_anchor(), id);
             }
             Message::Project(id) if self.editor.is_none() => {
                 self.project = id;
