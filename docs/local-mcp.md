@@ -15,7 +15,7 @@ TimeSchedule을 실행하면 같은 Windows PC의 ChatGPT Desktop·Codex·Claude
 | 확인 실패 | 설정 파일을 읽지 못했다(형식 오류 등). 이유를 함께 보여준다 | 파일을 확인한 뒤 `다시 확인` |
 | 서버 꺼짐 | TimeSchedule의 MCP 서버가 꺼져 있어 비교할 수 없다 | 위 서버 상태의 사유를 해결하고 앱을 다시 실행 |
 
-- 설정 화면을 열 때, 등록·검사가 끝났을 때, `새로 고침`을 누를 때 각 AI 앱 설정 파일을 **읽기만** 해서 다시 확인한다. 화면 작업과 분리해 처리한다. Claude Desktop은 일반 설치와 Microsoft Store 설치 위치를 모두 보고, 한 곳이라도 맞으면 등록된 것으로 본다.
+- 설정 화면을 열 때, 등록·검사가 끝났을 때, `새로 고침`을 누를 때 각 AI 앱 설정 파일을 **읽기만** 해서 다시 확인한다. 화면 작업과 분리해 처리한다. Claude Desktop은 아래 "Claude Desktop 설정 위치"의 규칙으로 실제로 사용 중인 설정 파일 하나를 골라 확인한다.
 - 행의 `등록 준비`·`다시 등록`은 아래 도우미에 그 앱의 미리보기를 띄울 뿐이다. 실제 저장은 미리보기를 확인한 뒤 `등록 적용`으로 한다.
 - **접속 기록**: AI 앱은 연결을 시작할 때 자기 이름과 버전을 보낸다(MCP `initialize`). 인증을 통과한 요청에서만 그 이름·버전·시각을 기록하고, TimeSchedule 자신의 연결 검사는 제외한다. 앱을 다시 켜도 보이도록 데이터 폴더의 `mcp-clients.json`에 최대 16개를 저장하며 일정 내용·토큰·요청 본문은 남기지 않는다. 파일을 지우면 기록만 사라진다.
 - 이후 도구 호출에는 앱 이름이 담기지 않으므로 "마지막 접속"은 AI 앱이 **연결을 시작한 시각**이다. 오래 켜 둔 AI 앱은 실제로는 더 최근에 도구를 썼을 수 있다.
@@ -32,7 +32,9 @@ TimeSchedule을 실행하면 같은 Windows PC의 ChatGPT Desktop·Codex·Claude
 5. AI 앱에서 연결을 다시 불러오거나 앱을 재시작한 뒤 `timeschedule` 도구를 확인한다. 클라이언트의 신뢰·도구 사용 승인은 해당 앱에서 처리한다.
 6. TimeSchedule의 `연결 검사`는 서버 초기화·인증·도구 4개와 등록 설정을 검사한다. 개인 일정 조회·추가·수정이나 모델 호출은 하지 않는다. AI 앱이 설정을 실제로 불러왔는지는 해당 앱에서도 확인한다.
 
-ChatGPT Desktop과 Codex는 `%USERPROFILE%\.codex\config.toml` 또는 `CODEX_HOME`의 `config.toml`, Claude Code는 `%USERPROFILE%\.claude.json` 또는 `CLAUDE_CONFIG_DIR`의 `.claude.json`을 사용한다. Claude Desktop은 `%APPDATA%\Claude\claude_desktop_config.json`과 Store 설치의 `Packages\Claude_*\LocalCache\Roaming\Claude`를 탐지한다. 후보가 여러 개면 임의로 선택하지 않는다. Claude Desktop의 설정 → Developer → Edit Config에서 실제 경로를 확인한다.
+ChatGPT Desktop과 Codex는 `%USERPROFILE%\.codex\config.toml` 또는 `CODEX_HOME`의 `config.toml`, Claude Code는 `%USERPROFILE%\.claude.json` 또는 `CLAUDE_CONFIG_DIR`의 `.claude.json`을 사용한다. Claude Desktop은 아래 "Claude Desktop 설정 위치"를 참고한다.
+
+**Claude Desktop 설정 위치 (0.14.0 수정).** Claude Desktop은 자기 데이터 폴더의 `claude_desktop_config.json`만 읽는다. 일반 설치는 `%APPDATA%\Claude`, Microsoft Store 설치는 `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude` 또는 `%LOCALAPPDATA%\Claude-Data\claude_*`를 쓴다. Store 설치는 `%APPDATA%\Claude`를 패키지 폴더로 연결해 두기도 하므로, 같은 폴더로 이어지는 경로는 한 곳으로 본다. Claude Desktop은 실행한 적 있는 폴더에 `lockfile`·`config.json`을 남기고, 실행 중에는 `lockfile`을 다른 프로그램이 열 수 없게 잡고 있다. 그래서 지금 실행 중인 폴더가 하나면 그 폴더를, 아니면 실행 흔적이 있는 폴더가 하나일 때 그 폴더를 쓴다. 실행 흔적이 있는 폴더가 여럿이면 임의로 고르지 않고, 도우미가 경로를 직접 입력하라고 안내한다. Claude Desktop을 켜 둔 채로 설정 화면을 열면 가장 확실하게 찾는다. 한계: 잠금은 누가 잡고 있는지 알려 주지 않으므로 백신·백업 프로그램이 같은 파일을 잠시 잡고 있으면 잘못 판단할 수 있다. 등록 전에 미리보기에 표시되는 대상 경로를 확인한다. 0.14.0 초기 빌드는 `Claude-Data` 폴더를 몰라서, 이 위치를 쓰는 PC에서는 Claude Desktop이 읽지 않는 파일에 등록하고 상태판에 `등록됨`으로 잘못 표시했다. 이 경우 수정된 빌드에서 상태판이 `미등록`으로 바뀌며, `등록 준비` → `등록 적용`으로 올바른 파일에 다시 등록하면 된다. Claude Desktop의 설정 → Developer → Edit Config에서 실제 경로를 확인한다.
 
 ChatGPT Desktop과 Codex는 **같은 로컬 호스트의 설정 파일을 공유**한다. 둘 중 하나로 이미 등록했다면 같은 경로·실행 파일·데이터 폴더·주소의 등록은 중복 생성하거나 재작성하지 않는다. 미리보기에서 두 앱에 함께 적용되는 범위를 확인한다. ChatGPT에서 **Settings → MCP servers → Restart**로 다시 불러온 뒤 `/mcp`에서 `timeschedule`을 확인한다. 로컬 MCP를 지원하는 최신 데스크톱 앱 기준이며, ChatGPT 웹이나 클라우드 실행은 이 로컬 설정을 사용하지 않는다. 원격 호스트를 선택했다면 해당 호스트에 TimeSchedule과 연결 설정이 있어야 하며 이 PC의 `127.0.0.1`에 연결되는 것으로 해석하지 않는다.
 

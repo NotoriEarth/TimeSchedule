@@ -48,7 +48,9 @@ impl Plan {
 }
 
 pub fn default_path(client: Client) -> Result<PathBuf, String> {
-    let mut candidates = config_candidates(client)?;
+    default_path_from(config_candidates(client)?)
+}
+fn default_path_from(mut candidates: Vec<PathBuf>) -> Result<PathBuf, String> {
     match candidates.len() {
         1 => Ok(candidates.remove(0)),
         _ => Err("Claude Desktop 설정 위치가 여러 개입니다. Claude의 설정 → Developer → Edit Config에서 경로를 확인해 입력하세요.".into()),
@@ -70,41 +72,93 @@ pub fn config_candidates(client: Client) -> Result<Vec<PathBuf>, String> {
             .unwrap_or(profile)
             .join(".claude.json")]),
         Client::ClaudeDesktop => {
-            let roaming = std::env::var_os("APPDATA")
+            let appdata = std::env::var_os("APPDATA")
                 .map(PathBuf::from)
-                .ok_or("APPDATA 폴더를 찾지 못했습니다.")?
-                .join("Claude/claude_desktop_config.json");
-            let mut candidates = Vec::new();
-            if roaming.exists() {
-                candidates.push(roaming.clone());
-            }
-            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                if let Ok(packages) = std::fs::read_dir(PathBuf::from(local).join("Packages")) {
-                    for package in packages.flatten() {
-                        if package
-                            .file_name()
-                            .to_string_lossy()
-                            .to_ascii_lowercase()
-                            .starts_with("claude_")
-                        {
-                            let candidate = package
-                                .path()
-                                .join("LocalCache/Roaming/Claude/claude_desktop_config.json");
-                            if candidate.parent().is_some_and(Path::is_dir) {
-                                candidates.push(candidate);
-                            }
-                        }
-                    }
-                }
-            }
-            candidates.sort();
-            candidates.dedup();
-            if candidates.is_empty() {
-                candidates.push(roaming);
-            }
-            Ok(candidates)
+                .ok_or("APPDATA 폴더를 찾지 못했습니다.")?;
+            let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+            Ok(claude_desktop_candidates(&appdata, local.as_deref()))
         }
     }
+}
+/// Claude Desktop's configuration files on this PC.
+///
+/// Claude Desktop reads `claude_desktop_config.json` from its data folder. A
+/// regular install uses `%APPDATA%\Claude`; the Microsoft Store build may use
+/// its package folder or `%LOCALAPPDATA%\Claude-Data\<package>`, and links
+/// `%APPDATA%\Claude` to the package folder. Paths that resolve to the same
+/// folder count once. Electron leaves `lockfile` and `config.json` in a data
+/// folder it has run from, and holds `lockfile` exclusively while running:
+/// - the one folder in use right now wins;
+/// - otherwise a single folder that has ever been run from wins;
+/// - several such folders are returned together, so a write target is never
+///   guessed (`default_path` then asks for an explicit path).
+///
+/// An entry in a folder the app no longer reads would show "registered" while
+/// Claude Desktop never starts the server.
+fn claude_desktop_candidates(appdata: &Path, local: Option<&Path>) -> Vec<PathBuf> {
+    const FILE: &str = "claude_desktop_config.json";
+    let ran_here =
+        |folder: &Path| folder.join("lockfile").is_file() || folder.join("config.json").is_file();
+    let roaming = appdata.join("Claude");
+    let mut folders = vec![roaming.clone()];
+    if let Some(local) = local {
+        for (parent, child) in [
+            (local.join("Packages"), Some("LocalCache/Roaming/Claude")),
+            (local.join("Claude-Data"), None),
+        ] {
+            let Ok(entries) = std::fs::read_dir(&parent) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+                if name.starts_with("claude_") {
+                    folders.push(match child {
+                        Some(child) => entry.path().join(child),
+                        None => entry.path(),
+                    });
+                }
+            }
+        }
+    }
+    // One folder reached through a link is one location. `%APPDATA%\Claude`
+    // counts only when it holds a config or has been run from.
+    let mut seen = std::collections::HashSet::new();
+    let folders: Vec<PathBuf> = folders
+        .into_iter()
+        .filter(|folder| {
+            folder.is_dir()
+                && (folder != &roaming || folder.join(FILE).is_file() || ran_here(folder))
+        })
+        .filter(|folder| {
+            seen.insert(std::fs::canonicalize(folder).unwrap_or_else(|_| folder.clone()))
+        })
+        .collect();
+    let files = |chosen: Vec<&PathBuf>| chosen.into_iter().map(|f| f.join(FILE)).collect();
+    let running: Vec<&PathBuf> = folders
+        .iter()
+        .filter(|f| in_use(&f.join("lockfile")))
+        .collect();
+    if running.len() == 1 {
+        return files(running);
+    }
+    let marked: Vec<&PathBuf> = folders.iter().filter(|f| ran_here(f)).collect();
+    if !marked.is_empty() {
+        return files(marked);
+    }
+    if folders.is_empty() {
+        return vec![roaming.join(FILE)];
+    }
+    files(folders.iter().collect())
+}
+/// True while another process holds `path` open without sharing it, as a
+/// running Electron app does with its `lockfile`.
+fn in_use(path: &Path) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    path.is_file()
+        && std::fs::File::open(path)
+            .err()
+            .and_then(|error| error.raw_os_error())
+            == Some(ERROR_SHARING_VIOLATION)
 }
 impl std::fmt::Debug for Plan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -468,6 +522,116 @@ mod tests {
             "{script}"
         );
         assert!(helper_command(exe, dir, "http://example.com:39281/mcp").is_err());
+    }
+    #[test]
+    fn claude_desktop_uses_the_only_data_folder_it_has_run_from() {
+        let f = Fixture::new();
+        let appdata = f.0.join("Roaming");
+        let local = f.0.join("Local");
+        let config = |dir: &Path| dir.join("claude_desktop_config.json");
+        // The Microsoft Store build keeps its live data (lockfile, config.json)
+        // under Local\Claude-Data, while an older Roaming config stays behind.
+        let roaming = appdata.join("Claude");
+        let active = local.join("Claude-Data").join("claude_pzs8sxrjxfjjc");
+        std::fs::create_dir_all(&roaming).unwrap();
+        std::fs::create_dir_all(&active).unwrap();
+        std::fs::write(config(&roaming), r#"{"mcpServers":{"timeschedule":{}}}"#).unwrap();
+        std::fs::write(config(&active), r#"{"preferences":{}}"#).unwrap();
+        std::fs::write(active.join("lockfile"), "").unwrap();
+        std::fs::write(active.join("config.json"), "{}").unwrap();
+        assert_eq!(
+            claude_desktop_candidates(&appdata, Some(&local)),
+            vec![config(&active)]
+        );
+        // Without any sign of a running app, every known location still counts.
+        let quiet = f.0.join("quiet");
+        let quiet_roaming = quiet.join("Roaming").join("Claude");
+        let store = quiet
+            .join("Local")
+            .join("Packages")
+            .join("Claude_abc")
+            .join("LocalCache/Roaming/Claude");
+        std::fs::create_dir_all(&quiet_roaming).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(config(&quiet_roaming), "{}").unwrap();
+        let found = claude_desktop_candidates(&quiet.join("Roaming"), Some(&quiet.join("Local")));
+        assert_eq!(found.len(), 2, "{found:?}");
+        // Nothing at all: the documented default location.
+        let empty = f.0.join("empty");
+        assert_eq!(
+            claude_desktop_candidates(&empty.join("Roaming"), Some(&empty.join("Local"))),
+            vec![config(&empty.join("Roaming").join("Claude"))]
+        );
+    }
+    #[test]
+    fn competing_data_folders_are_decided_by_the_running_app_or_left_ambiguous() {
+        let f = Fixture::new();
+        let appdata = f.0.join("Roaming");
+        let local = f.0.join("Local");
+        let config = |dir: &Path| dir.join("claude_desktop_config.json");
+        let regular = appdata.join("Claude");
+        let store = local.join("Claude-Data").join("claude_store");
+        for dir in [&regular, &store] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("lockfile"), "").unwrap();
+            std::fs::write(dir.join("config.json"), "{}").unwrap();
+        }
+        // The regular install has run but has no MCP config yet: it still counts.
+        assert!(!config(&regular).exists());
+        // Two installs that have both run, neither running now: refuse to guess.
+        let found = claude_desktop_candidates(&appdata, Some(&local));
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(default_path_from(found).is_err());
+        // The running app holds its lockfile exclusively; that folder wins even
+        // when the other one ran more recently.
+        use std::os::windows::fs::OpenOptionsExt;
+        let held = std::fs::OpenOptions::new()
+            .write(true)
+            .share_mode(0)
+            .open(regular.join("lockfile"))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(store.join("config.json"), "{\"newer\":true}").unwrap();
+        assert_eq!(
+            claude_desktop_candidates(&appdata, Some(&local)),
+            vec![config(&regular)]
+        );
+        drop(held);
+    }
+    #[test]
+    fn a_roaming_folder_linked_to_the_store_folder_is_one_location() {
+        let f = Fixture::new();
+        let appdata = f.0.join("Roaming");
+        let local = f.0.join("Local");
+        let store = local
+            .join("Packages")
+            .join("Claude_abc")
+            .join("LocalCache/Roaming/Claude");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&appdata).unwrap();
+        std::fs::write(store.join("claude_desktop_config.json"), "{}").unwrap();
+        // The Store installer links %APPDATA%\Claude to its own folder.
+        let link = appdata.join("Claude");
+        use std::os::windows::process::CommandExt;
+        let made = std::process::Command::new("cmd")
+            .raw_arg(format!(
+                "/d /c mklink /J \"{}\" \"{}\"",
+                link.display(),
+                store.display()
+            ))
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "could not create a junction for the test: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let found = claude_desktop_candidates(&appdata, Some(&local));
+        assert_eq!(found.len(), 1, "one file reached two ways: {found:?}");
+        assert!(
+            default_path_from(found).is_ok(),
+            "a single location is not ambiguous"
+        );
     }
     #[test]
     fn chatgpt_desktop_shares_codex_registration_without_rewriting() {
