@@ -1,0 +1,86 @@
+# Checks every pull request and every push to main.
+# Windows only: the app relies on Win32, DPAPI and Windows file semantics.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # The toolchain this project is developed and released with.
+  RUST_TOOLCHAIN: "1.99.1"
+
+jobs:
+  rust:
+    name: Rust · format, lint, tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component rustfmt,clippy
+          rustup default $env:RUST_TOOLCHAIN
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: rust-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # Reported, not enforced, until the existing warnings are cleared.
+      - name: Clippy (report only)
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets --locked
+
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      - name: Build native app for script tests
+        run: cargo build -p timeschedule-native --locked
+
+      # benchmark-fixtures.tests.ps1 is a manual benchmark harness that needs the
+      # local .tooling folder and a clean fixture directory, so it is not run here.
+      - name: PowerShell script tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($test in 'benchmark-archive', 'measure-memory') {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\tests\$test.tests.ps1"
+            if ($LASTEXITCODE -ne 0) { throw "$test tests failed" }
+          }
+          & powershell -NoProfile -ExecutionPolicy Bypass -File scripts\tests\publish-native.tests.ps1 -SourcePath target\debug\timeschedule-native.exe
+          if ($LASTEXITCODE -ne 0) { throw 'publish-native tests failed' }
+
+  node:
+    name: Node · record and vault scripts
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Tests
+        run: npm test

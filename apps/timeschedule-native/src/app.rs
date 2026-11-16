@@ -916,8 +916,10 @@ impl App {
                             self.error = report.errors.join("\n");
                         }
                         if report.saved > 0 {
-                            self.notice =
-                                format!("프로젝트 기록 {}건을 다이어리에 반영했습니다.", report.saved);
+                            self.notice = format!(
+                                "프로젝트 기록 {}건을 다이어리에 반영했습니다.",
+                                report.saved
+                            );
                             self.log(&format!(
                                 "project records saved={} conflicts={} failed={}",
                                 report.saved, report.conflicts, report.failed

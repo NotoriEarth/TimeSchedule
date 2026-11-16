@@ -55,6 +55,15 @@ PR #2–#6의 Rust 이식·테마·위젯·편집·설정·연월 선택 변경�
 
 [네이티브 기능 대조](docs/rust-native/full-port.md)와 [20회 비교 벤치마크](docs/rust-native/benchmark.md)도 보존합니다. 기본 월간 상세창+위젯 유휴 상태에서 전용 상주 RAM은 약 90% 줄었지만 유휴 CPU는 늘었습니다. 수치는 당시 빌드의 측정 결과이며 이번 버전을 다시 측정한 결과가 아닙니다. 아래 설명과 과거 메모리 표는 기존 Tauri 버전 기준입니다.
 
+## 자동 검사 (CI)
+
+GitHub의 모든 PR과 `main` 푸시에서 Windows 환경으로 다음을 자동 실행합니다. Rust 버전은 개발에 쓰는 1.99.1로 고정합니다.
+
+- **CI** (`.github/workflows/ci.yml`): `cargo fmt` 검사, `cargo clippy`(지금은 경고 보고만 하고 실패시키지 않음), 워크스페이스 전체 테스트, PowerShell 스크립트 테스트 3개(벤치마크 보관·메모리 측정·실행 파일 교체), Node 기록·문서 저장소 테스트.
+- **Legacy builds** (`.github/workflows/legacy.yml`): 공통 크레이트·Tauri·프런트엔드·실험 코드가 바뀐 PR에서만, 워크스페이스 밖의 기존 Tauri 앱과 UI 실험 크레이트가 계속 컴파일되는지 확인합니다.
+
+`scripts/tests/benchmark-fixtures.tests.ps1`은 로컬 `.tooling`과 빈 fixture 폴더가 필요한 수동 벤치마크라 자동 검사에서 제외합니다. 실제 바탕화면 위젯 연결, 사용자 AI 앱 연결, 화면 체감은 여전히 사용자 확인 대상입니다.
+
 ## 기존 Tauri 앱
 
 
