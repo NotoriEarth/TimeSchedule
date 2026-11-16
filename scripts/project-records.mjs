@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { publishCodex, validatePublication, runBounded } from './project-records-codex.mjs';
-import { developmentEvidence } from './project-records-git.mjs';
+import { developmentEvidence, canonicalPath } from './project-records-git.mjs';
 import { saveDocument, vaultPreferences } from './document-vault.mjs';
 
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -22,7 +22,7 @@ function text(value, name, max) {
 function normalizeSource(input, projectRoot = PROJECT_ROOT) {
   if (!input || !UUID.test(input.workId)) throw new Error('고정된 UUID workId가 필요합니다. 같은 작업의 갱신에는 같은 ID를 사용하세요.');
   const repoPath = text(input.repoPath, 'repoPath', 2000);
-  if (!path.isAbsolute(repoPath) || fs.realpathSync.native(repoPath).toLowerCase() !== fs.realpathSync.native(projectRoot).toLowerCase()) throw new Error('현재 설정된 TimeSchedule 저장소의 기록만 처리합니다.');
+  if (!path.isAbsolute(repoPath) || canonicalPath(repoPath).toLowerCase() !== canonicalPath(projectRoot).toLowerCase()) throw new Error('현재 설정된 TimeSchedule 저장소의 기록만 처리합니다.');
   const date = text(input.date, 'date', 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number(date.slice(0, 4)) < 1 || new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date) throw new Error('실제 YYYY-MM-DD 날짜가 필요합니다.');
   if (!Object.hasOwn(LABELS, input.status)) throw new Error('지원하지 않는 작업 상태입니다.');
@@ -34,7 +34,7 @@ function normalizeSource(input, projectRoot = PROJECT_ROOT) {
   // Extract whole paragraphs, including their caveats. No free-form second
   // summary can invent a cause, change a number, or drop half a paragraph.
   if (!diarySummary.split(/\n{2,}/).every(p => paragraphs.includes(p))) throw new Error('다이어리 요약은 한계를 포함한 원문 문단을 그대로 골라 주세요.');
-  return { workId: input.workId, projectTitle: text(input.projectTitle, '프로젝트 제목', 200), repoPath: fs.realpathSync.native(repoPath), date,
+  return { workId: input.workId, projectTitle: text(input.projectTitle, '프로젝트 제목', 200), repoPath: canonicalPath(repoPath), date,
     kind: input.kind, title: text(input.title, '기록 제목', 200), status: input.status, detailedMarkdown, diarySummary, parentPageId: PARENT_PAGE_ID };
 }
 function atomicJson(file, value) {
@@ -71,24 +71,45 @@ function upgradeJob(job) {
   job.localSaved=false; job.spaceVerified=['space_saved','diary_queued'].includes(job.phase);
   job.publicationUncertain=job.phase==='publishing';
 }
+// Takes every named lock or none. Each name is an OS-owned named pipe, which
+// disappears on process exit: no stale PID marker or check/unlink race. The
+// loopback fallback is only for non-Windows tests.
+async function holdLocks(prefix, identities, busyMessage) {
+  const held = [];
+  const release = () => Promise.all(held.map(server => new Promise(resolve => server.close(resolve))));
+  try {
+    for (const identity of identities) {
+      const address = process.platform === 'win32'
+        ? { path: `\\\\.\\pipe\\${prefix}-${identity}`, exclusive: true }
+        : { host: '127.0.0.1', port: 20000 + parseInt(identity.slice(0, 8), 16) % 40000, exclusive: true };
+      const server = createServer(socket => socket.destroy());
+      await new Promise((resolve, reject) => {
+        server.once('error', error => reject(new Error(`${busyMessage}: ${error.code}`)));
+        server.listen(address, resolve);
+      });
+      held.push(server);
+    }
+  } catch (error) {
+    await release();
+    throw error;
+  }
+  return release;
+}
 async function locked(stateDir, action) {
   fs.mkdirSync(stateDir, { recursive: true });
-  // Native resolution expands 8.3 short names, so every spelling of one folder
-  // shares one lock.
-  const identity = sha(fs.realpathSync.native(stateDir).toLowerCase());
-  // An OS-owned named pipe disappears on process exit: no stale PID marker or
-  // check/unlink race. The loopback fallback is only for non-Windows tests.
-  const address = process.platform === 'win32'
-    ? { path: `\\\\.\\pipe\\timeschedule-record-${identity}`, exclusive: true }
-    : { host: '127.0.0.1', port: 20000 + parseInt(identity.slice(0, 8), 16) % 40000, exclusive: true };
-  const server = createServer(socket => socket.destroy());
-  await new Promise((resolve, reject) => {
-    server.once('error', error => reject(new Error(`다른 기록 작업이 실행 중이거나 잠금을 열지 못했습니다: ${error.code}`)));
-    server.listen(address, resolve);
-  });
+  // Earlier versions named the lock after the JS-resolved spelling they were
+  // given. Holding that name as well as the canonical one keeps such a process
+  // excluded when it was given the same spelling as this one, or the long one.
+  // A process from before this change given a different short spelling than
+  // this one cannot be detected: Node has no cheap way to compute short names.
+  const identities = [...new Set([fs.realpathSync(stateDir), canonicalPath(stateDir)].map(p => sha(p.toLowerCase())))];
+  const release = await holdLocks('timeschedule-record', identities, '다른 기록 작업이 실행 중이거나 잠금을 열지 못했습니다');
   try {
     return await action();
-  } finally { await new Promise(resolve => server.close(resolve)); }
+  } finally { await release(); }
+}
+function samePlace(a, b) {
+  try { return canonicalPath(a).toLowerCase() === canonicalPath(b).toLowerCase(); } catch { return false; }
 }
 
 export async function prepare(input, { stateDir = DEFAULT_STATE, projectRoot = PROJECT_ROOT } = {}) {
@@ -99,6 +120,10 @@ export async function prepare(input, { stateDir = DEFAULT_STATE, projectRoot = P
   return locked(stateDir, async () => {
     const file = path.join(stateDir, source.workId, 'state.json');
     const previous = fs.existsSync(file) ? readJson(file) : null;
+    // Keep the repository spelling this work was first saved with: the document
+    // vault groups a work's records by it, so a new spelling of the same folder
+    // would look like a move and be refused.
+    if (previous?.source?.repoPath && previous.source.repoPath !== source.repoPath && samePlace(previous.source.repoPath, source.repoPath)) source.repoPath = previous.source.repoPath;
     const contentHash = sha(JSON.stringify(source));
     if (previous?.contentHash === contentHash && previous.phase !== 'excluded') return { workId: source.workId, revision: previous.revision, unchanged: true, phase: previous.phase };
     if (previous && !finished(previous)) {

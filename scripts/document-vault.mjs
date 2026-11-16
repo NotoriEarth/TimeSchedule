@@ -39,18 +39,28 @@ const atomicJson = (file, value) => atomicWrite(file, JSON.stringify(value, null
 
 async function withLock(directory, action) {
   fs.mkdirSync(directory, { recursive: true });
-  // Native resolution expands 8.3 short names, so every spelling shares one lock.
-  const root = fs.realpathSync.native(directory);
-  const identity = hash(process.platform === 'win32' ? root.toLowerCase() : root);
-  const server = createServer(socket => socket.destroy());
-  const address = process.platform === 'win32' ? { path: `\\\\.\\pipe\\timeschedule-vault-${identity}`, exclusive: true }
-    : { host: '127.0.0.1', port: 20000 + parseInt(identity.slice(0, 8), 16) % 40000, exclusive: true };
-  await new Promise((resolve, reject) => {
-    server.once('error', error => reject(new Error(`다른 문서 작업이 실행 중이거나 잠금을 열지 못했습니다: ${error.code}`)));
-    server.listen(address, resolve);
-  });
-  try { return await action(root); }
-  finally { await new Promise(resolve => server.close(resolve)); }
+  // Windows can name one folder by a long or an 8.3 short path; the native
+  // resolver returns the long one (elsewhere it can fail without /proc).
+  // Earlier versions named the lock after the JS-resolved spelling, so hold that
+  // name too: such a process given the same or the long spelling stays excluded.
+  const legacy = fs.realpathSync(directory);
+  const root = process.platform === 'win32' ? fs.realpathSync.native(directory) : legacy;
+  const fold = value => process.platform === 'win32' ? value.toLowerCase() : value;
+  const identities = [...new Set([legacy, root].map(value => hash(fold(value))))];
+  const held = [];
+  try {
+    for (const identity of identities) {
+      const server = createServer(socket => socket.destroy());
+      const address = process.platform === 'win32' ? { path: `\\\\.\\pipe\\timeschedule-vault-${identity}`, exclusive: true }
+        : { host: '127.0.0.1', port: 20000 + parseInt(identity.slice(0, 8), 16) % 40000, exclusive: true };
+      await new Promise((resolve, reject) => {
+        server.once('error', error => reject(new Error(`다른 문서 작업이 실행 중이거나 잠금을 열지 못했습니다: ${error.code}`)));
+        server.listen(address, resolve);
+      });
+      held.push(server);
+    }
+    return await action(root);
+  } finally { await Promise.all(held.map(server => new Promise(resolve => server.close(resolve)))); }
 }
 
 function initialize(root) {

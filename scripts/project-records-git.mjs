@@ -2,6 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+// Windows can name one folder by its long path or an 8.3 short one
+// (C:\Users\RUNNER~1\...). The native resolver returns the long form Git also
+// reports; the JS resolver keeps short names. Elsewhere the native resolver can
+// fail without /proc and short names do not exist, so the JS one is used.
+export const canonicalPath = value => process.platform === 'win32' ? fs.realpathSync.native(value) : fs.realpathSync(value);
+
 const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const DOCUMENT = /(?:^|\/)(?:docs?|notes?|research)(?:\/|$)|\.(?:md|mdx|txt|rst|adoc)$/i;
 const DEVELOPMENT = /^(?:apps\/|crates\/|src\/|src-tauri\/|scripts\/|tests\/|vendor\/|\.github\/workflows\/|Cargo\.(?:toml|lock)$|(?:package(?:-lock)?|tsconfig(?:\.[^/]+)?)\.json$|(?:svelte|vite|vitest|tailwind|postcss|eslint)\.config\.[^/]+$|(?:pnpm-lock\.yaml|yarn\.lock|rust-toolchain(?:\.toml)?|\.gitignore|\.gitattributes)$)/;
@@ -28,10 +34,7 @@ export function developmentEvidence(repoPath, evidence, projectRoot) {
   const selected = [...new Set(paths)].sort();
   if (!selected.some(p => DEVELOPMENT.test(p) && !DOCUMENT.test(p))) return skip('no_development_changes');
   try {
-    // The native resolver expands Windows 8.3 short names (C:\Users\RUNNER~1\...)
-    // to the long form Git reports; the JS one keeps them, so the same repository
-    // would compare unequal and every record would be skipped.
-    const canonical = value => fs.realpathSync.native(value);
+    const canonical = canonicalPath;
     const repo = canonical(repoPath);
     const samePath = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
     if (!samePath(repo, canonical(projectRoot))

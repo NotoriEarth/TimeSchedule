@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
+import { createServer } from 'node:net';
 import { prepare, sync, status, PARENT_PAGE_ID } from '../scripts/project-records.mjs';
 import { gitFixture } from './helpers/record-git-fixture.mjs';
 import { developmentEvidence } from '../scripts/project-records-git.mjs';
@@ -198,4 +199,57 @@ test('a short Windows path to the repository is the same repository', { skip: pr
   const prepared = await prepare(input(f), { ...f, projectRoot: short });
   assert.equal(prepared.skipped, undefined, JSON.stringify(prepared));
   assert.equal(prepared.revision, 1);
+});
+
+function shortPath(target) {
+  const script = `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${target.replaceAll("'", "''")}').ShortPath`;
+  return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', windowsHide: true }).trim();
+}
+
+// A process from before the canonical-path change names its lock from the
+// spelling it was given. Given either spelling, the current version must be
+// locked out by such a holder of the same folder.
+test('locks from the earlier naming still exclude delivery for both spellings', { skip: process.platform !== 'win32' }, async t => {
+  const f = setup(t);
+  fs.mkdirSync(f.stateDir, { recursive: true });
+  const short = shortPath(f.stateDir);
+  if (short.toLowerCase() === f.stateDir.toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
+  const open = new Set();
+  t.after(() => Promise.all([...open].map(holder => new Promise(resolve => holder.close(resolve)))));
+  const hold = async spelling => {
+    const legacy = createHash('sha256').update(fs.realpathSync(spelling).toLowerCase()).digest('hex');
+    const holder = createServer(socket => socket.destroy());
+    await new Promise((resolve, reject) => { holder.once('error', reject); holder.listen({ path: `\\\\.\\pipe\\timeschedule-record-${legacy}`, exclusive: true }, resolve); });
+    open.add(holder);
+    return () => new Promise(resolve => { open.delete(holder); holder.close(resolve); });
+  };
+  // An earlier process given the short spelling; this one given the same.
+  let release = await hold(short);
+  await assert.rejects(prepare(input(f), { ...f, stateDir: short }), /다른 기록 작업이 실행 중/);
+  await release();
+  // An earlier process given the long spelling; this one given the short one.
+  release = await hold(f.stateDir);
+  await assert.rejects(prepare(input(f), { ...f, stateDir: short }), /다른 기록 작업이 실행 중/);
+  await release();
+  // Nothing held: delivery proceeds, and releases every name it took.
+  assert.equal((await prepare(input(f), { ...f, stateDir: short })).revision, 1);
+  assert.equal((await prepare(input(f), f)).revision, 1);
+});
+
+// Re-preparing work saved by an earlier version must keep the repository
+// spelling it was saved with: the document vault groups records by it.
+test('re-preparing keeps the repository spelling an earlier version saved', { skip: process.platform !== 'win32' }, async t => {
+  const f = setup(t);
+  const short = shortPath(f.repo);
+  if (short.toLowerCase() === f.repo.toLowerCase()) return t.skip('8.3 short names are disabled on this volume');
+  const candidate = input(f);
+  await prepare(candidate, f);
+  const file = path.join(f.stateDir, candidate.workId, 'state.json');
+  const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+  saved.source.repoPath = short;
+  saved.contentHash = createHash('sha256').update(JSON.stringify(saved.source)).digest('hex');
+  fs.writeFileSync(file, JSON.stringify(saved));
+  const again = await prepare(candidate, f);
+  assert.equal(again.unchanged, true, JSON.stringify(again));
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).source.repoPath, short);
 });
