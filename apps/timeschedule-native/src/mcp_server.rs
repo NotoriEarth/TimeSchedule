@@ -299,46 +299,150 @@ async fn protect(State(guard): State<Arc<Guard>>, request: Request<Body>, next: 
 }
 
 pub(crate) const TOKEN_FILE: &str = "mcp-token.dpapi";
-/// Where an unreadable token file is moved when a new token replaces it. It is
-/// still the encrypted blob (or whatever damaged bytes were there), never
-/// plaintext; one slot, overwritten by the next recovery.
-pub(crate) const SET_ASIDE: &str = "mcp-token.dpapi.corrupt";
 
+/// Why a token file was judged unusable. The reason goes to the app log; the
+/// file's content never does, and no copy of the file is kept: it may hold
+/// anything, a token pasted in as plain text included.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Damage {
+    Empty,
+    TooLarge,
+    Undecryptable,
+    ForeignKey,
+    NotAToken,
+}
+impl Damage {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Empty => "빈 파일",
+            Self::TooLarge => "크기 초과",
+            Self::Undecryptable => "복호화할 수 없음",
+            Self::ForeignKey => "다른 PC·Windows 계정의 키",
+            Self::NotAToken => "토큰 형식 아님",
+        }
+    }
+}
 enum TokenError {
     Missing,
     /// The file was read in full and is not this account's token: cut off,
     /// mangled, or protected by another PC or Windows account. Waiting cannot
     /// fix it, so the app may replace it.
-    Damaged,
+    Damaged(Damage),
     /// The file may be fine but could not be read now (access denied, held by
-    /// another program, I/O or protection service failure). Never replaced.
+    /// another program, I/O failure, Windows unable to use this account's keys
+    /// for the moment). Never replaced automatically.
     Unavailable,
 }
 impl TokenError {
     fn message(&self) -> String {
         match self {
             Self::Missing => "MCP 인증 파일이 없습니다. TimeSchedule을 실행해 새로 만드세요.",
-            Self::Damaged => "MCP 인증 파일이 손상되었거나 다른 PC·Windows 계정의 것입니다. TimeSchedule을 다시 실행하면 새 토큰을 발급합니다.",
-            Self::Unavailable => "MCP 인증 파일을 지금 읽을 수 없습니다(접근 거부 또는 다른 프로그램이 사용 중). 잠시 후 다시 시도하세요.",
+            Self::Damaged(_) => "MCP 인증 파일이 손상되었거나 다른 PC·Windows 계정의 것입니다. TimeSchedule을 다시 실행하면 새 토큰을 발급합니다.",
+            Self::Unavailable => "MCP 인증 파일을 지금 읽을 수 없습니다(접근 거부, 다른 프로그램이 사용 중, 또는 Windows가 이 계정의 보호 키를 지금 쓸 수 없음). 잠시 후 다시 시도하세요. 계속되면 설정에서 토큰을 재발급한 뒤 앱을 다시 실행하세요.",
         }
         .into()
     }
 }
-/// Whether a failed `CryptUnprotectData` means the blob itself is unusable
-/// here. Measured on Windows 10: a mangled or cut-off blob is
-/// `ERROR_INVALID_DATA`, one too short to parse `ERROR_INVALID_PARAMETER`, and
-/// one whose master key this profile does not have (another PC or account)
-/// `NTE_BAD_KEY_STATE`. Anything else may pass, so it does not cost the token.
-fn says_damaged(code: u32) -> bool {
+/// What a failed `CryptUnprotectData` says about the blob, by its Win32 code.
+/// Measured on Windows 10: a mangled or cut-off blob is `ERROR_INVALID_DATA`
+/// and one too short to parse `ERROR_INVALID_PARAMETER`; neither depends on
+/// the moment. `NTE_BAD_KEY_STATE` is what a blob from another PC or account
+/// gives, but also what a logon whose own keys are unavailable for now gives,
+/// so it means damage only when this profile does not hold the key the blob
+/// names (`key_present` is `Some(false)`). Anything else may pass.
+fn damage(code: u32, key_present: impl FnOnce() -> Option<bool>) -> Option<Damage> {
     const ERROR_INVALID_DATA: u32 = 13;
     const ERROR_INVALID_PARAMETER: u32 = 87;
     const NTE_BAD_KEY_STATE: u32 = 0x8009_000b;
-    matches!(
-        code,
-        ERROR_INVALID_DATA | ERROR_INVALID_PARAMETER | NTE_BAD_KEY_STATE
-    )
+    match code {
+        ERROR_INVALID_DATA | ERROR_INVALID_PARAMETER => Some(Damage::Undecryptable),
+        NTE_BAD_KEY_STATE if key_present() == Some(false) => Some(Damage::ForeignKey),
+        _ => None,
+    }
 }
-fn load(dir: &Path) -> Result<String, TokenError> {
+/// The parts of Windows the token file depends on. Tests stand in for them.
+struct Platform<'a> {
+    /// `CryptUnprotectData`; the error is the Win32 code.
+    unprotect: &'a dyn Fn(&[u8]) -> Result<Vec<u8>, u32>,
+    /// `GetProfileType` flags; `None` when Windows does not say.
+    profile_type: &'a dyn Fn() -> Option<u32>,
+    /// `%APPDATA%\Microsoft\Protect`, where this profile's master keys live.
+    protect_dir: Option<std::path::PathBuf>,
+}
+impl Platform<'static> {
+    fn real() -> Self {
+        Self {
+            unprotect: &|blob| dpapi(blob, false),
+            profile_type: &profile_type,
+            protect_dir: std::env::var_os("APPDATA")
+                .map(|roaming| Path::new(&roaming).join("Microsoft").join("Protect")),
+        }
+    }
+}
+/// Whether this Windows profile holds the master key a DPAPI blob names:
+/// a file named by the key's GUID under `%APPDATA%\Microsoft\Protect\<SID>`.
+/// `None` when that cannot be told, so that an unclear case is never taken for
+/// damage: not the expected blob layout, the folder cannot be listed, or this is
+/// not an ordinary local profile. In a temporary profile (the real one failed
+/// to load) the account's keys are simply elsewhere, and a roaming or mandatory
+/// one may not have received them yet; the token works again after a normal
+/// sign-in.
+fn master_key_present(blob: &[u8], platform: &Platform) -> Option<bool> {
+    // Blob header: version (4 bytes), provider GUID (16), master key version (4),
+    // master key GUID (16). The provider is df9d8cd0-1501-11d1-8c7a-00c04fc297eb.
+    const PROVIDER: [u8; 16] = [
+        0xd0, 0x8c, 0x9d, 0xdf, 0x01, 0x15, 0xd1, 0x11, 0x8c, 0x7a, 0x00, 0xc0, 0x4f, 0xc2, 0x97,
+        0xeb,
+    ];
+    if blob.len() < 40 || blob[4..20] != PROVIDER {
+        return None;
+    }
+    let key = &blob[24..40];
+    let name = format!(
+        "{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{}",
+        u32::from_le_bytes(key[0..4].try_into().ok()?),
+        u16::from_le_bytes(key[4..6].try_into().ok()?),
+        u16::from_le_bytes(key[6..8].try_into().ok()?),
+        key[8],
+        key[9],
+        key[10..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    // PT_TEMPORARY, PT_ROAMING and PT_MANDATORY are all flags; local is none.
+    if (platform.profile_type)()? != 0 {
+        return None;
+    }
+    let mut profiles = 0;
+    for entry in fs::read_dir(platform.protect_dir.as_ref()?).ok()? {
+        let entry = entry.ok()?;
+        if !entry.file_name().to_string_lossy().starts_with("S-1-") {
+            continue;
+        }
+        profiles += 1;
+        if entry.path().join(&name).try_exists().ok()? {
+            return Some(true);
+        }
+    }
+    (profiles > 0).then_some(false)
+}
+/// `GetProfileType`: 0 for an ordinary local profile, otherwise PT_* flags.
+#[cfg(windows)]
+fn profile_type() -> Option<u32> {
+    #[link(name = "userenv")]
+    extern "system" {
+        fn GetProfileType(flags: *mut u32) -> i32;
+    }
+    let mut flags = 0u32;
+    // Reads the calling process's own profile state; nothing is changed.
+    (unsafe { GetProfileType(&mut flags) } != 0).then_some(flags)
+}
+#[cfg(not(windows))]
+fn profile_type() -> Option<u32> {
+    None
+}
+fn load(dir: &Path, platform: &Platform) -> Result<String, TokenError> {
     let mut encrypted = Vec::new();
     match fs::File::open(dir.join(TOKEN_FILE)) {
         Ok(file) => file
@@ -350,25 +454,27 @@ fn load(dir: &Path) -> Result<String, TokenError> {
         }
         Err(_) => return Err(TokenError::Unavailable),
     };
-    if encrypted.is_empty() || encrypted.len() > 16 * 1024 {
-        return Err(TokenError::Damaged);
+    if encrypted.is_empty() {
+        return Err(TokenError::Damaged(Damage::Empty));
     }
-    let plain = dpapi(&encrypted, false).map_err(|code| {
-        if says_damaged(code) {
-            TokenError::Damaged
-        } else {
-            TokenError::Unavailable
+    if encrypted.len() > 16 * 1024 {
+        return Err(TokenError::Damaged(Damage::TooLarge));
+    }
+    let plain = (platform.unprotect)(&encrypted).map_err(|code| {
+        match damage(code, || master_key_present(&encrypted, platform)) {
+            Some(damage) => TokenError::Damaged(damage),
+            None => TokenError::Unavailable,
         }
     })?;
-    let value = String::from_utf8(plain).map_err(|_| TokenError::Damaged)?;
+    let value = String::from_utf8(plain).map_err(|_| TokenError::Damaged(Damage::NotAToken))?;
     if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(TokenError::Damaged);
+        return Err(TokenError::Damaged(Damage::NotAToken));
     }
     Ok(value)
 }
 /// Read-only: helper processes report a problem and leave the file to the app.
 pub(crate) fn read_token(dir: &Path) -> Result<String, String> {
-    load(dir).map_err(|error| error.message())
+    load(dir, &Platform::real()).map_err(|error| error.message())
 }
 fn new_token() -> String {
     format!(
@@ -400,7 +506,7 @@ fn store(dir: &Path, value: &str) -> Result<(), String> {
         .and_then(|mut file| file.write_all(&encrypted).and_then(|_| file.sync_all()));
     if written.is_err() {
         let _ = fs::remove_file(&temporary);
-        return Err("MCP 인증 파일 저장 실패. 이전 토큰은 그대로입니다.".into());
+        return Err("MCP 인증 파일을 저장하지 못했습니다.".into());
     }
     // A reader that opened the file without sharing deletion (PowerShell's
     // ReadAllBytes, a scanner) blocks the rename for a moment.
@@ -413,22 +519,28 @@ fn store(dir: &Path, value: &str) -> Result<(), String> {
         }
     }
     let _ = fs::remove_file(&temporary);
-    Err("MCP 인증 파일을 교체하지 못했습니다. 다른 프로그램이 파일을 사용 중인지 확인하세요. 이전 토큰은 그대로입니다.".into())
+    Err(
+        "MCP 인증 파일을 교체하지 못했습니다. 다른 프로그램이 파일을 사용 중인지 확인하세요."
+            .into(),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Issue {
     Existing,
     Created,
-    /// The file was damaged; it was set aside and a new token issued.
-    Recovered,
+    /// The stored file was damaged and a new token replaced it.
+    Recovered(Damage),
 }
 /// The app's token at start: the stored one, or a new one when there is none or
 /// the stored one is damaged. A file that merely cannot be read now is an
-/// error, so a passing lock never costs the user their registered token.
+/// error, so a passing lock or key problem never costs the user their token.
 pub(super) fn load_or_issue(dir: &Path) -> Result<(String, Issue), String> {
+    issue_at_start(dir, &Platform::real())
+}
+fn issue_at_start(dir: &Path, platform: &Platform) -> Result<(String, Issue), String> {
     // Left by a write that was cut off before its rename; the token file itself
-    // was not touched. Only this single app instance writes here.
+    // was not touched. Only the app that owns this folder writes here.
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             if temporary_name(&entry.file_name()) {
@@ -436,16 +548,14 @@ pub(super) fn load_or_issue(dir: &Path) -> Result<(String, Issue), String> {
             }
         }
     }
-    let issue = match load(dir) {
+    let issue = match load(dir, platform) {
         Ok(value) => return Ok((value, Issue::Existing)),
         Err(TokenError::Missing) => Issue::Created,
-        Err(TokenError::Damaged) => {
-            // Best effort: the new token below replaces the file either way.
-            let _ = fs::rename(dir.join(TOKEN_FILE), dir.join(SET_ASIDE));
-            Issue::Recovered
-        }
+        Err(TokenError::Damaged(damage)) => Issue::Recovered(damage),
         Err(error @ TokenError::Unavailable) => return Err(error.message()),
     };
+    // The damaged file stays in place until the new one is whole on disk and
+    // replaces it, so a failure here leaves the folder as it was.
     let value = new_token();
     store(dir, &value)?;
     Ok((value, issue))
@@ -457,7 +567,9 @@ pub(super) fn token(dir: &Path) -> Result<String, String> {
 /// Replaces the token. The file is swapped first; only then does the running
 /// server (`live`) start checking the new token, from which moment the old one
 /// is refused. On any error both still hold the old token. Without a server
-/// the new token takes effect when the app next starts.
+/// the new token takes effect when the app next starts. Only for the app that
+/// owns the data folder (see `TokenControl`): another process's server would
+/// keep the old token.
 pub(crate) fn reissue(dir: &Path, live: Option<&LiveToken>) -> Result<(), String> {
     if !dir.is_absolute() {
         return Err("데이터 폴더를 확인할 수 없어 토큰을 재발급하지 못했습니다.".into());
@@ -468,7 +580,7 @@ pub(crate) fn reissue(dir: &Path, live: Option<&LiveToken>) -> Result<(), String
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     });
     let value = new_token();
-    store(dir, &value)?;
+    store(dir, &value).map_err(|error| format!("{error} 이전 토큰은 그대로입니다."))?;
     if let Some(live) = live {
         live.replace(value);
     }
@@ -621,20 +733,26 @@ mod tests {
     }
 
     #[test]
-    fn a_damaged_token_file_is_replaced_at_start_and_set_aside_without_plaintext() {
-        type Damage = Box<dyn Fn(Vec<u8>) -> Vec<u8>>;
-        let cases: Vec<(&str, Damage)> = vec![
+    fn a_damaged_token_file_is_replaced_at_start_and_nothing_of_it_is_kept() {
+        type Mangle = Box<dyn Fn(Vec<u8>) -> Vec<u8>>;
+        // What a user might paste in while trying to repair the file by hand.
+        let pasted = "c0ffee".repeat(10) + "abcd";
+        let pasted_bytes = pasted.clone().into_bytes();
+        let cases: Vec<(&str, Mangle, Damage)> = vec![
             (
                 "cut off before any byte was written",
                 Box::new(|_| Vec::new()),
+                Damage::Empty,
             ),
             (
                 "cut off part way",
                 Box::new(|blob| blob[..blob.len() / 2].to_vec()),
+                Damage::Undecryptable,
             ),
             (
                 "not a protected blob",
                 Box::new(|_| b"plain text, not DPAPI ".repeat(8)),
+                Damage::Undecryptable,
             ),
             (
                 // The master key named in the blob does not exist in this profile:
@@ -646,23 +764,40 @@ mod tests {
                     }
                     blob
                 }),
+                Damage::ForeignKey,
             ),
             (
                 "protected, but not a token",
                 Box::new(|_| dpapi(b"not-a-token", true).unwrap()),
+                Damage::NotAToken,
             ),
-            ("far too large", Box::new(|_| vec![7u8; 16 * 1024 + 1])),
+            (
+                "far too large",
+                Box::new(|_| vec![7u8; 16 * 1024 + 1]),
+                Damage::TooLarge,
+            ),
+            (
+                "a token pasted in as plain text",
+                Box::new(move |_| pasted_bytes.clone()),
+                Damage::Undecryptable,
+            ),
         ];
-        for (name, damage) in cases {
+        for (name, mangle, expected) in cases {
             let dir = data_dir();
             token(&dir).unwrap();
-            let damaged = damage(std::fs::read(dir.join(TOKEN_FILE)).unwrap());
+            let damaged = mangle(std::fs::read(dir.join(TOKEN_FILE)).unwrap());
             std::fs::write(dir.join(TOKEN_FILE), &damaged).unwrap();
             // A helper process only reads: it reports the damage and changes nothing.
             assert!(read_token(&dir).is_err(), "{name}");
             assert_eq!(std::fs::read(dir.join(TOKEN_FILE)).unwrap(), damaged);
-            let (issued, issue) = load_or_issue(&dir).unwrap_or_else(|e| panic!("{name}: {e}"));
-            assert_eq!(issue, Issue::Recovered, "{name}");
+            // An ordinary local profile, whatever account runs the tests.
+            let local = Platform {
+                profile_type: &|| Some(0),
+                ..Platform::real()
+            };
+            let (issued, issue) =
+                issue_at_start(&dir, &local).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(issue, Issue::Recovered(expected), "{name}");
             assert!(issued.len() == 64 && issued.bytes().all(|b| b.is_ascii_hexdigit()));
             assert_eq!(read_token(&dir).unwrap(), issued, "{name}");
             assert_eq!(
@@ -670,13 +805,11 @@ mod tests {
                 (issued.clone(), Issue::Existing),
                 "{name}: the next start must reuse the new token"
             );
-            assert_eq!(
-                std::fs::read(dir.join(SET_ASIDE)).unwrap(),
-                damaged,
-                "{name}: the unreadable file was not kept as evidence"
-            );
-            assert_eq!(files(&dir), [TOKEN_FILE, SET_ASIDE], "{name}");
+            // The unusable file may hold anything, a plaintext token included, so
+            // no copy of it stays behind.
+            assert_eq!(files(&dir), [TOKEN_FILE], "{name}");
             assert!(!holds_plaintext(&dir, &issued), "{name}");
+            assert!(!holds_plaintext(&dir, &pasted), "{name}");
             std::fs::remove_dir_all(dir).unwrap();
         }
     }
@@ -710,15 +843,122 @@ mod tests {
     }
     #[test]
     fn only_decryption_errors_that_mean_damage_lead_to_a_new_token() {
-        // Measured on Windows 10: a mangled or cut blob is ERROR_INVALID_DATA, a
-        // tiny one ERROR_INVALID_PARAMETER, an unknown master key NTE_BAD_KEY_STATE.
-        for code in [13, 87, 0x8009_000b] {
-            assert!(says_damaged(code), "{code:#x}");
+        let unknown = || None;
+        // Measured on Windows 10: a mangled or cut blob is ERROR_INVALID_DATA and
+        // one too short to parse ERROR_INVALID_PARAMETER.
+        for code in [13, 87] {
+            assert_eq!(damage(code, unknown), Some(Damage::Undecryptable), "{code}");
         }
+        // "Key not valid" is what a blob from another PC or account gives, but
+        // also what a logon whose own keys are unavailable for now gives. It
+        // counts as damage only when this profile does not hold the key at all.
+        assert_eq!(
+            damage(NTE_BAD_KEY_STATE, || Some(false)),
+            Some(Damage::ForeignKey)
+        );
+        assert_eq!(damage(NTE_BAD_KEY_STATE, || Some(true)), None);
+        assert_eq!(damage(NTE_BAD_KEY_STATE, unknown), None);
         // Access denied, out of memory, the protection service not answering.
         for code in [0, 5, 8, 14, 1722, 1723] {
-            assert!(!says_damaged(code), "{code:#x}");
+            assert_eq!(damage(code, || Some(false)), None, "{code}");
         }
+    }
+    const NTE_BAD_KEY_STATE: u32 = 0x8009_000b;
+    const PT_TEMPORARY: u32 = 1;
+    const PT_ROAMING: u32 = 2;
+    const PT_MANDATORY: u32 = 4;
+    #[test]
+    fn the_key_a_blob_names_is_looked_up_in_this_windows_profile() {
+        let local = Platform {
+            profile_type: &|| Some(0),
+            ..Platform::real()
+        };
+        let blob = dpapi(b"anything", true).unwrap();
+        assert_eq!(master_key_present(&blob, &local), Some(true));
+        let mut foreign = blob.clone();
+        for byte in &mut foreign[24..40] {
+            *byte ^= 0x5a;
+        }
+        assert_eq!(master_key_present(&foreign, &local), Some(false));
+        // Not a DPAPI blob: nothing can be said, so nothing is concluded.
+        assert_eq!(
+            master_key_present(b"plain text, not DPAPI plain text, not DPAPI", &local),
+            None
+        );
+        assert_eq!(master_key_present(&blob[..30], &local), None);
+        // Windows does answer the profile question for a real logon.
+        assert!(profile_type().is_some());
+    }
+    #[test]
+    fn a_missing_key_proves_nothing_unless_this_is_an_ordinary_local_profile() {
+        // The token is this account's and perfectly good. But the profile failed
+        // to load and Windows signed the user in to a temporary one: its Protect
+        // folder exists, the account's real keys are not in it, and decryption
+        // fails exactly as for a file from another PC. After a normal sign-in
+        // the token works again, so it must survive.
+        let dir = data_dir();
+        let original = token(&dir).unwrap();
+        let bytes = std::fs::read(dir.join(TOKEN_FILE)).unwrap();
+        let other_profile = data_dir();
+        std::fs::create_dir(other_profile.join("S-1-5-21-1-2-3-1001")).unwrap();
+        for kind in [
+            Some(PT_TEMPORARY),
+            Some(PT_ROAMING),
+            Some(PT_MANDATORY),
+            Some(PT_TEMPORARY | PT_ROAMING),
+            None,
+        ] {
+            let platform = Platform {
+                unprotect: &|_| Err(NTE_BAD_KEY_STATE),
+                profile_type: &move || kind,
+                protect_dir: Some(other_profile.clone()),
+            };
+            assert_eq!(master_key_present(&bytes, &platform), None, "{kind:?}");
+            let error = issue_at_start(&dir, &platform).unwrap_err();
+            assert!(error.contains("다시 시도"), "{kind:?}: {error}");
+            assert_eq!(std::fs::read(dir.join(TOKEN_FILE)).unwrap(), bytes);
+            assert_eq!(files(&dir), [TOKEN_FILE]);
+        }
+        assert_eq!(load_or_issue(&dir).unwrap(), (original, Issue::Existing));
+        // The same absence in an ordinary local profile does settle it.
+        let local = Platform {
+            unprotect: &|_| Err(NTE_BAD_KEY_STATE),
+            profile_type: &|| Some(0),
+            protect_dir: Some(other_profile.clone()),
+        };
+        let (_, issue) = issue_at_start(&dir, &local).unwrap();
+        assert_eq!(issue, Issue::Recovered(Damage::ForeignKey));
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_dir_all(other_profile).unwrap();
+    }
+    #[test]
+    fn a_decryption_failure_that_may_pass_is_reported_and_the_token_survives() {
+        let dir = data_dir();
+        let original = token(&dir).unwrap();
+        let bytes = std::fs::read(dir.join(TOKEN_FILE)).unwrap();
+        // This account's own key cannot be used right now (the blob names a key
+        // this profile does hold), or the protection service is not answering.
+        for code in [NTE_BAD_KEY_STATE, 5, 1722] {
+            let failing = Platform {
+                unprotect: &move |_| Err(code),
+                profile_type: &|| Some(0),
+                ..Platform::real()
+            };
+            let error = issue_at_start(&dir, &failing).unwrap_err();
+            assert!(error.contains("다시 시도"), "{code:#x}: {error}");
+            assert_eq!(std::fs::read(dir.join(TOKEN_FILE)).unwrap(), bytes);
+            assert_eq!(files(&dir), [TOKEN_FILE]);
+        }
+        // Once Windows can decrypt again, the same token is back.
+        assert_eq!(load_or_issue(&dir).unwrap(), (original, Issue::Existing));
+        // The same file with an error that does mean damage is replaced.
+        let mangled = Platform {
+            unprotect: &|_| Err(13),
+            ..Platform::real()
+        };
+        let (_, issue) = issue_at_start(&dir, &mangled).unwrap();
+        assert_eq!(issue, Issue::Recovered(Damage::Undecryptable));
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn a_write_cut_off_before_the_swap_leaves_the_previous_token_in_force() {

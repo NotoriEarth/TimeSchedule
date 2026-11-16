@@ -318,8 +318,11 @@ impl App {
             None
         };
         let mcp_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut mcp_recovered = None;
         let (mcp, mcp_status) = if let Some(store) = store.clone() {
-            match crate::mcp::LocalMcp::start(store, mcp_changed.clone(), &data_dir) {
+            let started = crate::mcp::LocalMcp::start(store, mcp_changed.clone(), &data_dir);
+            mcp_recovered = started.recovered;
+            match started.server {
                 Ok(Some(server)) => {
                     let status = server.status.clone();
                     (Some(server), status)
@@ -332,11 +335,9 @@ impl App {
         };
         // The settings screen reissues the token through the running server.
         let mcp_setup = crate::mcp_setup_ui::State {
-            token_control: mcp
-                .as_ref()
-                .map(crate::mcp::LocalMcp::token_control)
-                .unwrap_or_default(),
-            token: if mcp.as_ref().is_some_and(|server| server.recovered) {
+            token_control: crate::mcp::TokenControl::for_app(mcp.as_ref(), instance.is_some()),
+            // Shown even if the server then failed to start: the old token is gone.
+            token: if mcp_recovered.is_some() {
                 crate::mcp_setup_ui::TokenPanel::Recovered
             } else {
                 Default::default()
@@ -428,8 +429,9 @@ impl App {
             app.store.is_some(),
             app.error
         ));
-        if app.mcp_setup.token == crate::mcp_setup_ui::TokenPanel::Recovered {
-            app.log("mcp token file was unreadable; set aside and reissued");
+        if let Some(reason) = mcp_recovered {
+            // The reason only: the unusable file's content is not kept anywhere.
+            app.log(&format!("mcp token file unusable ({reason}); reissued"));
         }
         let widget = app.open_widget();
         let load = app.refresh();
