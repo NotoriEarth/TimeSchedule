@@ -59,10 +59,18 @@ function loadJobs(stateDir, workId) {
     .sort((a,b) => a.job.source.workId === b.job.source.workId ? a.job.revision-b.job.revision : (a.job.createdAt ?? a.job.updatedAt).localeCompare(b.job.createdAt ?? b.job.updatedAt));
 }
 const finished = job => ['complete', 'local_complete', 'conflict', 'excluded'].includes(job.phase);
+// git_paused is not finished: every sync rechecks it and resumes it once Git
+// answers. It only stops waking the app.
+const waiting = job => !finished(job) && job.phase !== 'git_paused';
+const RETRY_DELAYS = [60000, 300000, 900000, 3600000];
+const retryDelay = failures => RETRY_DELAYS[Math.min(failures, RETRY_DELAYS.length) - 1];
+// Twelve failures on the ladder above span about nine hours of the app being
+// open (1+5+15 minutes, then hourly). Past that the cause is not passing.
+export const GIT_RETRY_LIMIT = 12;
 const uncertainPublication = job => job?.publicationUncertain === true
   || (job && job.schemaVersion !== 2 && (job.phase === 'publishing' || job.excludedFromPhase === 'publishing'));
 function writeWake(stateDir) {
-  const pending = loadJobs(stateDir).map(x=>x.job).filter(j=>!finished(j));
+  const pending = loadJobs(stateDir).map(x=>x.job).filter(waiting);
   atomicJson(path.join(stateDir,'wake.json'), {pending:pending.length,nextAttemptAt:pending.length ? Math.min(...pending.map(j=>j.nextAttemptAt ?? 0)) : null});
 }
 function upgradeJob(job) {
@@ -120,6 +128,9 @@ function samePlace(a, b) {
 export async function prepare(input, { stateDir = DEFAULT_STATE, projectRoot = PROJECT_ROOT } = {}) {
   const source = normalizeSource(input, projectRoot);
   const evidence = developmentEvidence(source.repoPath, input.gitChanges, projectRoot);
+  // A temporary Git failure is not a finding that the work has no development
+  // changes, so it must not read as "skipped" and end the record.
+  if (evidence.transient) throw new Error(`Git으로 개발 변경을 확인하지 못했습니다 (${evidence.detail}). 기록을 만들지 않았습니다. 원인을 해결한 뒤 같은 입력으로 다시 prepare하세요.`);
   if (!evidence.eligible) return { workId: source.workId, skipped: true, reason: evidence.reason };
   source.gitChanges = evidence.gitChanges;
   return locked(stateDir, async () => {
@@ -199,12 +210,36 @@ export async function sync(options = {}) {
     }
     // Apply the policy before registration, backoff and per-run limits: old
     // research jobs must stop waking the app even if their retry is not due.
+    const unverified = new Set(), failedNow = new Set();
     for (const { file, job } of jobs) {
       if (options.workId && job.source.workId !== options.workId) continue;
       if (job.phase === 'local_complete' && spaceEnabled && options.workId === job.source.workId) { job.phase = 'waiting_space'; job.nextAttemptAt = 0; }
       if (finished(job) || (options.workId && job.source.workId !== options.workId)) continue;
       upgradeJob(job);
       const evidence = developmentEvidence(job.source.repoPath, job.source.gitChanges, options.projectRoot ?? PROJECT_ROOT);
+      if (evidence.transient) {
+        // Nothing is known about this work yet: never deliver it unverified,
+        // even on --retry-now. Only a check that was due counts as a failed
+        // attempt, so rechecking waiting jobs does not push their retry back.
+        unverified.add(job);
+        if (job.phase === 'git_paused' || (!options.retryNow && (job.nextAttemptAt ?? 0) > now)) continue;
+        failedNow.add(job);
+        job.gitFailures = (job.gitFailures ?? 0) + 1;
+        job.lastError = `Git 확인 일시 실패 ${job.gitFailures}회 (${evidence.detail}).`;
+        if (job.gitFailures >= GIT_RETRY_LIMIT) {
+          job.pausedFromPhase = job.phase; job.phase = 'git_paused'; job.nextAttemptAt = null;
+          job.lastError += ' 자동 재시도를 멈췄습니다. 원인을 해결한 뒤 sync를 실행하면 다시 확인합니다.';
+        } else job.nextAttemptAt = now + retryDelay(job.gitFailures);
+        job.updatedAt = new Date().toISOString(); atomicJson(file, job);
+        continue;
+      }
+      const resumed = job.phase === 'git_paused';
+      if (resumed) { job.phase = job.pausedFromPhase ?? 'prepared'; delete job.pausedFromPhase; job.nextAttemptAt = 0; }
+      if (job.gitFailures || resumed) {
+        // The pending delay was only for Git, which now answers.
+        job.gitFailures = 0; job.lastError = null; job.nextAttemptAt = 0;
+        job.updatedAt = new Date().toISOString(); atomicJson(file, job);
+      }
       if (!evidence.eligible) {
         job.excludedFromPhase = job.phase;
         job.phase = 'excluded'; job.exclusionReason = evidence.reason;
@@ -224,6 +259,11 @@ export async function sync(options = {}) {
     writeWake(stateDir);
     for (const { file, job } of jobs) {
       if(options.workId && job.source.workId!==options.workId) continue;
+      if (unverified.has(job) || job.phase === 'git_paused') {
+        results.push({ workId: job.source.workId, revision: job.revision, phase: job.phase, skipped: true,
+          ...(failedNow.has(job) || job.phase === 'git_paused' ? { error: job.lastError } : {}) });
+        continue;
+      }
       if (finished(job) || (!options.retryNow && (job.nextAttemptAt ?? 0)>now) || processed >= Number(options.maxJobs ?? Infinity)) {
         results.push({ workId: job.source.workId,revision:job.revision, phase: job.phase, skipped: true }); continue;
       }
@@ -283,7 +323,7 @@ export async function sync(options = {}) {
         if (error.conflict) job.phase = 'conflict';
         if(error.publicationNotStarted && !error.conflict && !inheritedUncertainty){job.publicationUncertain=false;job.phase='waiting_space';}
         job.attempts=(job.attempts??0)+1;
-        job.nextAttemptAt=now+[60000,300000,900000,3600000][Math.min(job.attempts-1,3)];
+        job.nextAttemptAt=now+retryDelay(job.attempts);
         job.lastError = String(error.message ?? error).slice(0, 2000); save();
       } finally {
         results.push({ workId: job.source.workId, revision: job.revision, phase: job.phase, pageUrl: job.spaceVerified ? job.space?.pageUrl ?? null : null, error: job.lastError });
