@@ -242,6 +242,68 @@ fn day_cell_shows_completed_line_when_room() {
 }
 
 #[test]
+fn day_cell_keeps_completed_line_before_wrapping_titles() {
+    let mut app = calendar_record_fixture();
+    app.preferences.widget.line_gap = 1;
+    let mut day = selected_day(&app).clone();
+    day.items[0].title = "아주 긴 작업 제목이 날짜 칸 하나에 다 들어가지 않는 경우".into();
+    day.total += 2;
+    day.completed = 2;
+    // Two 16.9px lines and one gap fit in 40px, three lines do not.
+    let labels = calendar_texts(
+        crate::calendar_ui::day_items(&app, Some(&day), 150., 40., 13., true),
+        Size::new(150., 40.),
+    );
+    assert!(labels.iter().any(|s| s == "완료 2"), "{labels:?}");
+    assert_eq!(
+        labels.iter().filter(|s| s.starts_with("아주")).count(),
+        1,
+        "{labels:?}"
+    );
+}
+
+#[test]
+fn unlocked_widget_resize_grip_covers_no_cell_text() {
+    let mut app = fixture();
+    app.widget_attached = true;
+    app.preferences.widget_locked = false;
+    let store = app.store.clone().unwrap();
+    let last = *app.widget_days().last().unwrap();
+    // Long titles, so the cell's last line runs to its right edge.
+    for title in [
+        "아침 운동과 산책 일정",
+        "점심 약속과 은행 업무",
+        "코드 리뷰와 배포 점검",
+        "저녁 장보기와 요리 준비",
+        "독서 모임 발표 자료 정리",
+        "주간 회고와 다음 주 계획",
+    ] {
+        let mut form = Form::new(Kind::Event, last.to_string(), None);
+        form.title = title.into();
+        form.save(&store).unwrap();
+    }
+    app.snapshot = worker::snapshot(&store, &app.scope()).unwrap();
+    let size = Size::new(960., 640.);
+    let grip = Rectangle::new(
+        Point::new(size.width - 26., size.height - 26.),
+        Size::new(26., 26.),
+    );
+    let labels = calendar_text_bounds(crate::desktop_widget::view(&app), size);
+    assert!(
+        labels
+            .iter()
+            .any(|(s, _)| s.contains("독서 모임") || s.contains("+")),
+        "{labels:?}"
+    );
+    for (s, b) in labels.iter().filter(|(s, _)| s != "↘") {
+        assert!(
+            b.intersection(&grip).is_none(),
+            "{s:?} {b:?} under the grip"
+        );
+    }
+}
+
+#[test]
 fn day_cell_text_stays_inside_cell() {
     let mut app = overflowing_calendar_fixture(5);
     let mut day = selected_day(&app).clone();

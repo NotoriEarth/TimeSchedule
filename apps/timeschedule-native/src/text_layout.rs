@@ -43,7 +43,7 @@ pub fn fit_label_with_font(content: &str, width: f32, size: f32, font: iced::Fon
         .collect();
     let (mut low, mut high) = (0, boundaries.len());
     while low < high {
-        let mid = (low + high + 1) / 2;
+        let mid = (low + high).div_ceil(2);
         let end = boundaries.get(mid).copied().unwrap_or(content.len());
         if text_width_with_font(&format!("{}…", &content[..end]), size, font) <= width {
             low = mid;
@@ -78,7 +78,7 @@ pub fn split_first_line(
         .collect();
     let (mut low, mut high) = (0, boundaries.len());
     while low < high {
-        let mid = (low + high + 1) / 2;
+        let mid = (low + high).div_ceil(2);
         let end = boundaries.get(mid).copied().unwrap_or(content.len());
         if text_width_with_font(&content[..end], size, font) <= width {
             low = mid;

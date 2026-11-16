@@ -15,6 +15,8 @@ use iced::{Alignment, Border, Element, Length};
 // Keep the widget's typography and geometry together for later design changes.
 const SUMMARY_HEIGHT: f32 = 14.0;
 const CONTENT_GAP: f32 = 2.0;
+/// The unlocked resize grip is 26px square over the 8px outer padding.
+const GRIP_ROOM: f32 = 18.0;
 const WEEKDAYS: [&str; 7] = [
     "일요일",
     "월요일",
@@ -358,6 +360,9 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
                 .padding(4)
                 .style(panel),
         );
+    }
+    if !app.preferences.widget_locked {
+        body = body.push(space().height(GRIP_ROOM));
     }
     body
 }

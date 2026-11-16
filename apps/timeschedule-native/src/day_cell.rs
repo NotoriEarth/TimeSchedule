@@ -90,14 +90,17 @@ pub fn view<'a>(
             .iter()
             .map(|item| line(item, width, &style))
             .collect::<Vec<_>>();
-        // Spare room goes to cut titles, top first.
-        let mut used = known;
+        // The completed count is kept before spare room goes to cut titles,
+        // top first.
+        let done = day.completed > 0 && fits(known + 1, known + 1);
+        let blocks = known + usize::from(done);
+        let mut used = blocks;
         for l in &mut lines {
-            if l.first != l.title && fits(used + 1, known) && wrap(l, width, &style) {
+            if l.first != l.title && fits(used + 1, blocks) && wrap(l, width, &style) {
                 used += 1;
             }
         }
-        if day.completed > 0 && fits(used + 1, known + 1) {
+        if done {
             last = Some(text_layout::fit_label_with_font(
                 &format!("완료 {}", day.completed),
                 width,
@@ -113,10 +116,7 @@ pub fn view<'a>(
             .iter()
             .map(|item| line(item, width, &style))
             .collect();
-        let titles: Vec<&str> = day.items[shown..]
-            .iter()
-            .map(|i| display_title(i))
-            .collect();
+        let titles: Vec<&str> = day.items[shown..].iter().map(display_title).collect();
         last = Some(summary(
             &titles,
             (pending - known) as u32,
@@ -306,13 +306,17 @@ pub fn summary(
         .map(|t| t.replace(['\n', '\r', '\t'], " "))
         .collect();
     let hidden = titles.len() as u32 + beyond;
+    // The count suffix shrinks as names are added, so a longer candidate can
+    // fit where a shorter one did not. Only the names themselves only grow.
     let mut best = None;
     for n in 1..=titles.len() {
-        let s = compose(&titles[..n].join(SEPARATOR), hidden - n as u32, completed);
-        if measure(&s) > width {
+        let names = titles[..n].join(SEPARATOR);
+        let s = compose(&names, hidden - n as u32, completed);
+        if measure(&s) <= width {
+            best = Some(s);
+        } else if measure(&names) > width {
             break;
         }
-        best = Some(s);
     }
     if let Some(s) = best {
         return s;
@@ -369,6 +373,14 @@ mod tests {
             summary(&["장보기"], 3, 1, 1000., 12., f),
             "장보기 +3 · 완료 1"
         );
+    }
+
+    #[test]
+    fn summary_tries_every_prefix_because_widths_are_not_monotonic() {
+        let f = Font::with_name("Malgun Gothic");
+        let width = measure("A · i", 12., f) + 0.1;
+        assert!(measure("A +1", 12., f) > width, "font precondition");
+        assert_eq!(summary(&["A", "i"], 0, 0, width, 12., f), "A · i");
     }
 
     #[test]
