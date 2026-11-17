@@ -668,3 +668,64 @@ fn category_schema_v5_preserves_v4_data() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn one_projects_records_of_a_day_share_one_calendar_line() {
+    let store = Storage::open(":memory:").unwrap();
+    let project = |title: &str| {
+        store
+            .save_project(ProjectInput {
+                id: None,
+                title: title.into(),
+                description: String::new(),
+                repo_path: String::new(),
+            })
+            .unwrap()
+            .id
+    };
+    let (first, second) = (project("타임스케줄"), project("견적앱"));
+    let record = |date: &str, title: &str, project: Option<&String>| {
+        store
+            .save_entry(EntryInput {
+                project_id: project.cloned(),
+                ..entry(date, title)
+            })
+            .unwrap()
+    };
+    for title in ["검색 개선", "CI 수정", "위젯 정리"] {
+        record("2026-11-17", title, Some(&first));
+    }
+    record("2026-11-17", "계산 오류", Some(&second));
+    record("2026-11-17", "혼자 쓴 메모", None);
+    record("2026-11-17", "또 다른 메모", None);
+    record("2026-11-18", "다음 날 작업", Some(&first));
+
+    let days = store.calendar_days("2026-11-17", "2026-11-18").unwrap();
+    // Three records of one project count as one item of the day.
+    assert_eq!((days[0].total, days[0].items.len()), (4, 4));
+    let group = days[0]
+        .items
+        .iter()
+        .find(|i| i.project_id.as_ref() == Some(&first))
+        .unwrap();
+    assert_eq!(group.count, 3);
+    assert!(["검색 개선", "CI 수정", "위젯 정리"].contains(&group.title.as_str()));
+    assert!(days[0]
+        .items
+        .iter()
+        .filter(|i| i.project_id.as_ref() != Some(&first))
+        .all(|i| i.count == 1));
+    assert_eq!((days[1].total, days[1].items[0].count), (1, 1));
+
+    let page = store.calendar_section("2026-11-17", 0, false).unwrap();
+    assert_eq!((page.total, page.items.len(), page.has_more), (4, 4, false));
+
+    let cards = store.project_day_entries("2026-11-17", &first).unwrap();
+    assert_eq!(cards.len(), 3);
+    assert!(cards.iter().all(|e| e.body == "원문은 상세에서만"));
+    assert!(cards.windows(2).all(|w| w[0].updated_at >= w[1].updated_at));
+    assert_eq!(
+        cards[0].id, group.id,
+        "the line is headed by the first card"
+    );
+}

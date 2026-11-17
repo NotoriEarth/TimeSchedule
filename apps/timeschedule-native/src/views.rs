@@ -57,7 +57,7 @@ pub(crate) fn quiet<'a>(value: impl Into<String>) -> Element<'a, Message> {
 pub(crate) fn title<'a>(value: impl Into<String>) -> Element<'a, Message> {
     text(value.into()).size(23).into()
 }
-fn kind_label(value: &str) -> &'static str {
+pub(crate) fn kind_label(value: &str) -> &'static str {
     KIND_VALUES
         .iter()
         .position(|v| *v == value)
@@ -105,6 +105,23 @@ pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
             crate::calendar_ui::detail_view(app),
             Some(crate::calendar_ui::message(
                 crate::calendar_ui::Action::CloseDetail,
+            )),
+            true,
+        );
+    }
+    // Cards stay under the editor opened from one of them, and are shown
+    // again when it closes.
+    let cards = app
+        .calendar
+        .group
+        .as_ref()
+        .is_some_and(|g| g.quick == quick);
+    if cards && !(app.editor.is_some() && app.editor_in_quick == quick) {
+        return modal(
+            base,
+            crate::calendar_ui::group_view(app),
+            Some(crate::calendar_ui::message(
+                crate::calendar_ui::Action::CloseGroup,
             )),
             true,
         );
@@ -309,6 +326,7 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
             .spacing(3),
             scrollable(items)
                 .id(format!("day-{key}"))
+                .spacing(crate::calendar_ui::SCROLL_GAP)
                 .height(Length::Fill)
         ]
         .spacing(7)
@@ -417,14 +435,21 @@ pub(crate) fn records(app: &App) -> Element<'_, Message> {
     if app.more {
         c = c.push(more(app));
     }
-    scrollable(c).id("records-page").height(Length::Fill).into()
+    scrollable(c)
+        .id("records-page")
+        .spacing(crate::calendar_ui::SCROLL_GAP)
+        .height(Length::Fill)
+        .into()
 }
 pub(crate) fn projects(app: &App) -> Element<'_, Message> {
     let mut list = column![control("모든 프로젝트", Message::Project(None))].spacing(5);
     for p in &app.snapshot.projects {
         list = list.push(control(&p.title, Message::Project(Some(p.id.clone()))));
     }
-    let mut c = column![scrollable(list).height(110)].spacing(12);
+    let mut c = column![scrollable(list)
+        .spacing(crate::calendar_ui::SCROLL_GAP)
+        .height(110)]
+    .spacing(12);
     if let Some(p) = app
         .snapshot
         .projects
@@ -468,6 +493,7 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
     }
     scrollable(c)
         .id("projects-page")
+        .spacing(crate::calendar_ui::SCROLL_GAP)
         .height(Length::Fill)
         .into()
 }
@@ -479,7 +505,10 @@ pub(crate) fn tasks(app: &App) -> Element<'_, Message> {
     for task in app.snapshot.tasks.iter().filter(|t| t.date.is_none()) {
         c = c.push(paper(task_card(app, task)));
     }
-    scrollable(c).height(Length::Fill).into()
+    scrollable(c)
+        .spacing(crate::calendar_ui::SCROLL_GAP)
+        .height(Length::Fill)
+        .into()
 }
 pub(crate) fn notes(app: &App) -> Element<'_, Message> {
     let mut c = column![quiet("제목을 선택하면 본문을 불러옵니다.")].spacing(10);
@@ -500,7 +529,10 @@ pub(crate) fn notes(app: &App) -> Element<'_, Message> {
             }),
         ));
     }
-    scrollable(c).height(Length::Fill).into()
+    scrollable(c)
+        .spacing(crate::calendar_ui::SCROLL_GAP)
+        .height(Length::Fill)
+        .into()
 }
 pub(crate) fn search_results(app: &App) -> Element<'_, Message> {
     let mut c = column![title("검색 결과"), quiet("최대 50개 · 제목 또는 본문 검색")].spacing(10);
@@ -530,7 +562,10 @@ pub(crate) fn search_results(app: &App) -> Element<'_, Message> {
     if !app.searching && app.search_results.is_empty() {
         c = c.push(quiet("일치하는 기록이 없습니다."));
     }
-    scrollable(c).height(Length::Fill).into()
+    scrollable(c)
+        .spacing(crate::calendar_ui::SCROLL_GAP)
+        .height(Length::Fill)
+        .into()
 }
 pub(crate) fn settings(app: &App) -> Element<'_, Message> {
     let mut c = column![
@@ -618,7 +653,10 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         ));
     c = c.push(crate::widget_settings::view(app));
     c=c.push(title("문서 저장소와 외부 연결")).push(text("개발 기록은 독립된 TimeScheduleData 문서 저장소에 먼저 보관합니다. 저장 경로·문서 가져오기·Space 선택 설정은 docs/document-vault.md를 참고하세요. Space는 기본 꺼짐이며 모바일·서버 동기화는 아직 제공하지 않습니다. 다이어리와 문서의 수동 편집은 자동 동기화하지 않습니다.").size(14)).push(quiet("상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."));
-    scrollable(paper(c)).height(Length::Fill).into()
+    scrollable(paper(c))
+        .spacing(crate::calendar_ui::SCROLL_GAP)
+        .height(Length::Fill)
+        .into()
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectChoice {
@@ -630,7 +668,7 @@ impl std::fmt::Display for ProjectChoice {
         write!(f, "{}", self.title)
     }
 }
-fn editor_view(app: &App) -> Element<'_, Message> {
+pub(crate) fn editor_view(app: &App) -> Element<'_, Message> {
     let e = app.editor.as_ref().unwrap();
     let form = &e.form;
     let input =
@@ -785,17 +823,20 @@ fn editor_view(app: &App) -> Element<'_, Message> {
     if !e.error.is_empty() {
         fields = fields.push(text(&e.error).size(13).style(theme::danger));
     }
+    // Delete sits at the end of the form, away from the corner where the
+    // detail view has `수정` and this view has `저장하기`.
+    if form.id.is_some() && !e.saving {
+        fields = fields.push(space().height(6)).push(row![
+            space().width(Length::Fill),
+            button(text(format!("이 {} 삭제", form.kind.label())).size(12))
+                .style(button::danger)
+                .on_press(Message::Delete)
+        ]);
+    }
     let mut footer = Row::new().spacing(8).align_y(Alignment::Center);
     if e.saving {
         footer = footer.push(quiet("저장 중…"));
     } else {
-        if form.id.is_some() {
-            footer = footer.push(
-                button(text("삭제").size(13))
-                    .style(button::danger)
-                    .on_press(Message::Delete),
-            );
-        }
         footer = footer
             .push(quiet(if e.dirty() { "미저장 변경" } else { "" }))
             .push(space().width(Length::Fill))
@@ -820,6 +861,7 @@ fn editor_view(app: &App) -> Element<'_, Message> {
         ],
         scrollable(fields)
             .id(format!("editor-fields-{}", e.generation))
+            .spacing(crate::calendar_ui::SCROLL_GAP)
             .height(Length::Fill),
         footer
     ]

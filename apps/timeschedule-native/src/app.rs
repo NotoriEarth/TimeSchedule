@@ -603,7 +603,11 @@ impl App {
             move |s| worker::snapshot(s, &scope),
             move |result| Message::Loaded(generation, result),
         );
-        Task::batch([snapshot, detail, self.load_quick(false)])
+        // Cards follow edits, deletions and newly delivered records.
+        let group = self.calendar.group.as_ref().map_or_else(Task::none, |g| {
+            crate::calendar_ui::load_group(self, g.date.clone(), g.project_id.clone(), g.quick)
+        });
+        Task::batch([snapshot, detail, group, self.load_quick(false)])
     }
     fn poll_record_inbox(&mut self) -> Task<Message> {
         if !self.records_due
@@ -875,6 +879,13 @@ impl App {
             {
                 return crate::calendar_ui::update(self, crate::calendar_ui::Action::CloseDetail);
             }
+            if self.editor.is_none()
+                && self.calendar.group.as_ref().is_some_and(|g| {
+                    (*id == self.manager && !g.quick) || (Some(*id) == self.quick_window && g.quick)
+                })
+            {
+                return crate::calendar_ui::update(self, crate::calendar_ui::Action::CloseGroup);
+            }
         }
         // Background completions are allowed during modals; all unrelated user edits are blocked.
         if self
@@ -889,6 +900,7 @@ impl App {
                     | Message::Escape
                     | Message::EscapeWindow(_)
                     | Message::Calendar(crate::calendar_ui::Action::QuickPage(..))
+                    | Message::Calendar(crate::calendar_ui::Action::GroupLoaded(..))
                     | Message::QuickReady(_)
                     | Message::PopupPositioned(..)
                     | Message::Jump(crate::month_jump::JumpMessage::Ready(_))
@@ -1030,6 +1042,11 @@ impl App {
                     self.quick_date = None;
                     self.quick_generation += 1;
                     self.quick_loading = false;
+                    // Cards and a card edit still loading belonged to it.
+                    if self.calendar.group.as_ref().is_some_and(|g| g.quick) {
+                        self.calendar.group = None;
+                        self.calendar.generation += 1;
+                    }
 
                     if self.editor_in_quick {
                         self.editor_in_quick = false;

@@ -29,6 +29,8 @@ impl App {
         self.calendar.completed_offset = 0;
         self.calendar.completed_loading = false;
         self.calendar.detail = None;
+        // Cards opened in the diary window stay; the day window's go with it.
+        self.calendar.group.take_if(|g| g.quick);
         self.calendar.generation += 1;
 
         self.error.clear();
@@ -106,6 +108,8 @@ impl App {
 
     pub(crate) fn close_quick(&mut self) -> Task<Message> {
         self.calendar.detail = None;
+        // Cards opened in the diary window stay; the day window's go with it.
+        self.calendar.group.take_if(|g| g.quick);
         self.calendar.generation += 1;
         self.quick_date = None;
 
@@ -195,10 +199,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
         )
     ]
     .spacing(12);
-    container(column![scrollable(list).height(Length::Fill), pager].spacing(12))
-        .padding(16)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(theme::root)
-        .into()
+    container(
+        column![
+            scrollable(list)
+                .spacing(crate::calendar_ui::SCROLL_GAP)
+                .height(Length::Fill),
+            pager
+        ]
+        .spacing(12),
+    )
+    .padding(16)
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .style(theme::root)
+    .into()
 }
