@@ -1,0 +1,32 @@
+[
+  {
+    "file": "01-SessionStart.json",
+    "outcome": "activity",
+    "kind": "session_start"
+  },
+  {
+    "file": "02-UserPromptSubmit.json",
+    "outcome": "activity",
+    "kind": "user_prompt"
+  },
+  {
+    "file": "03-PreToolUse.json",
+    "outcome": "excluded",
+    "reason": "redundant_event"
+  },
+  {
+    "file": "04-PostToolUseFailure.json",
+    "outcome": "activity",
+    "kind": "tool_result"
+  },
+  {
+    "file": "05-Stop.json",
+    "outcome": "activity",
+    "kind": "turn_end"
+  },
+  {
+    "file": "06-SessionEnd.json",
+    "outcome": "activity",
+    "kind": "session_end"
+  }
+]

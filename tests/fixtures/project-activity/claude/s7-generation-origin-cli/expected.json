@@ -1,0 +1,42 @@
+[
+  {
+    "file": "01-SessionStart.json",
+    "outcome": "excluded",
+    "reason": "generation_origin"
+  },
+  {
+    "file": "02-UserPromptSubmit.json",
+    "outcome": "excluded",
+    "reason": "generation_origin"
+  },
+  {
+    "file": "03-PreToolUse.json",
+    "outcome": "excluded",
+    "reason": "generation_origin"
+  },
+  {
+    "file": "04-PostToolUse.json",
+    "outcome": "excluded",
+    "reason": "generation_origin"
+  },
+  {
+    "file": "05-PreToolUse.json",
+    "outcome": "excluded",
+    "reason": "generation_origin"
+  },
+  {
+    "file": "06-PostToolUse.json",
+    "outcome": "excluded",
+    "reason": "generation_origin"
+  },
+  {
+    "file": "07-Stop.json",
+    "outcome": "excluded",
+    "reason": "generation_origin"
+  },
+  {
+    "file": "08-SessionEnd.json",
+    "outcome": "excluded",
+    "reason": "generation_origin"
+  }
+]

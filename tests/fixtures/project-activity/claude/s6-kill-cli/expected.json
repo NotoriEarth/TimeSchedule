@@ -1,0 +1,12 @@
+[
+  {
+    "file": "01-SessionStart.json",
+    "outcome": "activity",
+    "kind": "session_start"
+  },
+  {
+    "file": "02-UserPromptSubmit.json",
+    "outcome": "activity",
+    "kind": "user_prompt"
+  }
+]
