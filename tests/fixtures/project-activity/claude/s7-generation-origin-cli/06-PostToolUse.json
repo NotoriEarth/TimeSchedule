@@ -1,0 +1,64 @@
+{
+  "capture_schema": 1,
+  "capture_id": "382ae21a-fdbd-4459-addd-66ea5a3fd5e2",
+  "source": "claude-code",
+  "tool_version": "claude-code-cli 2.1.325",
+  "captured_at": "2026-11-17T22:49:24.803Z",
+  "origin": "timeschedule_generation",
+  "payload_bytes": 810,
+  "payload": {
+    "session_id": "session-0001",
+    "transcript_path": "C:\\Users\\lab-user\\.claude\\projects\\C--LSH--capture-lab-m0-sample\\session-0001.jsonl",
+    "cwd": "C:\\lab\\m0-sample",
+    "prompt_id": "id-0001",
+    "permission_mode": "acceptEdits",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Write",
+    "tool_input": {
+      "file_path": "C:\\lab\\m0-sample\\note.txt",
+      "content": "hello\n"
+    },
+    "tool_response": {
+      "type": "update",
+      "filePath": "C:\\lab\\m0-sample\\note.txt",
+      "content": "hello\n",
+      "structuredPatch": [
+        {
+          "oldStart": 1,
+          "oldLines": 2,
+          "newStart": 1,
+          "newLines": 1,
+          "lines": [
+            " hello",
+            "-again"
+          ]
+        }
+      ],
+      "originalFile": "hello\nagain\n",
+      "userModified": false
+    },
+    "tool_use_id": "toolu_01BMnWz7d3ThHXHnYCZWZJcg",
+    "duration_ms": 11
+  },
+  "payload_error": null,
+  "env_names": [
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+    "CLAUDE_PROJECT_DIR"
+  ],
+  "env_allowlisted": {
+    "CLAUDE_CODE_ENTRYPOINT": "sdk-cli",
+    "CLAUDECODE": "1"
+  },
+  "probe_elapsed_ms": 29
+}

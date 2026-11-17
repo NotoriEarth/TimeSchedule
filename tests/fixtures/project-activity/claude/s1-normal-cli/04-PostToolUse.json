@@ -1,0 +1,53 @@
+{
+  "capture_schema": 1,
+  "capture_id": "9bb18e15-a0df-4c9f-97d5-2d9b9e4d466b",
+  "source": "claude-code",
+  "tool_version": "claude-code-cli 2.1.325",
+  "captured_at": "2026-11-17T22:48:05.003Z",
+  "origin": "tool",
+  "payload_bytes": 650,
+  "payload": {
+    "session_id": "session-0001",
+    "transcript_path": "C:\\Users\\lab-user\\.claude\\projects\\C--LSH--capture-lab-m0-sample\\session-0001.jsonl",
+    "cwd": "C:\\lab\\m0-sample",
+    "prompt_id": "id-0001",
+    "permission_mode": "acceptEdits",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Glob",
+    "tool_input": {
+      "pattern": "note.txt",
+      "path": "C:\\lab\\m0-sample"
+    },
+    "tool_response": {
+      "filenames": [],
+      "durationMs": 51,
+      "numFiles": 0,
+      "truncated": false,
+      "totalMatches": 0,
+      "countIsComplete": true
+    },
+    "tool_use_id": "toolu_01V3qHi9dexueKmDyctPzs1f",
+    "duration_ms": 52
+  },
+  "payload_error": null,
+  "env_names": [
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+    "CLAUDE_PROJECT_DIR"
+  ],
+  "env_allowlisted": {
+    "CLAUDE_CODE_ENTRYPOINT": "sdk-cli",
+    "CLAUDECODE": "1"
+  },
+  "probe_elapsed_ms": 30
+}

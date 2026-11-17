@@ -1,0 +1,42 @@
+{
+  "capture_schema": 1,
+  "capture_id": "a2137f0f-adcc-4fc4-b1a5-774b9f1b4a06",
+  "source": "claude-code",
+  "tool_version": "claude-code-cli 2.1.325",
+  "captured_at": "2026-11-17T22:48:07.669Z",
+  "origin": "tool",
+  "payload_bytes": 648,
+  "payload": {
+    "session_id": "session-0001",
+    "transcript_path": "C:\\Users\\lab-user\\.claude\\projects\\C--LSH--capture-lab-m0-sample\\session-0001.jsonl",
+    "cwd": "C:\\lab\\m0-sample",
+    "prompt_id": "id-0001",
+    "permission_mode": "acceptEdits",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "Stop",
+    "stop_hook_active": false,
+    "last_assistant_message": "`note.txt` 파일을 `C:\\lab\\m0-sample\\note.txt`에 만들고 `hello` 한 줄을 써 두었습니다. 같은 이름의 파일은 없었으므로 덮어쓴 것은 없습니다.",
+    "background_tasks": [],
+    "session_crons": []
+  },
+  "payload_error": null,
+  "env_names": [
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+    "CLAUDE_PROJECT_DIR"
+  ],
+  "env_allowlisted": {
+    "CLAUDE_CODE_ENTRYPOINT": "sdk-cli",
+    "CLAUDECODE": "1"
+  },
+  "probe_elapsed_ms": 28
+}

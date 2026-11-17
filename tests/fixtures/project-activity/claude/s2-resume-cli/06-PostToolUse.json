@@ -1,0 +1,67 @@
+{
+  "capture_schema": 1,
+  "capture_id": "fbbc2a11-d746-484b-961b-c0c99cfb4d36",
+  "source": "claude-code",
+  "tool_version": "claude-code-cli 2.1.325",
+  "captured_at": "2026-11-17T22:49:00.171Z",
+  "origin": "tool",
+  "payload_bytes": 889,
+  "payload": {
+    "session_id": "session-0001",
+    "transcript_path": "C:\\Users\\lab-user\\.claude\\projects\\C--LSH--capture-lab-m0-sample\\session-0001.jsonl",
+    "cwd": "C:\\lab\\m0-sample",
+    "prompt_id": "id-0001",
+    "permission_mode": "acceptEdits",
+    "effort": {
+      "level": "medium"
+    },
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Edit",
+    "tool_input": {
+      "file_path": "C:\\lab\\m0-sample\\note.txt",
+      "old_string": "hello\n",
+      "new_string": "hello\nagain\n",
+      "replace_all": false
+    },
+    "tool_response": {
+      "filePath": "C:\\lab\\m0-sample\\note.txt",
+      "oldString": "hello\n",
+      "newString": "hello\nagain\n",
+      "originalFile": "hello\n",
+      "structuredPatch": [
+        {
+          "oldStart": 1,
+          "oldLines": 1,
+          "newStart": 1,
+          "newLines": 2,
+          "lines": [
+            " hello",
+            "+again"
+          ]
+        }
+      ],
+      "userModified": false,
+      "replaceAll": false
+    },
+    "tool_use_id": "toolu_01Krtu5jQ7JukNPTFA3mMFQB",
+    "duration_ms": 13
+  },
+  "payload_error": null,
+  "env_names": [
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_EFFORT",
+    "CLAUDE_PID",
+    "CLAUDE_PROJECT_DIR"
+  ],
+  "env_allowlisted": {
+    "CLAUDE_CODE_ENTRYPOINT": "sdk-cli",
+    "CLAUDECODE": "1"
+  },
+  "probe_elapsed_ms": 28
+}

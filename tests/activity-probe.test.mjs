@@ -16,9 +16,13 @@ function scratch(t) {
   return dir;
 }
 
+// The suite may itself run inside Claude Code or Codex; their variables must not leak into the probe.
+const baseEnv = Object.fromEntries(Object.entries(process.env)
+  .filter(([name]) => !/^(CLAUDE|CODEX|TIMESCHEDULE_ORIGIN)/i.test(name)));
+
 function run(args, input, env = {}) {
   return spawnSync(process.execPath, [PROBE, ...args], {
-    input, encoding: 'utf8', windowsHide: true, env: { ...process.env, TIMESCHEDULE_ORIGIN: '', ...env },
+    input, encoding: 'utf8', windowsHide: true, env: { ...baseEnv, ...env },
   });
 }
 
@@ -82,13 +86,19 @@ test('probe_marks_generation_origin', t => {
 test('probe_records_env_names_not_values', t => {
   const dir = scratch(t);
   const r = run(['--source', 'codex', '--out', dir], '{"hook_event_name":"Stop"}',
-    { CODEX_SECRET_X: 'zzz-secret-value', CLAUDE_CODE_ENTRYPOINT: 'cli', UNRELATED_NAME: 'u' });
+    { CODEX_SECRET_X: 'zzz-secret-value', CLAUDE_CODE_ENTRYPOINT: 'cli', UNRELATED_NAME: 'u',
+      CLAUDE_CODE_DESKTOP_APP_VERSION: '9.9.9', CLAUDE_AGENT_SDK_VERSION: '8.8.8' });
   assert.equal(r.status, 0, r.stderr);
   const { record, text } = onlyRecord(dir);
   assert.ok(record.env_names.includes('CODEX_SECRET_X'));
   assert.ok(!record.env_names.includes('UNRELATED_NAME'));
   assert.ok(!text.includes('zzz-secret-value'));
   assert.equal(record.env_allowlisted.CLAUDE_CODE_ENTRYPOINT, 'cli');
+  // Version variables are the only way to tell which client build ran the hook.
+  assert.equal(record.env_allowlisted.CLAUDE_CODE_DESKTOP_APP_VERSION, '9.9.9');
+  assert.equal(record.env_allowlisted.CLAUDE_AGENT_SDK_VERSION, '8.8.8');
+  assert.deepEqual(Object.keys(record.env_allowlisted).sort(),
+    ['CLAUDE_AGENT_SDK_VERSION', 'CLAUDE_CODE_DESKTOP_APP_VERSION', 'CLAUDE_CODE_ENTRYPOINT']);
 });
 
 test('probe_fails_visibly_when_out_is_a_file', t => {

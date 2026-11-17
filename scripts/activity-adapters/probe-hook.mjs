@@ -11,7 +11,12 @@ import path from 'node:path';
 
 const MAX_PAYLOAD_BYTES = 1048576;
 const SOURCES = new Set(['claude-code', 'codex']);
-const ENV_VALUE_ALLOWLIST = ['CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_REMOTE', 'CLAUDECODE'];
+// Values are recorded only for these names: they identify the surface and client build
+// and carry no credential. Every other CLAUDE*/CODEX* variable is recorded by name only.
+const ENV_VALUE_ALLOWLIST = [
+  'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_REMOTE', 'CLAUDECODE',
+  'CLAUDE_CODE_DESKTOP_APP_VERSION', 'CLAUDE_AGENT_SDK_VERSION',
+];
 
 function parseArgs(argv) {
   const options = {};
