@@ -63,11 +63,19 @@ fn diary_calendar_displays_project_and_task_title() {
 fn overflowing_calendar_fixture(count: usize) -> App {
     let mut app = calendar_record_fixture();
     for index in 1..count {
-        let mut form = Form::new(
-            Kind::Entry,
-            app.selected.to_string(),
-            Some(app.snapshot.projects[0].id.clone()),
-        );
+        // One project each: records of the same project would share a line.
+        let project = app
+            .store
+            .as_ref()
+            .unwrap()
+            .save_project(timeschedule_core::diary::ProjectInput {
+                id: None,
+                title: "TS".into(),
+                description: String::new(),
+                repo_path: String::new(),
+            })
+            .unwrap();
+        let mut form = Form::new(Kind::Entry, app.selected.to_string(), Some(project.id));
         form.title = format!("기록{index}");
         form.save(app.store.as_ref().unwrap()).unwrap();
     }
@@ -3561,4 +3569,140 @@ fn weekend_overrides_do_not_recolor_categories() {
     app.preferences.widget.dark.sunday = Some("#FFFF00".into());
     app.preferences.widget.dark.saturday = Some("#00FF00".into());
     assert_eq!(crate::calendar_ui::color(&app, &id), before);
+}
+
+#[test]
+fn one_projects_records_share_a_line_and_open_as_cards() {
+    use crate::calendar_ui::{message, open_message, Action};
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let project = store.list_projects().unwrap()[0].id.clone();
+    let mut form = Form::new(Kind::Entry, app.selected.to_string(), Some(project.clone()));
+    form.title = "둘째기록".into();
+    form.body = (1..=9)
+        .map(|n| format!("본문 {n}번째 줄"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    form.save(&store).unwrap();
+    run_message(&mut app, Message::Load);
+
+    let day = selected_day(&app).clone();
+    let item = day
+        .items
+        .iter()
+        .find(|i| i.project_id.as_ref() == Some(&project))
+        .unwrap()
+        .clone();
+    assert_eq!((day.total, item.count), (1, 2), "two records, one line");
+    let labels = calendar_texts(
+        crate::calendar_ui::day_items(&app, Some(&day), 200., 60., 12., true),
+        Size::new(200., 60.),
+    );
+    assert!(labels.iter().any(|s| s == "+1"), "{labels:?}");
+
+    run_message(&mut app, open_message(&item, false));
+    assert!(app.calendar.detail.is_none());
+    let group = app.calendar.group.as_ref().unwrap();
+    assert_eq!(group.entries.len(), 2);
+    let long = group
+        .entries
+        .iter()
+        .find(|e| e.title == "둘째기록")
+        .unwrap()
+        .id
+        .clone();
+    let cards =
+        |app: &App| calendar_texts(crate::calendar_ui::group_view(app), Size::new(520., 900.));
+    let folded = cards(&app);
+    for expected in ["TS", "연동기록", "둘째기록", "전체 보기", "수정", "닫기"] {
+        assert!(
+            folded.iter().any(|s| s == expected),
+            "{expected}: {folded:?}"
+        );
+    }
+    assert!(!folded.iter().any(|s| s.contains("9번째")), "{folded:?}");
+    run_message(&mut app, message(Action::ToggleCard(long.clone())));
+    assert!(cards(&app).iter().any(|s| s.contains("9번째")));
+
+    // Editing a card keeps the cards underneath and refreshes them on save.
+    run_message(&mut app, message(Action::EditCard(long.clone())));
+    assert_eq!(app.editor.as_ref().unwrap().form.id.as_ref(), Some(&long));
+    run_message(&mut app, Message::Field(Field::Title("고친기록".into())));
+    run_message(&mut app, Message::Save);
+    assert!(app.editor.is_none());
+    let group = app.calendar.group.as_ref().unwrap();
+    assert!(group.entries.iter().any(|e| e.title == "고친기록"));
+    assert!(
+        group.unfolded.contains(&long),
+        "unfolded card stays unfolded"
+    );
+
+    // Deleting down to nothing closes the cards.
+    for left in [1, 0] {
+        let id = app.calendar.group.as_ref().unwrap().entries[0].id.clone();
+        run_message(&mut app, message(Action::EditCard(id)));
+        run_message(&mut app, Message::Delete);
+        run_message(&mut app, Message::ConfirmDelete);
+        assert_eq!(
+            app.calendar.group.as_ref().map_or(0, |g| g.entries.len()),
+            left
+        );
+    }
+}
+
+#[test]
+fn delete_is_not_where_edit_and_save_are() {
+    let mut app = calendar_record_fixture();
+    let item = selected_day(&app).items[0].clone();
+    run_message(&mut app, crate::calendar_ui::open_message(&item, false));
+    run_message(
+        &mut app,
+        crate::calendar_ui::message(crate::calendar_ui::Action::EditDetail),
+    );
+    let labels = calendar_texts(crate::views::editor_view(&app), Size::new(520., 900.));
+    let at = |s: &str| {
+        labels
+            .iter()
+            .position(|l| l == s)
+            .unwrap_or_else(|| panic!("{s}: {labels:?}"))
+    };
+    // Reading order: the delete control ends the form, before the footer.
+    assert!(at("이 기록 삭제") < at("취소") && at("취소") < at("저장하기"));
+    assert!(!labels.iter().any(|l| l == "삭제"));
+}
+
+#[test]
+fn cards_belong_to_the_window_they_were_opened_in() {
+    use crate::calendar_ui::{message, Action};
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let project = store.list_projects().unwrap()[0].id.clone();
+    let mut form = Form::new(Kind::Entry, app.selected.to_string(), Some(project.clone()));
+    form.title = "둘째기록".into();
+    form.save(&store).unwrap();
+    run_message(&mut app, Message::Load);
+    let date = app.selected.to_string();
+    let open = |quick| message(Action::OpenGroup(date.clone(), project.clone(), quick));
+
+    // Diary cards survive the day window closing.
+    run_message(&mut app, open(false));
+    let quick = window::Id::unique();
+    app.quick_window = Some(quick);
+    app.quick_date = Some(app.selected);
+    let _ = app.close_quick();
+    assert!(app.calendar.group.as_ref().is_some_and(|g| !g.quick));
+
+    // Day window cards go with it, and a card edit that was still loading
+    // does not open an editor in a window that is gone.
+    app.quick_window = Some(quick);
+    app.quick_date = Some(app.selected);
+    run_message(&mut app, open(true));
+    let group = app.calendar.group.as_ref().unwrap();
+    assert!(group.quick);
+    let id = group.entries[0].id.clone();
+    let loading = app.update(message(Action::EditCard(id)));
+    let _ = app.update(Message::WindowClosed(quick));
+    assert!(app.calendar.group.is_none());
+    run_task(&mut app, loading);
+    assert!(app.editor.is_none());
 }

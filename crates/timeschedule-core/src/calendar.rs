@@ -39,6 +39,9 @@ pub struct CalendarItem {
     pub end_time: Option<String>,
     pub all_day: bool,
     pub completed: bool,
+    /// Records this line stands for: the same project's records of one day
+    /// share a line, headed by the most recently changed one. 1 otherwise.
+    pub count: u32,
 }
 #[derive(Debug, Clone, Default)]
 pub struct CalendarDay {
@@ -431,14 +434,20 @@ impl Storage {
 }
 
 // The union selects headers only; original bodies stay in source tables until opened.
+// One project's records of a day become one head: the latest, with their count.
 fn headers() -> String {
     format!("WITH heads AS (
- SELECT e.id,0 AS source,e.date,e.title,NULL AS project_id,'' AS project_title,'' AS project_short_name,'' AS short_title,'{SCHEDULE_CATEGORY}' AS category_id,e.start_time,e.end_time,e.all_day,e.completed,e.updated_at FROM events e WHERE e.date BETWEEN ?1 AND ?2
- UNION ALL SELECT t.id,1,t.date,t.title,NULL,'','','','{SCHEDULE_CATEGORY}',d.start_time,d.end_time,COALESCE(d.all_day,1),t.completed,t.updated_at FROM tasks t LEFT JOIN task_details d ON d.task_id=t.id WHERE t.date BETWEEN ?1 AND ?2
- UNION ALL SELECT e.id,2,e.date,e.title,e.project_id,COALESCE(p.title,''),COALESCE(pv.short_name,''),COALESCE(v.short_title,''),COALESCE(v.category_id,'{RECORD_CATEGORY}'),NULL,NULL,1,0,e.updated_at FROM diary_entries e LEFT JOIN projects p ON p.id=e.project_id LEFT JOIN project_display pv ON pv.project_id=p.id LEFT JOIN entry_display v ON v.entry_id=e.id WHERE e.date BETWEEN ?1 AND ?2
+ SELECT e.id,0 AS source,e.date,e.title,NULL AS project_id,'' AS project_title,'' AS project_short_name,'' AS short_title,'{SCHEDULE_CATEGORY}' AS category_id,e.start_time,e.end_time,e.all_day,e.completed,e.updated_at,1 AS grouped FROM events e WHERE e.date BETWEEN ?1 AND ?2
+ UNION ALL SELECT t.id,1,t.date,t.title,NULL,'','','','{SCHEDULE_CATEGORY}',d.start_time,d.end_time,COALESCE(d.all_day,1),t.completed,t.updated_at,1 FROM tasks t LEFT JOIN task_details d ON d.task_id=t.id WHERE t.date BETWEEN ?1 AND ?2
+ UNION ALL SELECT id,2,date,title,project_id,project_title,project_short_name,short_title,category_id,NULL,NULL,1,0,updated_at,grouped FROM (
+  SELECT e.id,e.date,e.title,e.project_id,COALESCE(p.title,'') AS project_title,COALESCE(pv.short_name,'') AS project_short_name,COALESCE(v.short_title,'') AS short_title,COALESCE(v.category_id,'{RECORD_CATEGORY}') AS category_id,e.updated_at,
+   COUNT(*) OVER day_project AS grouped,ROW_NUMBER() OVER (day_project ORDER BY e.updated_at DESC,e.id) AS place
+  FROM diary_entries e LEFT JOIN projects p ON p.id=e.project_id LEFT JOIN project_display pv ON pv.project_id=p.id LEFT JOIN entry_display v ON v.entry_id=e.id WHERE e.date BETWEEN ?1 AND ?2
+  WINDOW day_project AS (PARTITION BY e.date,COALESCE(e.project_id,e.id))
+ ) WHERE place=1
 ), ordered AS (SELECT heads.*,c.position FROM heads JOIN calendar_categories c ON c.id=heads.category_id)")
 }
-const COLUMNS:&str="id,source,date,title,project_id,project_title,project_short_name,short_title,category_id,start_time,end_time,all_day,completed";
+const COLUMNS:&str="id,source,date,title,project_id,project_title,project_short_name,short_title,category_id,start_time,end_time,all_day,completed,grouped";
 const ORDER:&str="completed,position,all_day DESC,start_time,CASE WHEN source=2 THEN updated_at END DESC,title COLLATE NOCASE,source,id";
 fn item(r: &Row<'_>) -> rusqlite::Result<CalendarItem> {
     Ok(CalendarItem {
@@ -459,10 +468,11 @@ fn item(r: &Row<'_>) -> rusqlite::Result<CalendarItem> {
         end_time: r.get(10)?,
         all_day: r.get(11)?,
         completed: r.get(12)?,
+        count: r.get(13)?,
     })
 }
 fn counts(c: &Connection, from: &str, to: &str) -> Result<BTreeMap<String, CalendarDay>, String> {
-    let mut q=c.prepare("SELECT date,count(*),sum(completed) FROM (SELECT date,completed FROM events WHERE date BETWEEN ?1 AND ?2 UNION ALL SELECT date,completed FROM tasks WHERE date BETWEEN ?1 AND ?2 UNION ALL SELECT date,0 FROM diary_entries WHERE date BETWEEN ?1 AND ?2) GROUP BY date").map_err(database_error)?;
+    let mut q=c.prepare("SELECT date,count(*),sum(completed) FROM (SELECT date,completed FROM events WHERE date BETWEEN ?1 AND ?2 UNION ALL SELECT date,completed FROM tasks WHERE date BETWEEN ?1 AND ?2 UNION ALL SELECT date,0 FROM diary_entries WHERE date BETWEEN ?1 AND ?2 GROUP BY date,COALESCE(project_id,id)) GROUP BY date").map_err(database_error)?;
     let rows = q
         .query_map(params![from, to], |r| {
             let date: String = r.get(0)?;

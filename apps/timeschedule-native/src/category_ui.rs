@@ -566,7 +566,9 @@ fn delete_view(app: &App) -> Element<'_, Message> {
     }
     content = content.push(text(&state.error).size(13).style(theme::danger));
     column![
-        scrollable(content).height(Length::Fill),
+        scrollable(content)
+            .spacing(crate::calendar_ui::SCROLL_GAP)
+            .height(Length::Fill),
         row![
             cancel,
             space().width(Length::Fill),

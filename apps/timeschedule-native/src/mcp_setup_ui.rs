@@ -534,8 +534,8 @@ pub fn view(state: &State) -> Element<'_, Message> {
             button("등록 적용").padding(8).on_press_maybe((enabled && state.preview.is_some()).then_some(msg(Action::Register))),
             button("연결 검사").padding(8).on_press_maybe(enabled.then_some(msg(Action::Check)))
         ].spacing(8).wrap(),
-        scrollable(text(if state.status.is_empty() { "등록 전 변경 내용을 미리 확인할 수 있습니다." } else { &state.status }).size(13)).height(52).width(Length::Fill),
-        scrollable(text(preview).size(13)).height(112).width(Length::Fill),
+        scrollable(text(if state.status.is_empty() { "등록 전 변경 내용을 미리 확인할 수 있습니다." } else { &state.status }).size(13)).spacing(crate::calendar_ui::SCROLL_GAP).height(52).width(Length::Fill),
+        scrollable(text(preview).size(13)).spacing(crate::calendar_ui::SCROLL_GAP).height(112).width(Length::Fill),
         text("ChatGPT Desktop·Codex·Claude Code는 최신 버전을 사용하세요. Claude Desktop은 연결 중에만 작은 중계 프로세스를 사용합니다.").size(12),
         text("ChatGPT Desktop은 Codex와 기본 설정을 공유합니다. 등록 후 ChatGPT의 설정 → MCP servers에서 Restart하세요. 웹·클라우드 연결은 별도입니다.").size(12),
         text("이 기능은 로컬 일정 연결입니다. 다른 PC로 일정·다이어리를 옮기는 기능은 별도입니다.").size(12)

@@ -189,6 +189,19 @@ impl Storage {
         validate_id(id)?;
         self.connection()?.query_row("SELECT id,project_id,date,kind,title,body,source_url,source_ref,source_body,updated_at FROM diary_entries WHERE id=?1", [id], entry_row).map_err(database_error)
     }
+    /// The records one calendar line stands for, latest change first.
+    pub fn project_day_entries(&self, date: &str, project_id: &str) -> Result<Vec<Entry>, String> {
+        validate_date(date)?;
+        validate_id(project_id)?;
+        let c = self.connection()?;
+        let mut q=c.prepare("SELECT id,project_id,date,kind,title,body,source_url,source_ref,source_body,updated_at FROM diary_entries WHERE date=?1 AND project_id=?2 ORDER BY updated_at DESC,id LIMIT 50").map_err(database_error)?;
+        let rows = q
+            .query_map(params![date, project_id], entry_row)
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
+            .map_err(database_error)?;
+        Ok(rows)
+    }
     pub fn save_entry(&self, input: EntryInput) -> Result<Entry, String> {
         let title = validated_title(&input.title)?;
         validate_date(&input.date)?;

@@ -117,7 +117,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // The navigation scrolls independently; the theme and settings remain reachable.
     let sidebar = container(
         column![
-            scrollable(navigation).height(Length::Fill),
+            scrollable(navigation)
+                .spacing(crate::calendar_ui::SCROLL_GAP)
+                .height(Length::Fill),
             theme_toggle(app),
             button(row![icon(Icon::Settings), text("설정").size(13)].spacing(12))
                 .padding([9, 12])
@@ -431,16 +433,21 @@ fn month(app: &App) -> Element<'_, Message> {
             .spacing(16),
         )
         .id("month-compact")
+        .spacing(crate::calendar_ui::SCROLL_GAP)
         .height(Length::Fill)
         .into()
     } else {
         row![
             calendar,
-            container(scrollable(details).height(Length::Fill))
-                .padding(16)
-                .width(270)
-                .height(Length::Fill)
-                .style(theme::inspector)
+            container(
+                scrollable(details)
+                    .spacing(crate::calendar_ui::SCROLL_GAP)
+                    .height(Length::Fill),
+            )
+            .padding(16)
+            .width(270)
+            .height(Length::Fill)
+            .style(theme::inspector)
         ]
         .spacing(16)
         .height(Length::Fill)

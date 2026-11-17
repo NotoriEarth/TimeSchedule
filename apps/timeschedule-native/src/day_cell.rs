@@ -5,8 +5,7 @@
 //! on the cell's last line instead of being counted.
 use crate::{
     app::{App, Message},
-    calendar_ui::{self, Action},
-    text_layout, theme,
+    calendar_ui, text_layout, theme,
     widget_appearance::Appearance,
 };
 use iced::widget::{button, column, container, row, space, text, Column, Row};
@@ -31,6 +30,8 @@ struct Line<'a> {
     title_width: f32,
     first: String,
     second: Option<String>,
+    /// `+2` when the line stands for three records of one project.
+    more: Option<String>,
 }
 
 struct Style {
@@ -187,11 +188,14 @@ fn line<'a>(item: &'a CalendarItem, width: f32, style: &Style) -> Line<'a> {
             text_layout::fit_label_with_font(p, available * share, style.size, style.font)
         })
         .filter(|p| !p.is_empty());
-    let title_width = (available
-        - prefix.as_ref().map_or(0.0, |p| {
-            text_layout::text_width_with_font(p, style.size, style.font) + PREFIX_GAP
-        }))
-    .max(0.0);
+    let more = calendar_ui::more_label(item);
+    // What sits beside the title on its line, each with the gap next to it.
+    let beside = |s: &Option<String>| {
+        s.as_ref().map_or(0.0, |s| {
+            text_layout::text_width_with_font(s, style.size, style.font) + PREFIX_GAP
+        })
+    };
+    let title_width = (available - beside(&prefix) - beside(&more)).max(0.0);
     let title = display_title(item).replace(['\n', '\r', '\t'], " ");
     let first = text_layout::fit_label_with_font(&title, title_width, style.size, style.bold);
     Line {
@@ -201,6 +205,7 @@ fn line<'a>(item: &'a CalendarItem, width: f32, style: &Style) -> Line<'a> {
         title_width,
         first,
         second: None,
+        more,
     }
 }
 
@@ -245,6 +250,9 @@ fn line_view<'a>(
         first = first.push(label(p, style.font, color));
     }
     first = first.push(label(l.first, style.bold, style.colors.text));
+    if let Some(more) = l.more {
+        first = first.push(label(more, style.font, style.colors.muted));
+    }
     let mut body = column![first];
     let height = style.line * if l.second.is_some() { 2.0 } else { 1.0 };
     if let Some(second) = l.second {
@@ -258,7 +266,7 @@ fn line_view<'a>(
     .spacing(BAR_GAP)
     .height(height);
     let open = if enabled {
-        calendar_ui::message(Action::Open(l.item.source, l.item.id.clone(), widget))
+        calendar_ui::open_message(l.item, widget)
     } else {
         Message::Ignore
     };
