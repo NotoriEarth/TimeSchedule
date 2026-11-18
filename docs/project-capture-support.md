@@ -78,7 +78,7 @@
 | 프로세스 강제 종료 | 종료 신호에 해당하는 훅이 없다. 마지막으로 남은 훅이 UserPromptSubmit이나 PreModelRequest다 | `unterminated` | Codex CLI `s6-kill-after-request-cli`, Claude CLI `s6-kill-cli` |
 
 - `unterminated`는 "분류에 쓸 수 있는 종료 훅을 찾지 못했다"는 뜻이다. 훅만으로는 강제 종료된 턴과 아직 실행 중인 턴을 구분할 수 없다. 세션이 끝났다는 별도 확인이 있어야 그 턴을 유실로 판정할 수 있다.
-- 분류 규칙: 입력 순서와 무관하게 같은 결과를 낸다. 한 턴에 종료 훅이 여러 개면 관측 시각이 가장 늦은 것이 결정하고, Stop과 Interrupt의 시각이 같으면 완료로 단정하지 않고 `interrupted`로 둔다. 종료 훅 뒤에 다른 훅이 더 와도 판정은 바뀌지 않는다. 시각이 겹치는 경우와 종료 뒤 훅은 실제 표본에 없었고 합성 입력으로만 시험했다.
+- 분류 규칙: 입력 순서와 무관하게 같은 결과를 낸다. 한 턴에 종료 훅이 여러 개면 관측 시각이 가장 늦은 것이 결정하고, Stop과 Interrupt의 시각이 같으면 완료로 단정하지 않고 `interrupted`로 둔다. 종료 훅 뒤에 턴에 속한 다른 훅이 더 와도 판정은 바뀌지 않는다. 종료 훅끼리 시각이 겹치는 경우와, 종료 훅 뒤에 같은 턴의 도구·모델 훅이 오는 경우는 실제 표본에 없었고 합성 입력으로만 시험했다. Stop 뒤의 SessionEnd는 실제로 관측했지만 SessionEnd는 턴 판정에 쓰지 않는다.
 - 분류 대상: `normalizeEvent`와 같은 조건을 통과한 기록만 센다. 생성 출처 기록, 검증하지 않은 버전, 확인하지 않았거나 제외한 폴더의 기록은 턴으로 집계하지 않는다.
 - Interrupt 입력에는 물리 키와 화면의 중단 버튼을 구분하는 필드가 없다.
 - 사용자가 중단을 눌렀어도 턴이 먼저 끝나면 정상 종료와 같은 Stop이 온다(`s4-esc-attempt-completed-app`).
@@ -180,7 +180,7 @@ StopFailure, PreCompact, PostCompact, Notification, SubagentStop, PermissionRequ
 | PreCompact / PostCompact | — | 355 (1) / 356 (1) |
 | SessionEnd | 325 / 325 / 325 (5) | 283 / 283 / 290 (5) |
 
-Claude 표본 36건에는 강제 종료 첫 시도(엉뚱한 프로세스를 종료해 세션이 정상 완료된 실행)의 4건이 들어 있다. 그 4건은 fixture로 쓰지 않았다.
+Claude 표본 36건에는 강제 종료 첫 시도(엉뚱한 프로세스를 종료해 세션이 정상 완료된 실행)의 4건이 들어 있다. 그 4건은 fixture로 쓰지 않았으므로 저장소만으로는 36건 기준 수치를 재현할 수 없다. 커밋한 32건만 계산하면 훅 입력 크기는 278 / 509 / 1,400바이트다.
 
 훅 입력은 수백 바이트지만 원문 로그는 세션당 수십만 바이트였다. 원문 보관 기간·압축 결정에 쓸 자료이며 여기서 정책을 정하지 않는다.
 
@@ -203,9 +203,9 @@ Claude 표본 36건에는 강제 종료 첫 시도(엉뚱한 프로세스를 종
 
 4. Codex는 앱에서 시험 폴더를 신뢰하고 훅 검토를 승인한다. 승인 전에는 훅이 실행되지 않는다.
 5. Claude: 시험 폴더에서 `claude -p "<프롬프트>" --model claude-haiku-5-5 --max-turns 3 --permission-mode acceptEdits --output-format json`. 다른 Claude Code 세션 안에서 실행한다면 이름이 `CLAUDE`, `ANTHROPIC`으로 시작하는 환경 변수를 지우고 실행한다.
-6. Codex: `codex exec -m gpt-6-luna -c model_reasoning_effort="low" --sandbox workspace-write -C <시험 폴더> --json "<프롬프트>"`. 앱 시나리오는 같은 폴더의 대화에서 수행한다.
+6. Codex: `"<Codex 앱 설치 폴더>\bin\<빌드 ID>\codex.exe" exec -m gpt-6-luna -c model_reasoning_effort="low" --sandbox workspace-write -C <시험 폴더> --json "<프롬프트>"`. 이 시험에서는 `%LOCALAPPDATA%\OpenAI\Codex\bin\c38161ad8494f88c\codex.exe`였다. PATH의 `codex`는 다른 빌드일 수 있으므로, 실행 파일의 `--version` 출력이 훅 명령에 적은 버전 표시와 같은지 먼저 확인한다. 앱 시나리오는 같은 폴더의 대화에서 수행한다.
 7. 시나리오가 끝날 때마다 `_inbox`를 시나리오 이름으로 바꾼다.
-8. `node scripts/activity-adapters/sanitize-fixture.mjs --in <원본 폴더> --out tests/fixtures/project-activity/<도구>/<시나리오> --home %USERPROFILE% --lab <시험 폴더> --ids <시험 폴더>\.capture\id-map-<도구>.json`으로 표본을 만든다. `--ids` 파일은 실제 ID와 치환 표시의 대응을 시나리오 사이에 유지한다. 원본과 이 파일은 커밋하지 않는다.
+8. `node scripts/activity-adapters/sanitize-fixture.mjs --in <원본 폴더> --out tests/fixtures/project-activity/<도구>/<시나리오> --lab <시험 폴더> --ids <시험 폴더>\.capture\id-map-<도구>.json`으로 표본을 만든다. 홈 폴더는 현재 계정의 것을 쓴다. 다른 계정에서 얻은 원본이면 `--home <그 계정의 홈 폴더 절대 경로>`를 준다. `%USERPROFILE%`처럼 펼쳐지지 않은 값이나 절대 경로가 아닌 값은 거부한다. `--ids` 파일은 실제 ID와 치환 표시의 대응을 시나리오 사이에 유지한다. 원본과 이 파일은 커밋하지 않는다.
 
 강제 종료를 재현할 때 주의: Git Bash의 `/proc/<pid>/winpid`는 래퍼 프로세스를 가리킨다. 그것을 종료하면 `claude.exe`는 살아남아 세션이 정상 완료된다. PowerShell `Start-Process -PassThru`로 얻은 PID를 `taskkill /T /F`로 종료해야 한다.
 
@@ -229,7 +229,9 @@ Claude 표본 36건에는 강제 종료 첫 시도(엉뚱한 프로세스를 종
 - **종료 훅이 없는 턴:** 훅만으로는 강제 종료와 진행 중을 구분할 수 없다. 원문 로그 재수집을 지원하거나 `확인 불가`로 표시해야 한다.
 - **Codex 도구 실패:** 훅에 실패 표시가 없다. 실패 여부가 필요하면 출력 문구 해석이나 원문 로그가 필요하며, 그 전에는 "실행됨"까지만 말할 수 있다.
 - **Codex 앱의 프롬프트:** 입력창 직접 입력에서 UserPromptSubmit이 오는지 확인해야 한다. 오지 않으면 앱에서는 프롬프트 없이 도구·응답만 수집된다.
-- **등록 경로 대조:** 어댑터는 파일 시스템을 조회하지 않고 문자열만 비교한다. 대소문자, 구분자, `.`·`..`, 끝의 점·공백, `\\?\` 접두사처럼 문자열로 정리할 수 있는 표기 차이는 같은 폴더로 본다. junction·symlink·worktree의 실제 경로와 8.3 짧은 이름은 구분하지 못하므로 작업 2에서 등록 전에 해석해야 한다. 절대 경로가 아닌 `cwd`는 변환하지 않는다.
+- **등록 경로 대조:** 어댑터는 파일 시스템을 조회하지 않고 문자열만 비교한다. 일반 경로에서는 대소문자, 구분자, `.`·`..`, 끝의 점·공백처럼 Windows가 같은 폴더로 처리하는 표기 차이를 같은 폴더로 본다. `\\?\`로 시작하는 확장 경로는 Windows가 이름을 글자 그대로 쓰므로 대소문자만 맞추고, `.`·`..`·빈 구성요소가 있으면 변환하지 않는다. `D:`처럼 폴더를 특정하지 못하는 경로와 절대 경로가 아닌 `cwd`도 변환하지 않는다. junction·symlink·worktree의 실제 경로와 8.3 짧은 이름은 구분하지 못하므로 작업 2에서 등록 전에 해석해야 한다.
+- **겹치는 등록:** 같은 폴더를 가리키는 등록이 여러 개면 순서와 무관하게 가장 제한적인 것을 따른다. 제외가 하나라도 있으면 제외, 미확정이 있으면 경로 후보만 낸다. 확정된 등록끼리 프로젝트가 다르면 충돌로 보고 본문을 내지 않는다.
+- **관측 시각 형식:** `captured_at`이 관측 스크립트가 쓰는 UTC 밀리초 형식이 아니면 손상된 기록으로 보고 변환하지 않는다.
 - **필드 누락:** 검증한 이벤트에서 기대한 필드(예: Stop의 `last_assistant_message`)가 빠져도 어댑터는 빈 값으로 활동을 만든다. 누락을 따로 표시하지 않는다.
 - **표본에 남은 식별자:** 도구 호출 ID(`toolu_…`, `call_…`)는 치환하지 않았다. 인증 정보는 아니다.
 - **Claude 데스크톱 앱, Codex npm CLI, MCP 경로:** 관측하지 않았다.

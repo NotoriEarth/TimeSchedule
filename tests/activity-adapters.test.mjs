@@ -490,3 +490,91 @@ test('nothing is listed as supported without a committed sample', async () => {
     for (const version of adapter.verifiedVersions) assert.ok(seenVersions.has(version), `${source}: ${version} is listed but has no sample`);
   }
 });
+
+// ---- review round 2 (gpt-6.2-astra) ----
+
+test('extended_length_paths_keep_dots_and_spaces_as_part_of_the_name', async () => {
+  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+    const registrations = [{ canonicalPath: 'C:\\lab\\repo', decision: 'new', projectId: 'p1' }];
+    const outcome = cwd => normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(registrations)).outcome;
+    assert.equal(outcome('\\\\?\\C:\\lab\\repo'), 'activity');
+    assert.equal(outcome('\\\\?\\C:\\lab\\repo\\sub'), 'activity');
+    // Under \\?\ these are different folders, not other spellings of `repo`.
+    assert.equal(outcome('\\\\?\\C:\\lab\\repo.'), 'candidate');
+    assert.equal(outcome('\\\\?\\C:\\lab\\repo '), 'candidate');
+    // `.` and `..` are not folded under the prefix, and no folder can have those names.
+    assert.equal(outcome('\\\\?\\C:\\lab\\repo\\..\\repo'), 'unsupported');
+    assert.equal(outcome('\\\\?\\C:\\lab\\.\\repo'), 'unsupported');
+    // Without the prefix Windows drops them, so these do name `repo`.
+    assert.equal(outcome('C:\\lab\\repo.'), 'activity');
+    assert.equal(outcome('C:\\lab\\.\\repo'), 'activity');
+  }
+});
+
+test('drive_relative_and_device_paths_are_malformed', async () => {
+  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+    const registrations = [{ canonicalPath: 'D:\\', decision: 'new', projectId: 'd1' }];
+    for (const cwd of ['D:', 'd:', 'D:.', '\\\\?\\D:', '\\\\.\\C:\\lab', '\\\\?\\C:\\lab\\\\repo', '\\\\?\\']) {
+      assert.deepEqual(normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(registrations)), { outcome: 'unsupported', reason: 'malformed' }, cwd);
+    }
+    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: 'D:\\' } }), ctx(registrations)).outcome, 'activity');
+    // A registration written as `D:` names no folder and can never match.
+    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: 'D:\\x' } }), ctx([{ canonicalPath: 'D:', decision: 'new', projectId: 'd1' }])).outcome, 'candidate');
+  }
+});
+
+test('conflicting_registrations_for_one_folder_fail_closed_in_any_order', async () => {
+  for (const { adapter, normalizeEvent, classifyTurns } of await verifiedAdapters()) {
+    const open = { canonicalPath: 'C:\\LSH\\TimeSchedule', decision: 'new', projectId: 'p1' };
+    const closed = { canonicalPath: 'c:/lsh/timeschedule/', decision: 'exclude', projectId: 'p1' };
+    const pending = { canonicalPath: 'C:\\LSH\\.\\TimeSchedule', decision: 'pending', projectId: 'p1' };
+    const other = { canonicalPath: 'C:\\LSH\\TimeSchedule\\', decision: 'link', projectId: 'p2' };
+    const run = registrations => normalizeEvent(capture(adapter), ctx(registrations));
+    for (const order of [[open, closed], [closed, open], [open, pending, closed]]) {
+      assert.deepEqual(run(order), { outcome: 'excluded', reason: 'path_excluded' });
+    }
+    for (const order of [[open, pending], [pending, open], [open, other], [other, open]]) {
+      const result = run(order);
+      assert.equal(result.outcome, 'candidate');
+      assert.equal(result.envelope, undefined);
+    }
+    assert.equal(run([open, { ...open }]).outcome, 'activity', 'the same registration twice is not a conflict');
+    const stop = { ...capture(adapter, { payload: { hook_event_name: 'Stop', turn_id: 't', prompt_id: 't' } }) };
+    assert.deepEqual(classifyTurns([stop], ctx([open, closed])), []);
+    assert.deepEqual(classifyTurns([stop], ctx([other, open])), []);
+    assert.equal(classifyTurns([stop], ctx([open])).length, 1);
+  }
+});
+
+test('capture_time_must_be_a_utc_millisecond_timestamp', async () => {
+  for (const { adapter, normalizeEvent, classifyTurns } of await verifiedAdapters()) {
+    for (const captured_at of ['invalid-time', '2026-11-18', '2026-11-18T00:00:00Z', '2026-11-18T00:00:00.000+09:00', '2026-13-45T00:00:00.000Z']) {
+      assert.deepEqual(normalizeEvent({ ...capture(adapter), captured_at }, ctx()), { outcome: 'unsupported', reason: 'malformed' }, captured_at);
+      const stop = { ...capture(adapter, { payload: { hook_event_name: 'Stop', turn_id: 't', prompt_id: 't' } }), captured_at };
+      assert.deepEqual(classifyTurns([stop], ctx()), [], captured_at);
+    }
+  }
+});
+
+test('every_listed_event_has_a_sample_from_every_verified_version', async () => {
+  for (const source of Object.keys(SOURCES)) {
+    const { adapter } = await loadAdapter(source);
+    const seen = new Set(allScenarios().filter(scenario => scenario.source === source)
+      .flatMap(scenario => scenario.files.map(readJson)).map(record => `${record.tool_version}\n${record.payload.hook_event_name}`));
+    for (const version of adapter.verifiedVersions) {
+      for (const event of Object.keys(adapter.events)) {
+        assert.ok(seen.has(`${version}\n${event}`), `${source}: ${event} has no sample from ${version}`);
+      }
+    }
+  }
+});
+
+test('fixtures name no user profile other than the placeholder', () => {
+  for (const file of allFixtureFiles()) {
+    const text = JSON.stringify(readJson(file));
+    for (const match of text.matchAll(/Users(?:\\\\|\/|-)([A-Za-z0-9._ -]+?)(?=\\\\|\/|-\.|"|$)/g)) {
+      assert.match(match[1], /^lab-user/, `${file}: profile folder ${match[1]}`);
+    }
+    assert.ok(!text.includes('%USERPROFILE%') && !text.includes('$env:'), file);
+  }
+});

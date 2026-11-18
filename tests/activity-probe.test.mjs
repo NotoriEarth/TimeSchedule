@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -214,4 +214,73 @@ test('sanitize_cli_keeps_ids_stable_across_runs_with_an_id_file', t => {
   assert.equal(session('out2'), 'session-0002');
   assert.equal(session('out3'), 'session-0001');
   assert.ok(!readFileSync(path.join(dir, 'out1', '01-Stop.json'), 'utf8').includes('real-session-A'));
+});
+
+// ---- review round 2 (gpt-6.2-astra) ----
+
+test('sanitize_replaces_the_home_name_only_as_a_whole_name', async () => {
+  const { sanitizeCapture } = await import('../scripts/activity-adapters/sanitize-fixture.mjs');
+  const record = sample();
+  record.payload.hook_event_name = 'UserPromptSubmit';
+  record.payload.transcript_path = 'C:\\Users\\user\\.claude\\projects\\C--Users-user-x\\abcd-session-1.jsonl';
+  record.payload.note = 'users of the user-facing UserPromptSubmit hook';
+  const out = sanitizeCapture(record, { homeDir: 'C:\\Users\\user', labRoot: 'C:\\LSH\\_capture-lab\\m0-sample', sessionIds: new Map() });
+  assert.equal(out.payload.hook_event_name, 'UserPromptSubmit');
+  assert.ok(Object.hasOwn(out.payload, 'hook_event_name'));
+  assert.equal(out.payload.transcript_path, 'C:\\Users\\lab-user\\.claude\\projects\\C--Users-lab-user-x\\session-0001.jsonl');
+  assert.equal(out.payload.note, 'users of the lab-user-facing UserPromptSubmit hook');
+});
+
+function sanitizeCli(args) {
+  return spawnSync(process.execPath, [SANITIZE, ...args], { encoding: 'utf8', windowsHide: true });
+}
+
+test('sanitize_cli_rejects_a_home_or_lab_that_is_not_an_absolute_path', t => {
+  const dir = scratch(t);
+  const raw = path.join(dir, 'raw');
+  mkdirSync(raw);
+  writeFileSync(path.join(raw, 'a.json'), JSON.stringify(sample()));
+  for (const home of ['%USERPROFILE%', '$env:USERPROFILE', 'realname', '~']) {
+    const r = sanitizeCli(['--in', raw, '--out', path.join(dir, 'out'), '--home', home, '--lab', 'C:\\LSH\\_capture-lab\\m0-sample']);
+    assert.equal(r.status, 1, home);
+    assert.match(r.stderr, /^sanitize-fixture: /);
+  }
+  const lab = sanitizeCli(['--in', raw, '--out', path.join(dir, 'out'), '--home', 'C:\\Users\\realname', '--lab', '%LAB%']);
+  assert.equal(lab.status, 1);
+  assert.ok(!existsSync(path.join(dir, 'out')), 'nothing may be written when an argument is rejected');
+});
+
+test('sanitize_cli_uses_the_current_home_folder_when_home_is_omitted', t => {
+  const dir = scratch(t);
+  const raw = path.join(dir, 'raw');
+  mkdirSync(raw);
+  const record = sample();
+  record.payload.transcript_path = path.join(homedir(), '.claude', 'x.jsonl');
+  writeFileSync(path.join(raw, 'a.json'), JSON.stringify(record));
+  const r = sanitizeCli(['--in', raw, '--out', path.join(dir, 'out'), '--lab', 'C:\\LSH\\_capture-lab\\m0-sample']);
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(readFileSync(path.join(dir, 'out', '01-Stop.json'), 'utf8'));
+  assert.equal(out.payload.transcript_path, 'C:\\Users\\lab-user\\.claude\\x.jsonl');
+});
+
+test('sanitize_cli_keeps_existing_fixtures_when_the_id_file_is_unreadable', t => {
+  const dir = scratch(t);
+  const raw = path.join(dir, 'raw');
+  const out = path.join(dir, 'out');
+  const ids = path.join(dir, 'ids.json');
+  mkdirSync(raw);
+  mkdirSync(out);
+  writeFileSync(path.join(raw, 'a.json'), JSON.stringify(sample()));
+  writeFileSync(path.join(out, '01-Old.json'), 'keep me');
+  writeFileSync(ids, '[["real", "session-0001"');
+  const args = ['--in', raw, '--out', out, '--home', 'C:\\Users\\realname', '--lab', 'C:\\LSH\\_capture-lab\\m0-sample', '--ids', ids];
+  const broken = sanitizeCli(args);
+  assert.equal(broken.status, 1);
+  assert.deepEqual(readdirSync(out), ['01-Old.json']);
+  assert.equal(readFileSync(path.join(out, '01-Old.json'), 'utf8'), 'keep me');
+  assert.equal(readFileSync(ids, 'utf8'), '[["real", "session-0001"', 'a broken id file is left for a person to look at');
+  writeFileSync(path.join(raw, 'b.json'), '{ not json');
+  writeFileSync(ids, '[]');
+  assert.equal(sanitizeCli(args).status, 1, 'an unreadable record also stops before anything is replaced');
+  assert.deepEqual(readdirSync(out), ['01-Old.json']);
 });
