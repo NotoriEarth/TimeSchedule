@@ -228,7 +228,9 @@ test('sanitize_replaces_the_home_name_only_as_a_whole_name', async () => {
   assert.equal(out.payload.hook_event_name, 'UserPromptSubmit');
   assert.ok(Object.hasOwn(out.payload, 'hook_event_name'));
   assert.equal(out.payload.transcript_path, 'C:\\Users\\lab-user\\.claude\\projects\\C--Users-lab-user-x\\session-0001.jsonl');
-  assert.equal(out.payload.note, 'users of the lab-user-facing UserPromptSubmit hook');
+  // The bare word is left alone: only a profile folder is replaced. A fixture that still
+  // carries the account name as a word is caught by the fixture tests, for a person to judge.
+  assert.equal(out.payload.note, 'users of the user-facing UserPromptSubmit hook');
 });
 
 function sanitizeCli(args) {
@@ -283,4 +285,58 @@ test('sanitize_cli_keeps_existing_fixtures_when_the_id_file_is_unreadable', t =>
   writeFileSync(ids, '[]');
   assert.equal(sanitizeCli(args).status, 1, 'an unreadable record also stops before anything is replaced');
   assert.deepEqual(readdirSync(out), ['01-Old.json']);
+});
+
+// ---- review round 4 (gpt-6.2-astra) ----
+
+test('sanitize_never_rewrites_field_names_or_schema_values_whatever_the_account_is_called', async () => {
+  const { sanitizeCapture } = await import('../scripts/activity-adapters/sanitize-fixture.mjs');
+  for (const account of ['session', 'tool', 'user', 'payload', 'ab', '\ud64d\uae38']) {
+    const record = sample();
+    record.payload.hook_event_name = 'PostToolUse';
+    record.payload.tool_name = 'Bash';
+    record.payload.transcript_path = `C:\\Users\\${account}\\.claude\\projects\\C--Users-${account}-repo\\abcd-session-1.jsonl`;
+    record.payload.note = `c:/users/${account}/x`;
+    const out = sanitizeCapture(record, { homeDir: `C:\\Users\\${account}`, labRoot: 'C:\\LSH\\_capture-lab\\m0-sample', sessionIds: new Map() });
+    assert.deepEqual(Object.keys(out), Object.keys(record), account);
+    assert.deepEqual(Object.keys(out.payload), Object.keys(record.payload), account);
+    assert.equal(out.origin, 'tool', account);
+    assert.equal(out.source, 'claude-code', account);
+    assert.equal(out.tool_version, '2.1.325', account);
+    assert.equal(out.payload.hook_event_name, 'PostToolUse', account);
+    assert.equal(out.payload.tool_name, 'Bash', account);
+    assert.equal(out.payload.session_id, 'session-0001', account);
+    assert.equal(out.payload.transcript_path, 'C:\\Users\\lab-user\\.claude\\projects\\C--Users-lab-user-repo\\session-0001.jsonl', account);
+    assert.equal(out.payload.note, 'C:/Users/lab-user/x', account);
+    assert.ok(!JSON.stringify(out).includes('abcd-session-1'), account);
+  }
+});
+
+test('sanitize_cli_refuses_an_empty_input_and_keeps_existing_fixtures', t => {
+  const dir = scratch(t);
+  const raw = path.join(dir, 'raw');
+  const out = path.join(dir, 'out');
+  mkdirSync(raw);
+  mkdirSync(out);
+  writeFileSync(path.join(out, '01-Old.json'), 'keep me');
+  writeFileSync(path.join(out, 'expected.json'), '[]');
+  const r = sanitizeCli(['--in', raw, '--out', out, '--home', 'C:\\Users\\realname', '--lab', 'C:\\LSH\\_capture-lab\\m0-sample']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /^sanitize-fixture: /);
+  assert.deepEqual(readdirSync(out).sort(), ['01-Old.json', 'expected.json']);
+});
+
+test('sanitize_cli_replaces_a_scenario_as_a_whole_and_leaves_no_temporary_files', t => {
+  const dir = scratch(t);
+  const raw = path.join(dir, 'raw');
+  const out = path.join(dir, 'out');
+  mkdirSync(raw);
+  mkdirSync(out);
+  writeFileSync(path.join(out, '01-Old.json'), 'old');
+  writeFileSync(path.join(out, '02-Older.json'), 'old');
+  writeFileSync(path.join(out, 'expected.json'), '[]');
+  writeFileSync(path.join(raw, 'a.json'), JSON.stringify(sample()));
+  const r = sanitizeCli(['--in', raw, '--out', out, '--home', 'C:\\Users\\realname', '--lab', 'C:\\LSH\\_capture-lab\\m0-sample']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readdirSync(out).sort(), ['01-Stop.json', 'expected.json']);
 });

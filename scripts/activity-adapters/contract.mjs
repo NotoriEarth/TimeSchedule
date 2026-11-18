@@ -9,60 +9,106 @@ const isText = value => typeof value === 'string' && value.length > 0;
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const ORIGINS = ['tool', 'timeschedule_generation'];
 const CONFIRMED = ['new', 'link'];
+// Returned when the registrations cannot be trusted to answer for a folder.
+const CONFLICT = Object.freeze({ canonicalPath: null, decision: 'conflict', projectId: null });
 
-// Comparison form of a fully qualified Windows path, or null when the text is not one.
-// Two spellings of the same folder must compare equal, otherwise an excluded folder
-// could be reached under another spelling, and two different folders must never
-// compare equal, otherwise an unregistered folder would inherit a registration.
+// ---- paths -------------------------------------------------------------------
 //
-// Ordinary paths (`C:\…`, `\\server\share\…`): case, `/` vs `\`, repeated or trailing
-// separators, `.` and `..` segments and trailing dots and spaces (which Windows drops)
-// are folded.
-// Extended paths (`\\?\C:\…`, `\\?\UNC\…`): Windows takes every segment literally, so
-// `repo.` is a different folder from `repo`. Only case is folded; a path with an empty,
-// `.` or `..` segment or a `/` is rejected.
-// `D:` and `D:x` are relative to the drive's current folder and name no fixed folder;
-// `\\.\…` is a device. Both are rejected.
-// What needs the file system is not handled: junctions, symlinks, worktrees and 8.3
-// short names are resolved by the caller before registration.
-function comparable(value) {
+// Windows decides whether two spellings name one folder; a string function can only
+// imitate that, and every imitation so far either let an excluded folder through under
+// another spelling or let a different folder borrow a registration. So this module does
+// not interpret paths. It accepts a path only in canonical form and compares names:
+//
+//   accepted   `C:\a\b`, `\\server\share\a`; `/` for `\`; one trailing separator
+//   refused    `.` and `..` names, empty names (doubled separators), names ending in a
+//              dot or space, names with `< > : " | ? *` or control characters,
+//              `\\?\` and `\\.\` forms, drive-relative `D:` and `D:x`, relative paths
+//
+// The caller canonicalises with the file system (junctions, symlinks, worktrees, 8.3
+// short names, `\\?\`) before a path gets here. A refused path is `malformed`.
+function parsePath(value) {
   if (!isText(value)) return null;
-  let text = value;
-  let literal = false;
-  if (/^\\\\\?\\UNC\\/i.test(text)) { text = `\\\\${text.slice(8)}`; literal = true; }
-  else if (text.startsWith('\\\\?\\')) { text = text.slice(4); literal = true; }
-  if (literal && text.includes('/')) return null;
-  text = text.replace(/\//g, '\\');
-  let root;
+  const text = value.replace(/\//g, '\\');
+  let parts;
   let rest;
   const drive = /^([A-Za-z]):\\/.exec(text);
-  const unc = /^\\\\([^\\?.][^\\]*)\\([^\\]+)(\\|$)/.exec(text);
+  const unc = /^\\\\([^\\]+)\\([^\\]+)(?:\\|$)/.exec(text);
   if (drive) {
-    root = `${drive[1].toLowerCase()}:`;
+    parts = [`${drive[1]}:`];
     rest = text.slice(3);
   } else if (unc) {
-    root = `\\\\${unc[1].toLowerCase()}\\${unc[2].toLowerCase()}`;
-    rest = text.slice(unc[1].length + unc[2].length + 3);
-    if (rest.startsWith('\\')) rest = rest.slice(1);
+    if (!isPlainName(unc[1]) || !isPlainName(unc[2])) return null;
+    parts = [`\\\\${unc[1]}`, unc[2]];
+    rest = text.slice(unc[0].length);
   } else {
     return null;
   }
-  const segments = [];
-  if (literal) {
-    const parts = rest.replace(/\\$/, '') === '' ? [] : rest.replace(/\\$/, '').split('\\');
-    for (const raw of parts) {
-      if (raw === '' || raw === '.' || raw === '..') return null;
-      segments.push(raw.toLowerCase());
-    }
-  } else {
-    for (const raw of rest.split('\\')) {
-      if (raw === '..') { segments.pop(); continue; }
-      const segment = raw.replace(/[. ]+$/, '').toLowerCase();
-      if (segment) segments.push(segment);
+  if (rest.endsWith('\\')) rest = rest.slice(0, -1);
+  for (const name of rest === '' ? [] : rest.split('\\')) {
+    if (!isPlainName(name)) return null;
+    parts.push(name);
+  }
+  return parts;
+}
+
+function isPlainName(name) {
+  // eslint-disable-next-line no-control-regex
+  return name !== '' && name !== '.' && name !== '..' && !/[. ]$/.test(name) && !/[<>:"|?*\u0000-\u001f]/.test(name);
+}
+
+// Two ways to compare names, because the two possible mistakes are not equally safe.
+// To CONFIRM a folder a false match is the danger, so only ASCII letters are folded and
+// every other character must be identical. To EXCLUDE (or to notice an unconfirmed or
+// conflicting registration) a missed match is the danger, so names are folded as widely
+// as JavaScript can: compatibility normalisation plus full upper and lower casing.
+const strictKey = parts => parts.map(name => name.replace(/[A-Z]/g, letter => letter.toLowerCase()));
+const looseKey = parts => parts.map(name => name.normalize('NFKC').toUpperCase().toLowerCase());
+const isPrefix = (base, target) => base.length <= target.length && base.every((name, index) => name === target[index]);
+
+// Returns the registration that answers for `cwd`, or null when none does.
+//
+// The deepest registered ancestor (or the folder itself) answers, so an excluded
+// subfolder overrides its registered parent, and a sibling that merely shares a prefix
+// (`Repo-test` vs `Repo`) is not an ancestor. Ancestors are found with the loose
+// comparison. Among registrations at that depth the most restrictive wins whatever
+// their order: an exclusion, then an unconfirmed decision. A confirmed registration
+// answers only if it also matches strictly; if it does not, or if confirmed
+// registrations name different projects, the result is a conflict and yields no body.
+// One registration that is not in canonical form makes every answer a conflict: it
+// might be the exclusion that applies.
+export function resolveRegistration(cwd, registrations) {
+  const target = parsePath(cwd);
+  if (target === null) return null;
+  const parsed = [];
+  for (const registration of registrations ?? []) {
+    const base = parsePath(registration?.canonicalPath);
+    if (base === null) return CONFLICT;
+    parsed.push({ registration, base });
+  }
+  const targetLoose = looseKey(target);
+  let depth = -1;
+  let top = [];
+  for (const item of parsed) {
+    if (!isPrefix(looseKey(item.base), targetLoose)) continue;
+    if (item.base.length > depth) {
+      depth = item.base.length;
+      top = [item];
+    } else if (item.base.length === depth) {
+      top.push(item);
     }
   }
-  return [root, ...segments].join('\\');
+  if (top.length === 0) return null;
+  const excluded = top.find(item => item.registration.decision === 'exclude');
+  if (excluded) return excluded.registration;
+  const unconfirmed = top.find(item => !CONFIRMED.includes(item.registration.decision));
+  if (unconfirmed) return unconfirmed.registration;
+  const targetStrict = strictKey(target);
+  if (!top.every(item => isPrefix(strictKey(item.base), targetStrict))) return CONFLICT;
+  if (new Set(top.map(item => item.registration.projectId)).size > 1) return CONFLICT;
+  return top[0].registration;
 }
+
+// ---- records -------------------------------------------------------------------
 
 // The probe writes UTC timestamps with milliseconds; anything else is a damaged record.
 function isCaptureTime(value) {
@@ -76,41 +122,7 @@ function isWellFormed(record, adapter) {
   return isObject(record) && record.capture_schema === 1 && record.source === adapter.source
     && ORIGINS.includes(record.origin)
     && isText(record.capture_id) && isCaptureTime(record.captured_at) && isObject(payload)
-    && isText(payload.session_id) && isText(payload.hook_event_name) && comparable(payload.cwd) !== null;
-}
-
-// Returns the registration whose path equals `cwd` or is an ancestor folder of it.
-// The longest match wins, so an excluded subfolder overrides its registered parent.
-// A sibling that merely shares a prefix (`Repo-test` vs `Repo`) does not match.
-//
-// Several registrations can name the same folder (spelled differently, or entered
-// twice). The answer must not depend on their order, so the most restrictive one wins:
-// an exclusion, then an unconfirmed decision. Confirmed registrations that point the
-// same folder at different projects are reported as a conflict, which yields no body.
-export function resolveRegistration(cwd, registrations) {
-  const target = comparable(cwd);
-  if (target === null) return null;
-  let matches = [];
-  let bestLength = -1;
-  for (const registration of registrations ?? []) {
-    const base = comparable(registration?.canonicalPath);
-    if (base === null || (target !== base && !target.startsWith(`${base}\\`))) continue;
-    if (base.length > bestLength) {
-      matches = [registration];
-      bestLength = base.length;
-    } else if (base.length === bestLength) {
-      matches.push(registration);
-    }
-  }
-  if (matches.length === 0) return null;
-  const excluded = matches.find(registration => registration.decision === 'exclude');
-  if (excluded) return excluded;
-  const unconfirmed = matches.find(registration => !CONFIRMED.includes(registration.decision));
-  if (unconfirmed) return unconfirmed;
-  if (new Set(matches.map(registration => registration.projectId)).size > 1) {
-    return { canonicalPath: matches[0].canonicalPath, decision: 'conflict', projectId: null };
-  }
-  return matches[0];
+    && isText(payload.session_id) && isText(payload.hook_event_name) && parsePath(payload.cwd) !== null;
 }
 
 export function normalizeCapture(record, context, adapter) {
@@ -124,7 +136,7 @@ export function normalizeCapture(record, context, adapter) {
 
   const registration = resolveRegistration(payload.cwd, context?.registrations);
   if (registration?.decision === 'exclude') return { outcome: 'excluded', reason: 'path_excluded' };
-  // Not registered, or registered without a confirmed decision: the path only, never a body.
+  // Not registered, not confirmed, or in conflict: the path only, never a body.
   if (!registration || !CONFIRMED.includes(registration.decision)) {
     return { outcome: 'candidate', candidate: { source: adapter.source, path: payload.cwd } };
   }
@@ -184,7 +196,8 @@ export function classifyTurns(records, context, adapter) {
   for (const record of usable) {
     const turnId = adapter.turnKey(record.payload);
     if (!isText(turnId)) continue;
-    const key = `${record.payload.session_id}\n${turnId}`;
+    // Encoded as a pair, so no character inside an id can make two turns look like one.
+    const key = JSON.stringify([record.payload.session_id, turnId]);
     const turn = turns.get(key)
       ?? { session_id: record.payload.session_id, turn_id: turnId, ending: 'unterminated', last_event: null, terminalAt: null };
     const name = record.payload.hook_event_name;

@@ -39,11 +39,13 @@ function expand(text) {
   return current.replaceAll(TOKENS.labFolder, folderName(LAB_PLACEHOLDER)).replaceAll(TOKENS.homeName, 'lab-user');
 }
 
+// Only values are rewritten. Field names are the schema the adapters read, and a
+// fixture test fails if a name ever carries a path or an id.
 function mapStrings(value, transform) {
   if (typeof value === 'string') return transform(value);
   if (Array.isArray(value)) return value.map(item => mapStrings(item, transform));
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [transform(key), mapStrings(item, transform)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapStrings(item, transform)]));
   }
   return value;
 }
@@ -59,14 +61,17 @@ function placeholder(ids, key, prefix) {
 
 export function sanitizeCapture(record, { homeDir, labRoot, sessionIds }) {
   const homeName = path.win32.basename(homeDir.replace(/\//g, '\\'));
-  // The account name is replaced only where it stands as a whole name, so an account
-  // called `user` does not rewrite `UserPromptSubmit`.
-  const wholeHomeName = new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(homeName)}(?![A-Za-z0-9])`, 'gi');
+  // Besides the full home path, the account name is replaced only where it is a profile
+  // folder: right after `Users` and a separator, including the `C--Users-name-…` form
+  // Claude Code derives from a path. The bare word is never replaced, because an account
+  // can be called `user`, `tool` or `session` and those words are part of the schema.
+  // A fixture that still shows the account name as a word fails the fixture tests.
+  const profileFolder = new RegExp(`(users[\\\\/-]+)${escapeRegExp(homeName)}(?![\\p{L}\\p{N}])`, 'giu');
   const paths = text => {
     let current = replacePath(text, labRoot, TOKENS.lab);
     current = current.replace(new RegExp(escapeRegExp(folderName(labRoot)), 'gi'), () => TOKENS.labFolder);
     current = replacePath(current, homeDir, TOKENS.home);
-    if (homeName.length >= 3) current = current.replace(wholeHomeName, () => TOKENS.homeName);
+    current = current.replace(profileFolder, (match, lead) => `${lead}${TOKENS.homeName}`);
     return expand(current);
   };
   const cleaned = mapStrings(record, paths);
@@ -121,11 +126,24 @@ function main() {
     return { name: `${String(index + 1).padStart(2, '0')}-${event}.json`, text: `${JSON.stringify(cleaned, null, 2)}\n` };
   });
 
+  // An empty folder usually means the hooks never ran. Replacing a scenario with nothing
+  // would delete its samples and still report success.
+  if (outputs.length === 0) throw new Error(`no capture records in ${options.in}; existing fixtures were left as they are`);
+
+  // Write the whole new set beside the old one first; the old set is removed only after
+  // every new file is on disk, so a failed write cannot leave the scenario empty.
   mkdirSync(options.out, { recursive: true });
+  const staged = outputs.map(output => ({ ...output, temporary: path.join(options.out, `.tmp-${output.name}`) }));
+  try {
+    for (const output of staged) writeFileSync(output.temporary, output.text);
+  } catch (error) {
+    for (const output of staged) rmSync(output.temporary, { force: true });
+    throw error;
+  }
   for (const name of readdirSync(options.out)) {
     if (/^\d{2,}-.*\.json$/.test(name)) rmSync(path.join(options.out, name));
   }
-  for (const output of outputs) writeFileSync(path.join(options.out, output.name), output.text);
+  for (const output of staged) renameSync(output.temporary, path.join(options.out, output.name));
   if (options.ids) {
     const temporary = `${options.ids}.tmp`;
     writeFileSync(temporary, `${JSON.stringify([...sessionIds], null, 2)}\n`);

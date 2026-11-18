@@ -27,12 +27,10 @@ function allScenarios() {
 const allFixtureFiles = () => allScenarios().flatMap(scenario => scenario.files);
 
 test('fixtures_contain_no_private_markers', () => {
-  const home = path.basename(homedir());
   const files = allFixtureFiles();
   assert.ok(files.length > 0, 'no fixture files found');
   for (const file of files) {
     const text = readFileSync(file, 'utf8');
-    assert.ok(!text.toLowerCase().includes(home.toLowerCase()), `${file} contains the home folder name`);
     assert.ok(!/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(text), `${file} contains an email-shaped string`);
     assert.ok(!/\b(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/.test(text), `${file} contains a token-shaped string`);
     assert.ok(!/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(JSON.stringify(readJson(file).payload ?? {})),
@@ -353,16 +351,23 @@ const NESTED = [...REG, { canonicalPath: 'C:\\LSH\\TimeSchedule\\private', decis
 test('excluded_path_cannot_be_bypassed_by_path_spelling', async () => {
   for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
     const outcome = cwd => normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(NESTED));
+    // Spellings in canonical form: only case, separator direction and one trailing separator differ.
+    for (const cwd of ['c:/LSH/timeschedule/PRIVATE/', 'C:\\LSH\\TimeSchedule\\Private\\sub', 'C:\\lsh\\TIMESCHEDULE\\private']) {
+      assert.deepEqual(outcome(cwd), { outcome: 'excluded', reason: 'path_excluded' }, cwd);
+    }
+    // Anything that would need interpreting is refused rather than guessed at, so it can
+    // neither reach the excluded folder nor borrow the parent's registration.
     for (const cwd of [
       'C:\\LSH\\TimeSchedule\\.\\private', 'C:\\LSH\\TimeSchedule\\a\\..\\private', 'C:\\LSH\\TimeSchedule\\\\private',
       'C:/LSH/TimeSchedule/./private/sub', 'C:\\LSH\\TimeSchedule\\private.', 'C:\\LSH\\TimeSchedule\\private ',
       '\\\\?\\C:\\LSH\\TimeSchedule\\private', 'c:\\lsh\\.\\TIMESCHEDULE\\x\\y\\..\\..\\PRIVATE\\',
+      'C:\\LSH\\TimeSchedule\\private\\..\\public', 'C:\\LSH\\TimeSchedule\\..\\Other',
+      'C:\\LSH\\TimeSchedule...\\sub', 'C:\\LSH\\TimeSchedule \\sub', 'C:\\LSH\\TimeSchedule\\x.\\private',
     ]) {
-      assert.deepEqual(outcome(cwd), { outcome: 'excluded', reason: 'path_excluded' }, cwd);
+      assert.deepEqual(outcome(cwd), { outcome: 'unsupported', reason: 'malformed' }, cwd);
     }
-    assert.equal(outcome('C:\\LSH\\TimeSchedule\\private\\..\\public').outcome, 'activity');
-    assert.equal(outcome('C:\\LSH\\TimeSchedule\\..\\Other').outcome, 'candidate');
     assert.equal(outcome('C:\\LSH\\TimeSchedule\\privateer').outcome, 'activity');
+    assert.equal(outcome('C:\\LSH\\TimeSchedule\\.git').outcome, 'activity', 'a leading dot is an ordinary name');
   }
 });
 
@@ -377,9 +382,9 @@ test('cwd_that_is_not_an_absolute_windows_path_is_malformed', async () => {
 test('unc_and_drive_root_registrations_match_by_segment', async () => {
   for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
     const unc = [{ canonicalPath: '\\\\server\\share\\repo', decision: 'new', projectId: 'u1' }];
-    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\SERVER\\Share\\repo\\.\\sub' } }), ctx(unc)).envelope.project_id, 'u1');
+    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\SERVER\\Share\\repo\\sub' } }), ctx(unc)).envelope.project_id, 'u1');
     assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\server\\share2\\repo' } }), ctx(unc)).outcome, 'candidate');
-    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\?\\UNC\\server\\share\\repo' } }), ctx(unc)).outcome, 'activity');
+    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\?\\UNC\\server\\share\\repo' } }), ctx(unc)).outcome, 'unsupported');
     const drive = [{ canonicalPath: 'D:\\', decision: 'new', projectId: 'd1' }];
     assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: 'd:\\any\\where' } }), ctx(drive)).envelope.project_id, 'd1');
     assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: 'E:\\any' } }), ctx(drive)).outcome, 'candidate');
@@ -497,17 +502,14 @@ test('extended_length_paths_keep_dots_and_spaces_as_part_of_the_name', async () 
   for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
     const registrations = [{ canonicalPath: 'C:\\lab\\repo', decision: 'new', projectId: 'p1' }];
     const outcome = cwd => normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(registrations)).outcome;
-    assert.equal(outcome('\\\\?\\C:\\lab\\repo'), 'activity');
-    assert.equal(outcome('\\\\?\\C:\\lab\\repo\\sub'), 'activity');
-    // Under \\?\ these are different folders, not other spellings of `repo`.
-    assert.equal(outcome('\\\\?\\C:\\lab\\repo.'), 'candidate');
-    assert.equal(outcome('\\\\?\\C:\\lab\\repo '), 'candidate');
-    // `.` and `..` are not folded under the prefix, and no folder can have those names.
-    assert.equal(outcome('\\\\?\\C:\\lab\\repo\\..\\repo'), 'unsupported');
-    assert.equal(outcome('\\\\?\\C:\\lab\\.\\repo'), 'unsupported');
-    // Without the prefix Windows drops them, so these do name `repo`.
-    assert.equal(outcome('C:\\lab\\repo.'), 'activity');
-    assert.equal(outcome('C:\\lab\\.\\repo'), 'activity');
+    // The caller canonicalises; the adapter does not interpret the \\?\ form at all.
+    for (const cwd of ['\\\\?\\C:\\lab\\repo', '\\\\?\\C:\\lab\\repo\\sub', '\\\\?\\C:\\lab\\repo.', '\\\\?\\C:\\lab\\repo ',
+      '\\\\?\\C:\\lab\\repo\\..\\repo', '\\\\?\\C:\\lab\\.\\repo', '\\\\?\\C:\\\\', '\\\\?\\UNC\\server\\share\\\\x',
+      'C:\\lab\\repo.', 'C:\\lab\\.\\repo', 'C:\\lab\\repo...\\sub', 'C:\\lab\\repo \\sub']) {
+      assert.equal(outcome(cwd), 'unsupported', cwd);
+    }
+    assert.equal(outcome('C:\\lab\\repo'), 'activity');
+    assert.equal(outcome('C:\\lab\\repo\\sub'), 'activity');
   }
 });
 
@@ -527,7 +529,7 @@ test('conflicting_registrations_for_one_folder_fail_closed_in_any_order', async 
   for (const { adapter, normalizeEvent, classifyTurns } of await verifiedAdapters()) {
     const open = { canonicalPath: 'C:\\LSH\\TimeSchedule', decision: 'new', projectId: 'p1' };
     const closed = { canonicalPath: 'c:/lsh/timeschedule/', decision: 'exclude', projectId: 'p1' };
-    const pending = { canonicalPath: 'C:\\LSH\\.\\TimeSchedule', decision: 'pending', projectId: 'p1' };
+    const pending = { canonicalPath: 'C:\\LSH\\TIMESCHEDULE', decision: 'pending', projectId: 'p1' };
     const other = { canonicalPath: 'C:\\LSH\\TimeSchedule\\', decision: 'link', projectId: 'p2' };
     const run = registrations => normalizeEvent(capture(adapter), ctx(registrations));
     for (const order of [[open, closed], [closed, open], [open, pending, closed]]) {
@@ -569,12 +571,97 @@ test('every_listed_event_has_a_sample_from_every_verified_version', async () => 
   }
 });
 
-test('fixtures name no user profile other than the placeholder', () => {
+test('fixtures contain no unexpanded variable reference', () => {
   for (const file of allFixtureFiles()) {
-    const text = JSON.stringify(readJson(file));
-    for (const match of text.matchAll(/Users(?:\\\\|\/|-)([A-Za-z0-9._ -]+?)(?=\\\\|\/|-\.|"|$)/g)) {
-      assert.match(match[1], /^lab-user/, `${file}: profile folder ${match[1]}`);
-    }
+    const text = readFileSync(file, 'utf8');
     assert.ok(!text.includes('%USERPROFILE%') && !text.includes('$env:'), file);
   }
+});
+
+// ---- review round 4 (gpt-6.2-astra): compare canonical paths only, strictly to confirm, loosely to exclude ----
+
+test('a_registration_that_is_not_in_canonical_form_yields_no_body_for_any_folder', async () => {
+  for (const { adapter, normalizeEvent, classifyTurns } of await verifiedAdapters()) {
+    for (const canonicalPath of ['C:\\LSH\\.\\TimeSchedule', 'C:\\LSH\\TimeSchedule.', '\\\\?\\C:\\LSH\\TimeSchedule', 'TimeSchedule', '', undefined]) {
+      for (const decision of ['new', 'exclude', 'pending']) {
+        const registrations = [...REG, { canonicalPath, decision, projectId: 'p2' }];
+        const result = normalizeEvent(capture(adapter), ctx(registrations));
+        assert.equal(result.outcome, 'candidate', `${canonicalPath} ${decision}`);
+        assert.equal(result.envelope, undefined);
+        const stop = capture(adapter, { payload: { hook_event_name: 'Stop', turn_id: 't', prompt_id: 't' } });
+        assert.deepEqual(classifyTurns([stop], ctx(registrations)), []);
+      }
+    }
+  }
+});
+
+test('non_ascii_names_confirm_only_on_an_exact_match_but_exclude_on_a_loose_one', async () => {
+  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+    const run = (cwd, registrations) => normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(registrations));
+    // U+0130 lower-cases to `i` + U+0307 in JavaScript, but Windows treats the two names as different folders.
+    const dotted = [{ canonicalPath: 'C:\\lab\\i\u0307x', decision: 'new', projectId: 'p1' }];
+    assert.equal(run('C:\\lab\\\u0130x', dotted).outcome, 'candidate');
+    assert.equal(run('C:\\lab\\i\u0307x', dotted).outcome, 'activity');
+    const accent = [{ canonicalPath: 'C:\\lab\\caf\u00e9', decision: 'new', projectId: 'p1' }];
+    assert.equal(run('C:\\LAB\\caf\u00e9\\src', accent).outcome, 'activity', 'ASCII case still folds');
+    assert.equal(run('C:\\lab\\CAF\u00c9', accent).outcome, 'candidate', 'non-ASCII case is not folded to confirm');
+    assert.equal(run('C:\\lab\\stra\u00dfe', [{ canonicalPath: 'C:\\lab\\STRASSE', decision: 'new', projectId: 'p1' }]).outcome, 'candidate');
+    // To exclude, over-matching is the safe direction.
+    const nested = [{ canonicalPath: 'C:\\lab', decision: 'new', projectId: 'p1' },
+      { canonicalPath: 'C:\\lab\\priv\u00e9', decision: 'exclude', projectId: 'p1' }];
+    assert.deepEqual(run('C:\\lab\\PRIV\u00c9\\notes', nested), { outcome: 'excluded', reason: 'path_excluded' });
+    assert.deepEqual(run('C:\\lab\\priv\u00e9', nested), { outcome: 'excluded', reason: 'path_excluded' });
+    assert.equal(run('C:\\lab\\public', nested).outcome, 'activity');
+    // Korean has no case: an exact name matches, a different name does not.
+    const korean = [{ canonicalPath: 'C:\\LSH\\\ubd84\uc11d', decision: 'new', projectId: 'k1' }];
+    assert.equal(run('c:\\lsh\\\ubd84\uc11d\\data', korean).envelope.project_id, 'k1');
+    assert.equal(run('C:\\LSH\\\ubd84\uc11d2', korean).outcome, 'candidate');
+  }
+});
+
+test('turn ids that contain a line break do not merge two turns', async () => {
+  const { adapter, classifyTurns } = await loadAdapter('codex');
+  const open = capture(adapter, { payload: { hook_event_name: 'PreToolUse', cwd: 'C:\\lab\\m0-sample', session_id: 's', turn_id: 'x\ny' } });
+  const stop = { ...capture(adapter, { payload: { hook_event_name: 'Stop', cwd: 'C:\\lab\\m0-sample', session_id: 's\nx', turn_id: 'y' } }),
+    capture_id: 'second', captured_at: '2026-11-17T22:48:03.000Z' };
+  assert.deepEqual(classifyTurns([open, stop], LAB).map(turn => turn.ending).sort(), ['completed', 'unterminated']);
+});
+
+test('fixtures do not contain the current account name as a word', () => {
+  const home = path.basename(homedir());
+  const word = new RegExp(`(?<![A-Za-z0-9_])${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
+  for (const file of allFixtureFiles()) {
+    assert.ok(!word.test(readFileSync(file, 'utf8').replaceAll('lab-user', '')), `${file} contains the account name`);
+  }
+});
+
+function profileFolders(value, found = []) {
+  if (typeof value === 'string') {
+    for (const match of value.matchAll(/users[\\/]+([^\\/"]+)/gi)) found.push({ form: 'path', name: match[1] });
+    for (const match of value.matchAll(/users-+([^\\/"]*)/gi)) found.push({ form: 'folder-name', name: match[1] });
+  } else if (Array.isArray(value)) {
+    value.forEach(item => profileFolders(item, found));
+  } else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) { profileFolders(key, found); profileFolders(item, found); }
+  }
+  return found;
+}
+
+test('profile folder check recognises names it must reject', () => {
+  const names = value => profileFolders(value).map(item => item.name);
+  assert.deepEqual(names({ a: 'C:\\Users\\\ud64d\uae38\ub3d9\\x', b: 'c:/users/someone/y', c: ['C:\\Users\\lab-user-2\\z'] }),
+    ['\ud64d\uae38\ub3d9', 'someone', 'lab-user-2']);
+  assert.deepEqual(profileFolders('C--Users-someone-repo'), [{ form: 'folder-name', name: 'someone-repo' }]);
+});
+
+test('fixtures name no profile folder other than the placeholder (any script, any case)', () => {
+  let seen = 0;
+  for (const file of allFixtureFiles()) {
+    for (const { form, name } of profileFolders(readJson(file))) {
+      seen += 1;
+      if (form === 'path') assert.equal(name, 'lab-user', `${file}: profile folder ${name}`);
+      else assert.match(name, /^lab-user(-|$)/, `${file}: profile folder name ${name}`);
+    }
+  }
+  assert.ok(seen > 0, 'the fixtures are expected to contain transcript paths');
 });
