@@ -1,4 +1,4 @@
-//! Keep editor widget state mounted while a confirmation owns input.
+//! Input handling around a mounted editor or its open chooser.
 use crate::app::Message;
 use iced::advanced::{
     layout, mouse, overlay, renderer,
@@ -8,13 +8,28 @@ use iced::advanced::{
 use iced::{Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector};
 
 pub fn frozen(content: Element<'_, Message>, blocked: bool) -> Element<'_, Message> {
-    Element::new(Frozen { content, blocked })
+    Element::new(EditorInput {
+        content,
+        blocked,
+        outside: None,
+    })
 }
-struct Frozen<'a> {
+pub fn dismiss_on_outside_press(
+    content: Element<'_, Message>,
+    message: Message,
+) -> Element<'_, Message> {
+    Element::new(EditorInput {
+        content,
+        blocked: false,
+        outside: Some(message),
+    })
+}
+struct EditorInput<'a> {
     content: Element<'a, Message>,
     blocked: bool,
+    outside: Option<Message>,
 }
-impl Widget<Message, Theme, Renderer> for Frozen<'_> {
+impl Widget<Message, Theme, Renderer> for EditorInput<'_> {
     fn size(&self) -> Size<Length> {
         self.content.as_widget().size()
     }
@@ -80,6 +95,20 @@ impl Widget<Message, Theme, Renderer> for Frozen<'_> {
         viewport: &Rectangle,
     ) {
         if !self.blocked {
+            if let Some(dismiss) = &self.outside {
+                let position = match event {
+                    Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                        cursor.position()
+                    }
+                    Event::Touch(iced::touch::Event::FingerPressed { position, .. }) => {
+                        Some(*position)
+                    }
+                    _ => None,
+                };
+                if position.is_some_and(|p| !layout.bounds().contains(p)) {
+                    shell.publish(dismiss.clone());
+                }
+            }
             self.content.as_widget_mut().update(
                 tree, event, layout, cursor, renderer, clipboard, shell, viewport,
             );

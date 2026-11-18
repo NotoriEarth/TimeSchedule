@@ -1,6 +1,6 @@
 use crate::{
     app::{App, Field, Message, NativeAction, Page},
-    editor::{Confirmation, Form, Kind},
+    editor::{Confirmation, EditorPicker, Form, Kind},
     theme,
 };
 use chrono::{Datelike, Duration, NaiveDate};
@@ -16,7 +16,7 @@ use timeschedule_core::{
 
 pub(crate) const EDITOR_SIZE: iced::Size = iced::Size::new(650.0, 560.0);
 
-const WEEKDAYS: [&str; 7] = ["일", "월", "화", "수", "목", "금", "토"];
+pub(crate) const WEEKDAYS: [&str; 7] = ["일", "월", "화", "수", "목", "금", "토"];
 pub(crate) fn preview(value: &str, limit: usize) -> String {
     let mut chars = value.chars();
     let mut shortened: String = chars.by_ref().take(limit).collect();
@@ -709,15 +709,41 @@ pub(crate) fn editor_view(app: &App) -> Element<'_, Message> {
             .push(quiet("Ctrl+Z / Ctrl+Y · 최근 편집 32회 복원"));
     }
     if matches!(form.kind, Kind::Entry | Kind::Event | Kind::Task) {
-        fields = fields.push(input(
-            if form.kind == Kind::Task {
+        use crate::date_choices::Part;
+        let picker = match &e.picker {
+            Some(EditorPicker::Date(picker)) => Some(picker),
+            _ => None,
+        };
+        let mut date = column![
+            quiet(if form.kind == Kind::Task {
                 "날짜 (선택, YYYY-MM-DD)"
             } else {
                 "날짜 (YYYY-MM-DD)"
-            },
-            &form.date,
-            Field::Date,
-        ));
+            }),
+            row![
+                crate::date_input::input(&form.date, app.editor_date_context()),
+                button(crate::icons::icon(crate::icons::Icon::Calendar))
+                    .style(theme::secondary)
+                    .padding(8)
+                    .on_press(if picker.is_some_and(|p| p.part == Part::Day) {
+                        Message::DismissEditorPicker
+                    } else {
+                        Message::DatePicker(Part::Day)
+                    })
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+        ]
+        .spacing(5);
+        if let Some(picker) = picker {
+            date = date.push(picker.view());
+            fields = fields.push(crate::frozen::dismiss_on_outside_press(
+                date.into(),
+                Message::DismissDatePicker,
+            ));
+        } else {
+            fields = fields.push(date);
+        }
     }
     if form.kind == Kind::Entry {
         let choices: Vec<_> = app
@@ -794,13 +820,11 @@ pub(crate) fn editor_view(app: &App) -> Element<'_, Message> {
                 .on_toggle(|v| Message::Field(Field::AllDay(v))),
         );
         if !form.all_day {
-            fields = fields.push(
-                row![
-                    input("시작 (HH:MM)", &form.start, Field::Start),
-                    input("종료 (HH:MM)", &form.end, Field::End)
-                ]
-                .spacing(10),
-            );
+            fields = fields.push(crate::time_input::view(
+                &form.start,
+                &form.end,
+                e.time_picker(),
+            ));
         }
     }
     if matches!(form.kind, Kind::Event | Kind::Task) {
@@ -859,10 +883,14 @@ pub(crate) fn editor_view(app: &App) -> Element<'_, Message> {
                 .style(theme::text_button)
                 .on_press(Message::CloseEditor)
         ],
-        scrollable(fields)
-            .id(format!("editor-fields-{}", e.generation))
-            .spacing(crate::calendar_ui::SCROLL_GAP)
-            .height(Length::Fill),
+        scrollable(
+            container(fields)
+                .id("editor-focus-fields")
+                .width(Length::Fill)
+        )
+        .id(format!("editor-fields-{}", e.generation))
+        .spacing(crate::calendar_ui::SCROLL_GAP)
+        .height(Length::Fill),
         footer
     ]
     .spacing(14)

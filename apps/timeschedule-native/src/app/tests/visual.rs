@@ -366,6 +366,124 @@ fn click_text(mut element: Element<'_, Message>, size: Size, target: Rectangle) 
 }
 
 #[test]
+fn editor_year_can_be_opened_and_selected_with_the_mouse() {
+    let mut app = fixture();
+    let _ = app.open_form(Form::new(Kind::Event, "2026-11-04".into(), None));
+    let size = Size::new(550.0, 920.0);
+    let labels = calendar_text_bounds(crate::views::editor_view(&app), size);
+    let date_label = labels
+        .iter()
+        .find(|(s, _)| s.starts_with("날짜"))
+        .unwrap()
+        .1;
+    let year = Point::new(date_label.x + 18.0, date_label.y + date_label.height + 20.0);
+    for message in click_text(
+        crate::views::editor_view(&app),
+        size,
+        Rectangle::new(year, Size::ZERO),
+    ) {
+        let _ = app.update(message);
+    }
+    let options = calendar_text_bounds(crate::views::editor_view(&app), size);
+    let next_year = options
+        .iter()
+        .find(|(label, _)| label.trim_end_matches('년') == "2027")
+        .expect("clicking the year should offer 2027")
+        .1;
+    for message in click_text(crate::views::editor_view(&app), size, next_year) {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.editor.as_ref().unwrap().form.date, "2027-11-04");
+}
+
+#[test]
+fn date_digits_keep_focus_when_the_picker_closes_in_both_editor_windows() {
+    use iced::advanced::widget::{operation::Focusable, Id, Operation};
+    use iced::keyboard::{self, key, Key};
+    use iced_runtime::UserInterface;
+
+    #[derive(Default)]
+    struct DateBounds(Option<Rectangle>);
+    impl Operation for DateBounds {
+        fn traverse(&mut self, visit: &mut dyn FnMut(&mut dyn Operation)) {
+            visit(self);
+        }
+        fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn Focusable) {
+            if id == Some(&Id::new("editor-date")) {
+                self.0 = Some(bounds);
+            }
+        }
+    }
+    let digit = |number: &str, code| {
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key: Key::Character(number.into()),
+            modified_key: Key::Character(number.into()),
+            physical_key: key::Physical::Code(code),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: Some(number.into()),
+            repeat: false,
+        })
+    };
+
+    for quick in [false, true] {
+        let mut app = fixture();
+        let window = if quick {
+            window::Id::unique()
+        } else {
+            app.manager
+        };
+        if quick {
+            app.quick_window = Some(window);
+            app.editor_in_quick = true;
+        }
+        let _ = app.open_form(Form::new(Kind::Event, "2026-11-04".into(), None));
+        let size = if quick {
+            crate::views::EDITOR_SIZE
+        } else {
+            app.manager_size
+        };
+        let mut renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut cache = Default::default();
+        for (event, expected) in [
+            (
+                iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                "2026-11-04",
+            ),
+            (
+                iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                "2026-11-04",
+            ),
+            (digit("1", key::Code::Digit1), "2026-11-01"),
+            (digit("5", key::Code::Digit5), "2026-11-15"),
+        ] {
+            let mut ui = UserInterface::build(app.view(window), size, cache, &mut renderer);
+            let mut probe = DateBounds::default();
+            ui.operate(&renderer, &mut probe);
+            let bounds = probe.0.expect("the date input must be mounted");
+            let point = Point::new(bounds.x + 82., bounds.center_y());
+            let mut messages = vec![];
+            ui.update(
+                &[event],
+                mouse::Cursor::Available(point),
+                &mut renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut messages,
+            );
+            cache = ui.into_cache();
+            for message in messages {
+                let _ = app.update(message);
+            }
+            assert_eq!(
+                app.editor.as_ref().unwrap().form.date,
+                expected,
+                "quick={quick}"
+            );
+        }
+    }
+}
+
+#[test]
 fn day_cell_summary_opens_the_day_from_its_own_window() {
     let mut app = overflowing_calendar_fixture(5);
     app.preferences.widget.line_gap = 0;

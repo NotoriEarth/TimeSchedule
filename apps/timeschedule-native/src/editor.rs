@@ -237,6 +237,11 @@ pub enum Confirmation {
     Delete,
 }
 
+pub enum EditorPicker {
+    Date(crate::date_choices::Picker),
+    Time(crate::time_input::Field),
+}
+
 pub struct Editor {
     pub generation: u64,
     pub form: Form,
@@ -245,6 +250,7 @@ pub struct Editor {
     pub saving: bool,
     pub composing: bool,
     pub confirmation: Option<Confirmation>,
+    pub picker: Option<EditorPicker>,
     pub error: String,
     undo: Vec<(String, text_editor::Cursor)>,
     redo: Vec<(String, text_editor::Cursor)>,
@@ -259,6 +265,7 @@ impl Editor {
             saving: false,
             composing: false,
             confirmation: None,
+            picker: None,
             error: String::new(),
             undo: vec![],
             redo: vec![],
@@ -266,6 +273,12 @@ impl Editor {
     }
     pub fn dirty(&self) -> bool {
         self.form != self.initial
+    }
+    pub fn time_picker(&self) -> Option<crate::time_input::Field> {
+        match self.picker {
+            Some(EditorPicker::Time(field)) => Some(field),
+            _ => None,
+        }
     }
     pub fn request_close(&mut self, intent: CloseIntent) -> bool {
         if self.saving {
