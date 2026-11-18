@@ -35,6 +35,6 @@ export function normalizeEvent(input, context) {
   return normalizeCapture(input, context, adapter);
 }
 
-export function classifyTurns(records) {
-  return classify(records, adapter);
+export function classifyTurns(records, context) {
+  return classify(records, context, adapter);
 }

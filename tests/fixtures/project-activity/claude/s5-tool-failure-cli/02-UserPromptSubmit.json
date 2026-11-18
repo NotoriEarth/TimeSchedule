@@ -7,10 +7,10 @@
   "origin": "tool",
   "payload_bytes": 423,
   "payload": {
-    "session_id": "session-0001",
-    "transcript_path": "C:\\Users\\lab-user\\.claude\\projects\\C--LSH--capture-lab-m0-sample\\session-0001.jsonl",
+    "session_id": "session-0002",
+    "transcript_path": "C:\\Users\\lab-user\\.claude\\projects\\C--lab-m0-sample\\session-0002.jsonl",
     "cwd": "C:\\lab\\m0-sample",
-    "prompt_id": "id-0001",
+    "prompt_id": "id-0003",
     "permission_mode": "acceptEdits",
     "hook_event_name": "UserPromptSubmit",
     "prompt": "node missing.js를 실행하고 결과를 한 줄로 보고해라"

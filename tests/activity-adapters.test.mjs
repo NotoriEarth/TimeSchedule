@@ -305,13 +305,13 @@ async function endings(source, scenario) {
   const dir = path.join(FIXTURES, source, scenario);
   const records = readdirSync(dir).filter(file => /^\d{2}-/.test(file)).map(file => readJson(path.join(dir, file)));
   // Order must not matter: the function sorts by capture time itself.
-  return classifyTurns(records.reverse());
+  return classifyTurns(records.reverse(), LAB);
 }
 
 test('codex desktop turn that finished is completed', async () => {
   const turns = await endings('codex', 's1-normal-app');
   assert.deepEqual(turns.map(turn => [turn.ending, turn.last_event]), [['completed', 'Stop']]);
-  assert.equal(turns[0].session_id, 'session-0001');
+  assert.deepEqual([turns[0].session_id], sessionOf('codex', 's1-normal-app'));
   assert.equal(typeof turns[0].turn_id, 'string');
   assert.deepEqual((await endings('codex', 's4-esc-attempt-completed-app')).map(turn => turn.ending), ['completed']);
   assert.deepEqual((await endings('codex', 's2-reentry-app')).map(turn => turn.ending), ['completed', 'completed']);
@@ -342,6 +342,151 @@ test('classifyTurns ignores records it cannot vouch for', async () => {
   const { classifyTurns } = await loadAdapter('codex');
   const dir = path.join(FIXTURES, 'codex', 's1-normal-app');
   const records = readdirSync(dir).filter(file => /^\d{2}-/.test(file)).map(file => readJson(path.join(dir, file)));
-  assert.deepEqual(classifyTurns(records.map(record => ({ ...record, tool_version: '0.0.0-unknown' }))), []);
-  assert.deepEqual(classifyTurns([null, { capture_schema: 1 }, ...records]).map(turn => turn.ending), ['completed']);
+  assert.deepEqual(classifyTurns(records.map(record => ({ ...record, tool_version: '0.0.0-unknown' })), LAB), []);
+  assert.deepEqual(classifyTurns([null, { capture_schema: 1 }, ...records], LAB).map(turn => turn.ending), ['completed']);
+});
+
+// ---- review round 1 (gpt-6.2-astra): fail closed on spelling, origin, decision and order ----
+
+const NESTED = [...REG, { canonicalPath: 'C:\\LSH\\TimeSchedule\\private', decision: 'exclude', projectId: 'p1' }];
+
+test('excluded_path_cannot_be_bypassed_by_path_spelling', async () => {
+  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+    const outcome = cwd => normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(NESTED));
+    for (const cwd of [
+      'C:\\LSH\\TimeSchedule\\.\\private', 'C:\\LSH\\TimeSchedule\\a\\..\\private', 'C:\\LSH\\TimeSchedule\\\\private',
+      'C:/LSH/TimeSchedule/./private/sub', 'C:\\LSH\\TimeSchedule\\private.', 'C:\\LSH\\TimeSchedule\\private ',
+      '\\\\?\\C:\\LSH\\TimeSchedule\\private', 'c:\\lsh\\.\\TIMESCHEDULE\\x\\y\\..\\..\\PRIVATE\\',
+    ]) {
+      assert.deepEqual(outcome(cwd), { outcome: 'excluded', reason: 'path_excluded' }, cwd);
+    }
+    assert.equal(outcome('C:\\LSH\\TimeSchedule\\private\\..\\public').outcome, 'activity');
+    assert.equal(outcome('C:\\LSH\\TimeSchedule\\..\\Other').outcome, 'candidate');
+    assert.equal(outcome('C:\\LSH\\TimeSchedule\\privateer').outcome, 'activity');
+  }
+});
+
+test('cwd_that_is_not_an_absolute_windows_path_is_malformed', async () => {
+  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+    for (const cwd of ['private', '.\\private', '..', 'C:private', '\\LSH\\TimeSchedule', '\\\\server']) {
+      assert.deepEqual(normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(NESTED)), { outcome: 'unsupported', reason: 'malformed' }, cwd);
+    }
+  }
+});
+
+test('unc_and_drive_root_registrations_match_by_segment', async () => {
+  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+    const unc = [{ canonicalPath: '\\\\server\\share\\repo', decision: 'new', projectId: 'u1' }];
+    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\SERVER\\Share\\repo\\.\\sub' } }), ctx(unc)).envelope.project_id, 'u1');
+    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\server\\share2\\repo' } }), ctx(unc)).outcome, 'candidate');
+    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\?\\UNC\\server\\share\\repo' } }), ctx(unc)).outcome, 'activity');
+    const drive = [{ canonicalPath: 'D:\\', decision: 'new', projectId: 'd1' }];
+    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: 'd:\\any\\where' } }), ctx(drive)).envelope.project_id, 'd1');
+    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: 'E:\\any' } }), ctx(drive)).outcome, 'candidate');
+    // A registration that is not an absolute path can never match.
+    const broken = [{ canonicalPath: 'TimeSchedule', decision: 'new', projectId: 'x' }];
+    assert.equal(normalizeEvent(capture(adapter), ctx(broken)).outcome, 'candidate');
+  }
+});
+
+test('unknown_origin_is_malformed', async () => {
+  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+    for (const origin of [undefined, null, '', 'TOOL', 'somewhere-else']) {
+      const result = normalizeEvent({ ...capture(adapter), origin }, ctx());
+      assert.deepEqual(result, { outcome: 'unsupported', reason: 'malformed' }, String(origin));
+    }
+  }
+});
+
+test('unconfirmed_decision_is_a_candidate_without_body', async () => {
+  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+    for (const decision of ['pending', undefined, 'NEW', null]) {
+      const registrations = [{ canonicalPath: 'C:\\LSH\\TimeSchedule', decision, projectId: 'p1' }];
+      const result = normalizeEvent(capture(adapter), ctx(registrations));
+      assert.deepEqual(result, { outcome: 'candidate', candidate: { source: adapter.source, path: 'C:\\LSH\\TimeSchedule' } }, String(decision));
+    }
+    const linked = [{ canonicalPath: 'C:\\LSH\\TimeSchedule', decision: 'link', projectId: 'p9' }];
+    assert.equal(normalizeEvent(capture(adapter), ctx(linked)).envelope.project_id, 'p9');
+  }
+});
+
+function turnRecord(adapter, event, at, extra = {}) {
+  const base = capture(adapter, { payload: { hook_event_name: event, cwd: 'C:\\lab\\m0-sample', turn_id: 'turn-a', prompt_id: 'turn-a' } });
+  return { ...base, capture_id: `${event}-${at}`, captured_at: `2026-11-18T00:00:00.${at}Z`, ...extra };
+}
+
+test('classifyTurns leaves out generation runs and paths that are not confirmed', async () => {
+  for (const { adapter, classifyTurns } of await verifiedAdapters()) {
+    const stop = turnRecord(adapter, 'Stop', '100');
+    assert.equal(classifyTurns([stop], LAB).length, 1);
+    assert.deepEqual(classifyTurns([{ ...stop, origin: 'timeschedule_generation' }], LAB), []);
+    assert.deepEqual(classifyTurns([{ ...stop, origin: undefined }], LAB), []);
+    assert.deepEqual(classifyTurns([stop], ctx()), [], 'path is not registered');
+    assert.deepEqual(classifyTurns([stop], ctx([{ canonicalPath: 'C:\\lab\\m0-sample', decision: 'exclude', projectId: 'lab' }])), []);
+    assert.deepEqual(classifyTurns([stop], ctx([{ canonicalPath: 'C:\\lab\\m0-sample', decision: 'pending', projectId: 'lab' }])), []);
+  }
+  const { classifyTurns } = await loadAdapter('codex');
+  assert.deepEqual(classifyTurns(scenarioRecords('codex', 's7-generation-origin-cli'), LAB), []);
+});
+
+test('classifyTurns gives the same answer for any input order', async () => {
+  const { adapter, classifyTurns } = await loadAdapter('codex');
+  const stop = turnRecord(adapter, 'Stop', '500');
+  const interrupt = turnRecord(adapter, 'Interrupt', '500');
+  const forward = classifyTurns([stop, interrupt], LAB);
+  const backward = classifyTurns([interrupt, stop], LAB);
+  assert.deepEqual(forward, backward);
+  // Two terminal hooks in the same millisecond: do not claim completion.
+  assert.deepEqual(forward.map(turn => [turn.ending, turn.last_event]), [['interrupted', 'Interrupt']]);
+  const later = classifyTurns([turnRecord(adapter, 'Interrupt', '400'), turnRecord(adapter, 'Stop', '600')], LAB);
+  assert.deepEqual(later.map(turn => [turn.ending, turn.last_event]), [['completed', 'Stop']]);
+});
+
+test('classifyTurns names the hook that ended the turn even when more hooks follow', async () => {
+  const { adapter, classifyTurns } = await loadAdapter('codex');
+  const turns = classifyTurns([turnRecord(adapter, 'PreToolUse', '700'), turnRecord(adapter, 'Stop', '600'), turnRecord(adapter, 'PreModelRequest', '100')], LAB);
+  assert.deepEqual(turns.map(turn => [turn.ending, turn.last_event]), [['completed', 'Stop']]);
+  const open = classifyTurns([turnRecord(adapter, 'PreToolUse', '700'), turnRecord(adapter, 'PreModelRequest', '100')], LAB);
+  assert.deepEqual(open.map(turn => [turn.ending, turn.last_event]), [['unterminated', 'PreToolUse']]);
+});
+
+function scenarioRecords(source, scenario) {
+  const dir = path.join(FIXTURES, source, scenario);
+  return readdirSync(dir).filter(file => /^\d{2}-/.test(file)).map(file => readJson(path.join(dir, file)));
+}
+const sessionOf = (source, scenario) => [...new Set(scenarioRecords(source, scenario).map(record => record.payload.session_id))];
+
+test('fixtures keep session identity across scenarios', async () => {
+  for (const source of ['claude', 'codex']) {
+    const first = sessionOf(source, 's1-normal-cli');
+    assert.equal(first.length, 1);
+    assert.deepEqual(sessionOf(source, 's2-resume-cli'), first, `${source}: a resumed session keeps the id of the session it resumed`);
+    const killed = sessionOf(source, source === 'claude' ? 's6-kill-cli' : 's6-kill-after-request-cli');
+    assert.notDeepEqual(killed, first, `${source}: a different session must not share an id`);
+  }
+  assert.deepEqual(sessionOf('codex', 's2-reentry-app'), sessionOf('codex', 's1-normal-app'));
+  assert.deepEqual(sessionOf('codex', 's4-interrupt-app'), sessionOf('codex', 's1-normal-app'));
+  assert.notDeepEqual(sessionOf('codex', 's1-normal-app'), sessionOf('codex', 's1-normal-cli'));
+});
+
+test('a finished turn and a killed turn stay separate when classified together', async () => {
+  const claude = await loadAdapter('claude');
+  const together = claude.classifyTurns([...scenarioRecords('claude', 's6-kill-cli'), ...scenarioRecords('claude', 's1-normal-cli')], LAB);
+  assert.deepEqual(together.map(turn => turn.ending), ['completed', 'unterminated']);
+  const codex = await loadAdapter('codex');
+  const all = ['s1-normal-app', 's2-reentry-app', 's4-esc-attempt-completed-app', 's4-interrupt-app', 's6-kill-after-request-cli']
+    .flatMap(scenario => scenarioRecords('codex', scenario));
+  assert.deepEqual(codex.classifyTurns(all, LAB).map(turn => turn.ending).sort(),
+    ['completed', 'completed', 'completed', 'completed', 'interrupted', 'unterminated']);
+});
+
+test('nothing is listed as supported without a committed sample', async () => {
+  for (const source of Object.keys(SOURCES)) {
+    const { adapter } = await loadAdapter(source);
+    const records = allScenarios().filter(scenario => scenario.source === source).flatMap(scenario => scenario.files.map(readJson));
+    const seenEvents = new Set(records.map(record => record.payload.hook_event_name));
+    const seenVersions = new Set(records.map(record => record.tool_version));
+    for (const event of Object.keys(adapter.events)) assert.ok(seenEvents.has(event), `${source}: ${event} is listed but has no sample`);
+    for (const version of adapter.verifiedVersions) assert.ok(seenVersions.has(version), `${source}: ${version} is listed but has no sample`);
+  }
 });

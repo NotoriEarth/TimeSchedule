@@ -73,11 +73,13 @@
 
 | 끝난 방식 | 훅에 남는 것 | 분류 | 표본 |
 | --- | --- | --- | --- |
-| 정상 종료 | 그 턴의 마지막 훅이 Stop이고 `last_assistant_message`가 있다 | `completed` | Codex 앱 `s1-normal-app`, Codex CLI `s1-normal-cli`, Claude CLI `s1-normal-cli` |
+| 정상 종료 | 그 턴에 Stop이 오고 `last_assistant_message`가 있다. 관측한 표본에서는 Stop이 그 턴의 마지막 훅이었다 | `completed` | Codex 앱 `s1-normal-app`, Codex CLI `s1-normal-cli`, Claude CLI `s1-normal-cli` |
 | 사용자 중단 | Codex가 Interrupt를 보낸다. Stop은 없고, 진행 중이던 도구의 PostToolUse도 없다 | `interrupted` | Codex 앱 `s4-interrupt-app` |
 | 프로세스 강제 종료 | 종료 신호에 해당하는 훅이 없다. 마지막으로 남은 훅이 UserPromptSubmit이나 PreModelRequest다 | `unterminated` | Codex CLI `s6-kill-after-request-cli`, Claude CLI `s6-kill-cli` |
 
-- `unterminated`는 "종료 훅이 오지 않았다"는 뜻이다. 훅만으로는 강제 종료된 턴과 아직 실행 중인 턴을 구분할 수 없다. 세션이 끝났다는 별도 확인이 있어야 그 턴을 유실로 판정할 수 있다.
+- `unterminated`는 "분류에 쓸 수 있는 종료 훅을 찾지 못했다"는 뜻이다. 훅만으로는 강제 종료된 턴과 아직 실행 중인 턴을 구분할 수 없다. 세션이 끝났다는 별도 확인이 있어야 그 턴을 유실로 판정할 수 있다.
+- 분류 규칙: 입력 순서와 무관하게 같은 결과를 낸다. 한 턴에 종료 훅이 여러 개면 관측 시각이 가장 늦은 것이 결정하고, Stop과 Interrupt의 시각이 같으면 완료로 단정하지 않고 `interrupted`로 둔다. 종료 훅 뒤에 다른 훅이 더 와도 판정은 바뀌지 않는다. 시각이 겹치는 경우와 종료 뒤 훅은 실제 표본에 없었고 합성 입력으로만 시험했다.
+- 분류 대상: `normalizeEvent`와 같은 조건을 통과한 기록만 센다. 생성 출처 기록, 검증하지 않은 버전, 확인하지 않았거나 제외한 폴더의 기록은 턴으로 집계하지 않는다.
 - Interrupt 입력에는 물리 키와 화면의 중단 버튼을 구분하는 필드가 없다.
 - 사용자가 중단을 눌렀어도 턴이 먼저 끝나면 정상 종료와 같은 Stop이 온다(`s4-esc-attempt-completed-app`).
 - Claude Code의 사용자 중단은 관측하지 않았다. Claude 어댑터에는 `interrupted`로 분류되는 이벤트가 없다.
@@ -124,9 +126,12 @@ StopFailure, PreCompact, PostCompact, Notification, SubagentStop, PermissionRequ
 
 ### 두 도구 공통
 
-- PreToolUse를 제외하는 근거: 정상 흐름에서는 항상 뒤에 결과 이벤트가 왔다. 예외는 Codex 사용자 중단으로, PreToolUse 뒤에 결과 없이 Interrupt가 왔다. 이때 어떤 도구가 실행 중이었는지는 활동에 남지 않는다.
+- PreToolUse를 제외하는 근거: 정상 흐름에서는 항상 뒤에 결과 이벤트가 왔다. 예외는 Codex 사용자 중단으로, PreToolUse 뒤에 결과 없이 Interrupt가 왔다. 훅 입력의 PreToolUse에는 도구 이름이 있지만 어댑터가 이 이벤트를 제외하므로, 중단 당시 실행 중이던 도구는 활동 봉투에 남지 않는다.
 - 도구 입력·출력의 본문은 봉투에 넣지 않는다. 얼마나 발췌할지는 미확정 항목이다.
-- 한국어 프롬프트와 응답은 훅 입력에서 원문 그대로였다.
+- 한국어: Claude CLI는 한국어 프롬프트와 응답이 훅 입력에서 원문 그대로였다. Codex는 한국어 응답(앱)을 확인했다. Codex CLI의 프롬프트 표본 6건은 모두 영어여서 Codex의 한국어 프롬프트 보존은 미확인이다.
+- 판정은 닫힌 쪽으로 한다. 출처가 `tool`이 아니거나 알 수 없는 값이면 변환하지 않는다. 등록 결정이 `new`나 `link`가 아니면(없음, 미정 포함) 경로 후보만 내고 본문은 내지 않는다.
+- 봉투의 `event_id`는 관측 스크립트가 기록을 저장할 때 한 번 발급한 값이다. 저장된 기록을 다시 변환하거나 재전송하면 같은 값이 유지된다. 훅이 다시 실행되면 새 이벤트이며 새 값을 받는다.
+- 커밋한 표본의 세션·턴 ID는 실제 값을 치환한 것이다. 도구별로 모든 시나리오에 같은 치환표를 써서, 같은 실제 세션은 같은 표시를 갖고 다른 세션은 다른 표시를 갖는다. 재개 시나리오가 직전 세션과 같은 `session_id`를 갖는다는 점을 표본에서 확인할 수 있다.
 
 ## 5. 훅이 주지 않는 것과 원문 로그
 
@@ -157,16 +162,18 @@ StopFailure, PreCompact, PostCompact, Notification, SubagentStop, PermissionRequ
 | 훅 입력 크기(바이트), Claude CLI 전체 | 278 | 506 | 1,400 | 36 |
 | 훅 입력 크기(바이트), Codex 전체 | 283 | 481 | 1,318 | 89 |
 
+중앙값은 표본 수가 짝수이면 가운데 두 값의 평균이다.
+
 이벤트별 훅 입력 크기(바이트, 최소/중앙/최대, 표본 수):
 
 | 이벤트 | Claude CLI | Codex |
 | --- | --- | --- |
 | SessionStart | 278 / 278 / 404 (6) | 336 / 336 / 342 (8) |
-| UserPromptSubmit | 399 / 406 / 423 (6) | 457 / 494 / 636 (6) |
+| UserPromptSubmit | 399 / 403 / 423 (6) | 457 / 487.5 / 636 (6) |
 | PreModelRequest | — | 341 / 341 / 348 (20) |
 | PostModelRequest | — | 534 / 538 / 546 (19) |
-| PreToolUse | 506 / 518 / 579 (7) | 478 / 530 / 711 (10) |
-| PostToolUse | 650 / 717 / 889 (6) | 542 / 600 / 1,318 (9) |
+| PreToolUse | 506 / 518 / 579 (7) | 478 / 528 / 711 (10) |
+| PostToolUse | 650 / 703.5 / 889 (6) | 542 / 600 / 1,318 (9) |
 | PostToolUseFailure | 1,400 (1) | — |
 | Stop | 567 / 647 / 1,356 (5) | 413 / 514 / 1,301 (9) |
 | Interrupt | — | 363 (1) |
@@ -198,7 +205,7 @@ Claude 표본 36건에는 강제 종료 첫 시도(엉뚱한 프로세스를 종
 5. Claude: 시험 폴더에서 `claude -p "<프롬프트>" --model claude-haiku-5-5 --max-turns 3 --permission-mode acceptEdits --output-format json`. 다른 Claude Code 세션 안에서 실행한다면 이름이 `CLAUDE`, `ANTHROPIC`으로 시작하는 환경 변수를 지우고 실행한다.
 6. Codex: `codex exec -m gpt-6-luna -c model_reasoning_effort="low" --sandbox workspace-write -C <시험 폴더> --json "<프롬프트>"`. 앱 시나리오는 같은 폴더의 대화에서 수행한다.
 7. 시나리오가 끝날 때마다 `_inbox`를 시나리오 이름으로 바꾼다.
-8. `node scripts/activity-adapters/sanitize-fixture.mjs --in <원본 폴더> --out tests/fixtures/project-activity/<도구>/<시나리오> --home %USERPROFILE% --lab <시험 폴더>`로 표본을 만든다. 원본은 커밋하지 않는다.
+8. `node scripts/activity-adapters/sanitize-fixture.mjs --in <원본 폴더> --out tests/fixtures/project-activity/<도구>/<시나리오> --home %USERPROFILE% --lab <시험 폴더> --ids <시험 폴더>\.capture\id-map-<도구>.json`으로 표본을 만든다. `--ids` 파일은 실제 ID와 치환 표시의 대응을 시나리오 사이에 유지한다. 원본과 이 파일은 커밋하지 않는다.
 
 강제 종료를 재현할 때 주의: Git Bash의 `/proc/<pid>/winpid`는 래퍼 프로세스를 가리킨다. 그것을 종료하면 `claude.exe`는 살아남아 세션이 정상 완료된다. PowerShell `Start-Process -PassThru`로 얻은 PID를 `taskkill /T /F`로 종료해야 한다.
 
@@ -208,7 +215,7 @@ Claude 표본 36건에는 강제 종료 첫 시도(엉뚱한 프로세스를 종
 
 | 훅으로 자동 수집 가능(관측) | 훅으로는 얻지 못함 |
 | --- | --- |
-| 세션 시작·재개·축약·종료 | 강제 종료된 턴의 결과, 중단된 턴에서 실행 중이던 도구 |
+| 세션 시작·재개·축약·종료 | 강제 종료된 턴의 결과 |
 | 사용자 프롬프트 원문(Claude CLI, Codex CLI) | 판단 이유와 검토한 대안(마지막 응답 문장에 들어 있을 때만 간접적으로 남는다) |
 | 도구 이름과 호출 사실. Claude는 성공·실패와 소요 시간까지 | Codex 도구의 성공·실패 여부 |
 | 턴이 끝날 때의 마지막 응답, Codex의 사용자 중단 | 검증 범위와 미검증 범위에 대한 명시적 진술, 여러 턴에 걸친 문제 해결의 연결 |
@@ -222,5 +229,7 @@ Claude 표본 36건에는 강제 종료 첫 시도(엉뚱한 프로세스를 종
 - **종료 훅이 없는 턴:** 훅만으로는 강제 종료와 진행 중을 구분할 수 없다. 원문 로그 재수집을 지원하거나 `확인 불가`로 표시해야 한다.
 - **Codex 도구 실패:** 훅에 실패 표시가 없다. 실패 여부가 필요하면 출력 문구 해석이나 원문 로그가 필요하며, 그 전에는 "실행됨"까지만 말할 수 있다.
 - **Codex 앱의 프롬프트:** 입력창 직접 입력에서 UserPromptSubmit이 오는지 확인해야 한다. 오지 않으면 앱에서는 프롬프트 없이 도구·응답만 수집된다.
-- **등록 경로 대조:** 어댑터는 문자열만 비교한다. junction·worktree의 실제 경로 해석은 작업 2의 책임이다.
+- **등록 경로 대조:** 어댑터는 파일 시스템을 조회하지 않고 문자열만 비교한다. 대소문자, 구분자, `.`·`..`, 끝의 점·공백, `\\?\` 접두사처럼 문자열로 정리할 수 있는 표기 차이는 같은 폴더로 본다. junction·symlink·worktree의 실제 경로와 8.3 짧은 이름은 구분하지 못하므로 작업 2에서 등록 전에 해석해야 한다. 절대 경로가 아닌 `cwd`는 변환하지 않는다.
+- **필드 누락:** 검증한 이벤트에서 기대한 필드(예: Stop의 `last_assistant_message`)가 빠져도 어댑터는 빈 값으로 활동을 만든다. 누락을 따로 표시하지 않는다.
+- **표본에 남은 식별자:** 도구 호출 ID(`toolu_…`, `call_…`)는 치환하지 않았다. 인증 정보는 아니다.
 - **Claude 데스크톱 앱, Codex npm CLI, MCP 경로:** 관측하지 않았다.

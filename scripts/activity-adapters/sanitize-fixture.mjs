@@ -2,13 +2,17 @@
 // Turns raw CaptureRecords from the M0 lab into fixtures that are safe to commit:
 // the real home folder, the lab folder and every session/UUID-shaped id are replaced
 // by fixed placeholders. Event structure and field names are left as observed.
-import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HOME_PLACEHOLDER = 'C:\\Users\\lab-user';
 const LAB_PLACEHOLDER = 'C:\\lab\\m0-sample';
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+// Claude Code names a project's transcript folder after its path, with every character
+// that is not a letter or digit turned into `-`.
+const folderName = value => value.replace(/\//g, '\\').replace(/\\+$/, '').replace(/[^A-Za-z0-9]/g, '-');
 
 const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -47,6 +51,7 @@ export function sanitizeCapture(record, { homeDir, labRoot, sessionIds }) {
   const homeName = path.win32.basename(homeDir.replace(/\//g, '\\'));
   const paths = text => {
     let current = replacePath(replacePath(text, labRoot, LAB_PLACEHOLDER), homeDir, HOME_PLACEHOLDER);
+    current = current.replace(new RegExp(escapeRegExp(folderName(labRoot)), 'gi'), () => folderName(LAB_PLACEHOLDER));
     if (homeName.length >= 3) current = current.replace(new RegExp(escapeRegExp(homeName), 'gi'), 'lab-user');
     return current;
   };
@@ -64,7 +69,7 @@ export function sanitizeCapture(record, { homeDir, labRoot, sessionIds }) {
 function parseArgs(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 2) {
-    if (!['--in', '--out', '--home', '--lab'].includes(argv[index]) || argv[index + 1] === undefined) {
+    if (!['--in', '--out', '--home', '--lab', '--ids'].includes(argv[index]) || argv[index + 1] === undefined) {
       throw new Error(`unexpected argument ${argv[index]}`);
     }
     options[argv[index].slice(2)] = argv[index + 1];
@@ -83,13 +88,17 @@ function main() {
   for (const name of readdirSync(options.out)) {
     if (/^\d{2,}-.*\.json$/.test(name)) rmSync(path.join(options.out, name));
   }
-  const sessionIds = new Map();
+  // With --ids the replacement table is kept between runs, so one real session keeps one
+  // placeholder across scenarios and different sessions never share one. The file holds
+  // real ids and must stay outside the repository.
+  const sessionIds = new Map(options.ids && existsSync(options.ids) ? JSON.parse(readFileSync(options.ids, 'utf8')) : []);
   records.forEach((record, index) => {
     const event = String(record.payload?.hook_event_name ?? 'unknown').replace(/[^A-Za-z0-9_]/g, '') || 'unknown';
     const name = `${String(index + 1).padStart(2, '0')}-${event}.json`;
     const cleaned = sanitizeCapture(record, { homeDir: options.home, labRoot: options.lab, sessionIds });
     writeFileSync(path.join(options.out, name), `${JSON.stringify(cleaned, null, 2)}\n`);
   });
+  if (options.ids) writeFileSync(options.ids, `${JSON.stringify([...sessionIds], null, 2)}\n`);
   process.stdout.write(`${records.length} fixture file(s) written to ${options.out}\n`);
 }
 

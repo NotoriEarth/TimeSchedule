@@ -7,10 +7,10 @@
   "origin": "tool",
   "payload_bytes": 406,
   "payload": {
-    "session_id": "session-0001",
-    "transcript_path": "C:\\Users\\lab-user\\.claude\\projects\\C--LSH--capture-lab-m0-sample\\session-0001.jsonl",
+    "session_id": "session-0003",
+    "transcript_path": "C:\\Users\\lab-user\\.claude\\projects\\C--lab-m0-sample\\session-0003.jsonl",
     "cwd": "C:\\lab\\m0-sample",
-    "prompt_id": "id-0001",
+    "prompt_id": "id-0004",
     "permission_mode": "acceptEdits",
     "hook_event_name": "UserPromptSubmit",
     "prompt": "Print the numbers 1 to 300 slowly, one per line."

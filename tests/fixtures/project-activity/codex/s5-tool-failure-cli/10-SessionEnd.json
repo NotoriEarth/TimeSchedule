@@ -7,8 +7,8 @@
   "origin": "tool",
   "payload_bytes": 283,
   "payload": {
-    "session_id": "session-0001",
-    "transcript_path": "C:\\Users\\lab-user\\.codex\\sessions\\2026\\11\\18\\rollout-2026-11-18T08-11-36-session-0001.jsonl",
+    "session_id": "session-0002",
+    "transcript_path": "C:\\Users\\lab-user\\.codex\\sessions\\2026\\11\\18\\rollout-2026-11-18T08-11-36-session-0002.jsonl",
     "cwd": "C:\\lab\\m0-sample",
     "hook_event_name": "SessionEnd",
     "reason": "other"

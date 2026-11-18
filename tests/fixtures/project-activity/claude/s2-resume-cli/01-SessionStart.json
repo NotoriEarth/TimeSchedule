@@ -8,7 +8,7 @@
   "payload_bytes": 404,
   "payload": {
     "session_id": "session-0001",
-    "transcript_path": "C:\\Users\\lab-user\\.claude\\projects\\C--LSH--capture-lab-m0-sample\\session-0001.jsonl",
+    "transcript_path": "C:\\Users\\lab-user\\.claude\\projects\\C--lab-m0-sample\\session-0001.jsonl",
     "cwd": "C:\\lab\\m0-sample",
     "hook_event_name": "SessionStart",
     "source": "resume",

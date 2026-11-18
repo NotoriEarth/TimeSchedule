@@ -1,23 +1,55 @@
 // Shared rules for turning one CaptureRecord (see probe-hook.mjs) into a result the
 // activity pipeline can act on. Pure functions: no file system, no network, no clock.
 //
-// The order of the checks is the contract. Earlier checks win, so a record never
-// yields a body unless its origin, client version, event name and path all pass.
+// The order of the checks is the contract. Earlier checks win, and every check fails
+// closed: a record yields a body only when its origin is exactly `tool`, its client
+// version and event are verified, and its folder is registered as `new` or `link`.
 
 const isText = value => typeof value === 'string' && value.length > 0;
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const ORIGINS = ['tool', 'timeschedule_generation'];
+const CONFIRMED = ['new', 'link'];
+
+// Comparison form of an absolute Windows path, or null when the text is not one.
+// Two spellings of the same folder must compare equal, otherwise an excluded folder
+// could be reached under another spelling: case, `/` vs `\`, repeated or trailing
+// separators, `.` and `..` segments, trailing dots and spaces (which Windows drops)
+// and the `\\?\` prefix are all folded here.
+// What needs the file system is not handled: junctions, symlinks, worktrees and 8.3
+// short names are resolved by the caller before registration.
+function comparable(value) {
+  if (!isText(value)) return null;
+  let text = value.replace(/\//g, '\\');
+  if (/^\\\\\?\\UNC\\/i.test(text)) text = `\\\\${text.slice(8)}`;
+  else if (text.startsWith('\\\\?\\')) text = text.slice(4);
+  let root;
+  let rest;
+  const drive = /^([A-Za-z]):(\\|$)/.exec(text);
+  const unc = /^\\\\([^\\]+)\\([^\\]+)(\\|$)/.exec(text);
+  if (drive) {
+    root = `${drive[1].toLowerCase()}:`;
+    rest = text.slice(2);
+  } else if (unc) {
+    root = `\\\\${unc[1].toLowerCase()}\\${unc[2].toLowerCase()}`;
+    rest = text.slice(unc[1].length + unc[2].length + 3);
+  } else {
+    return null;
+  }
+  const segments = [];
+  for (const raw of rest.split('\\')) {
+    if (raw === '..') { segments.pop(); continue; }
+    const segment = raw.replace(/[. ]+$/, '').toLowerCase();
+    if (segment) segments.push(segment);
+  }
+  return [root, ...segments].join('\\');
+}
 
 function isWellFormed(record, adapter) {
   const payload = record?.payload;
   return isObject(record) && record.capture_schema === 1 && record.source === adapter.source
+    && ORIGINS.includes(record.origin)
     && isText(record.capture_id) && isText(record.captured_at) && isObject(payload)
-    && isText(payload.session_id) && isText(payload.cwd) && isText(payload.hook_event_name);
-}
-
-// Comparison form only. Junctions, symlinks and worktrees are resolved by the caller
-// before registration; this function never touches the file system.
-function comparable(value) {
-  return value.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+    && isText(payload.session_id) && isText(payload.hook_event_name) && comparable(payload.cwd) !== null;
 }
 
 // Returns the registration whose path equals `cwd` or is an ancestor folder of it.
@@ -25,11 +57,12 @@ function comparable(value) {
 // A sibling that merely shares a prefix (`Repo-test` vs `Repo`) does not match.
 export function resolveRegistration(cwd, registrations) {
   const target = comparable(cwd);
+  if (target === null) return null;
   let best = null;
   let bestLength = -1;
   for (const registration of registrations ?? []) {
-    const base = comparable(registration.canonicalPath);
-    if ((target === base || target.startsWith(`${base}\\`)) && base.length > bestLength) {
+    const base = comparable(registration?.canonicalPath);
+    if (base !== null && (target === base || target.startsWith(`${base}\\`)) && base.length > bestLength) {
       best = registration;
       bestLength = base.length;
     }
@@ -46,9 +79,12 @@ export function normalizeCapture(record, context, adapter) {
   const event = adapter.events[payload.hook_event_name];
   if (event.skip) return { outcome: 'excluded', reason: event.skip };
 
-  const registration = resolveRegistration(payload.cwd, context.registrations);
-  if (!registration) return { outcome: 'candidate', candidate: { source: adapter.source, path: payload.cwd } };
-  if (registration.decision === 'exclude') return { outcome: 'excluded', reason: 'path_excluded' };
+  const registration = resolveRegistration(payload.cwd, context?.registrations);
+  if (registration?.decision === 'exclude') return { outcome: 'excluded', reason: 'path_excluded' };
+  // Not registered, or registered without a confirmed decision: the path only, never a body.
+  if (!registration || !CONFIRMED.includes(registration.decision)) {
+    return { outcome: 'candidate', candidate: { source: adapter.source, path: payload.cwd } };
+  }
 
   return {
     outcome: 'activity',
@@ -56,7 +92,8 @@ export function normalizeCapture(record, context, adapter) {
       schema_version: 1,
       source: adapter.source,
       session_id: payload.session_id,
-      // Issued once by the probe and reused on every resend, so a replay is recognisable.
+      // Issued once by the probe and stored with the record, so resending the stored
+      // record is recognisable. Running the hook again is a new event with a new id.
       event_id: record.capture_id,
       revision: 1,
       project_id: registration.projectId,
@@ -75,33 +112,51 @@ export function normalizeCapture(record, context, adapter) {
 // Says how each turn in a set of captured records ended:
 //   completed    - the tool's normal end-of-turn hook arrived (Stop)
 //   interrupted  - the tool reported that the user stopped the turn (Codex Interrupt)
-//   unterminated - turn activity was captured but no terminal hook ever arrived
-// `unterminated` is what a killed process leaves behind. Hooks alone cannot tell it from a
-// turn that is still running, so the caller must know the session is over before it
+//   unterminated - turn activity was captured but no usable terminal hook was found
+// `unterminated` is what a killed process leaves behind. Hooks alone cannot tell it from
+// a turn that is still running, so the caller must know the session is over before it
 // treats the turn as lost.
 //
-// Unlike normalizeCapture this looks at skipped events too (a PreToolUse with nothing
-// after it is the only trace of an interrupted tool call) and ignores path registration:
-// it reads event names and ids only, never a body.
-export function classifyTurns(records, adapter) {
-  const usable = (records ?? [])
-    .filter(record => isWellFormed(record, adapter)
-      && adapter.verifiedVersions.includes(record.tool_version)
-      && Object.hasOwn(adapter.events, record.payload.hook_event_name)
-      && adapter.events[record.payload.hook_event_name].turn)
-    .sort((a, b) => a.captured_at.localeCompare(b.captured_at));
+// The same gates as normalizeCapture apply (origin, version, event, confirmed folder),
+// so the tool's own generation runs and unconfirmed folders never appear here. Skipped
+// events are read too: a PreToolUse with nothing after it is the only trace of an
+// interrupted tool call. Only event names and ids are read, never a body.
+//
+// The answer does not depend on the order of `records`. The terminal hook with the
+// latest capture time decides; if a Stop and an Interrupt share that time the turn is
+// reported as interrupted rather than claimed as completed. `last_event` is that
+// terminal hook, or the latest turn hook when there is none.
+export function classifyTurns(records, context, adapter) {
+  const usable = (records ?? []).filter(record => {
+    if (!isWellFormed(record, adapter) || record.origin !== 'tool') return false;
+    if (!adapter.verifiedVersions.includes(record.tool_version)) return false;
+    const name = record.payload.hook_event_name;
+    if (!Object.hasOwn(adapter.events, name) || !adapter.events[name].turn) return false;
+    const registration = resolveRegistration(record.payload.cwd, context?.registrations);
+    return Boolean(registration) && CONFIRMED.includes(registration.decision);
+  }).sort((a, b) => (a.captured_at < b.captured_at ? -1 : a.captured_at > b.captured_at ? 1
+    : a.capture_id < b.capture_id ? -1 : a.capture_id > b.capture_id ? 1 : 0));
+
   const turns = new Map();
   for (const record of usable) {
     const turnId = adapter.turnKey(record.payload);
     if (!isText(turnId)) continue;
     const key = `${record.payload.session_id}\n${turnId}`;
-    const turn = turns.get(key) ?? { session_id: record.payload.session_id, turn_id: turnId, ending: 'unterminated', last_event: null };
-    const marker = adapter.events[record.payload.hook_event_name].turn;
-    turn.last_event = record.payload.hook_event_name;
-    if (marker !== 'open') turn.ending = marker;
+    const turn = turns.get(key)
+      ?? { session_id: record.payload.session_id, turn_id: turnId, ending: 'unterminated', last_event: null, terminalAt: null };
+    const name = record.payload.hook_event_name;
+    const marker = adapter.events[name].turn;
+    if (marker === 'open') {
+      if (turn.terminalAt === null) turn.last_event = name;
+    } else if (turn.terminalAt === null || record.captured_at > turn.terminalAt
+      || (record.captured_at === turn.terminalAt && marker === 'interrupted')) {
+      turn.ending = marker;
+      turn.last_event = name;
+      turn.terminalAt = record.captured_at;
+    }
     turns.set(key, turn);
   }
-  return [...turns.values()];
+  return [...turns.values()].map(({ terminalAt, ...turn }) => turn);
 }
 
 // Tool input and output text is not carried in M0: how much to excerpt is undecided.

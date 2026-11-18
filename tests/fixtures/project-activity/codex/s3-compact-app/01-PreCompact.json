@@ -7,9 +7,9 @@
   "origin": "tool",
   "payload_bytes": 355,
   "payload": {
-    "session_id": "session-0001",
-    "turn_id": "id-0001",
-    "transcript_path": "C:\\Users\\lab-user\\.codex\\sessions\\2026\\11\\18\\rollout-2026-11-18T08-31-23-session-0001.jsonl",
+    "session_id": "session-0005",
+    "turn_id": "id-0014",
+    "transcript_path": "C:\\Users\\lab-user\\.codex\\sessions\\2026\\11\\18\\rollout-2026-11-18T08-31-23-session-0005.jsonl",
     "cwd": "C:\\lab\\m0-sample",
     "hook_event_name": "PreCompact",
     "model": "gpt-6-luna",

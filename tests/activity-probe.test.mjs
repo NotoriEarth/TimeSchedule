@@ -143,7 +143,8 @@ test('sanitize_replaces_home_lab_and_session_ids', async () => {
   assert.ok(!/realname/i.test(text), text);
   assert.equal(out.payload.cwd, 'C:\\lab\\m0-sample');
   assert.equal(out.payload.session_id, 'session-0001');
-  assert.equal(out.payload.transcript_path, 'C:\\Users\\lab-user\\.claude\\projects\\C--LSH--capture-lab-m0-sample\\session-0001.jsonl');
+  // The folder name Claude Code derives from the lab path is replaced too.
+  assert.equal(out.payload.transcript_path, 'C:\\Users\\lab-user\\.claude\\projects\\C--lab-m0-sample\\session-0001.jsonl');
   assert.equal(sanitizeCapture(sample(), sanitizeOptions(ids)).payload.session_id, 'session-0001');
   assert.equal(out.capture_id, input.capture_id);
   assert.deepEqual(input, sample(), 'the input record must not be modified');
@@ -170,4 +171,47 @@ test('sanitize_cli_orders_files_by_capture_time', t => {
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(readdirSync(out).sort(), ['01-SessionStart.json', '02-Stop.json']);
   assert.ok(!/realname/i.test(readFileSync(path.join(out, '02-Stop.json'), 'utf8')));
+});
+
+// ---- review round 1 (gpt-6.2-astra) ----
+
+test('probe_counts_a_very_large_payload_without_keeping_it', t => {
+  const dir = scratch(t);
+  const input = `{"a":"${'x'.repeat(6 * 1048576)}"}`;
+  const r = run(['--source', 'codex', '--out', dir], input);
+  assert.equal(r.status, 0, r.stderr);
+  const { record, text } = onlyRecord(dir);
+  assert.equal(record.payload_error, 'too_large');
+  assert.equal(record.payload_bytes, Buffer.byteLength(input));
+  assert.ok(text.length < 4096);
+});
+
+test('probe_stops_buffering_once_the_limit_is_passed', async () => {
+  const { readBounded } = await import('../scripts/activity-adapters/probe-hook.mjs');
+  let kept = 0;
+  async function* chunks() { for (let index = 0; index < 64; index += 1) yield Buffer.alloc(65536, 0x78); }
+  const result = await readBounded(chunks(), 1048576, held => { kept = Math.max(kept, held); });
+  assert.equal(result.bytes, 64 * 65536);
+  assert.equal(result.buffer, null);
+  assert.ok(kept <= 1048576, `held ${kept} bytes at once`);
+  const small = await readBounded((async function* () { yield Buffer.from('{"a":1}'); })(), 1048576);
+  assert.equal(small.buffer.toString('utf8'), '{"a":1}');
+});
+
+test('sanitize_cli_keeps_ids_stable_across_runs_with_an_id_file', t => {
+  const dir = scratch(t);
+  const ids = path.join(dir, 'ids.json');
+  const write = (folder, sessionId) => {
+    mkdirSync(path.join(dir, folder));
+    writeFileSync(path.join(dir, folder, 'a.json'), JSON.stringify({ ...sample(), payload: { ...sample().payload, session_id: sessionId } }));
+  };
+  const sanitize = (folder, out) => spawnSync(process.execPath, [SANITIZE, '--in', path.join(dir, folder), '--out', path.join(dir, out),
+    '--home', 'C:\\Users\\realname', '--lab', 'C:\\LSH\\_capture-lab\\m0-sample', '--ids', ids], { encoding: 'utf8', windowsHide: true });
+  write('raw1', 'real-session-A'); write('raw2', 'real-session-B'); write('raw3', 'real-session-A');
+  for (const [folder, out] of [['raw1', 'out1'], ['raw2', 'out2'], ['raw3', 'out3']]) assert.equal(sanitize(folder, out).status, 0);
+  const session = out => JSON.parse(readFileSync(path.join(dir, out, '01-Stop.json'), 'utf8')).payload.session_id;
+  assert.equal(session('out1'), 'session-0001');
+  assert.equal(session('out2'), 'session-0002');
+  assert.equal(session('out3'), 'session-0001');
+  assert.ok(!readFileSync(path.join(dir, 'out1', '01-Stop.json'), 'utf8').includes('real-session-A'));
 });

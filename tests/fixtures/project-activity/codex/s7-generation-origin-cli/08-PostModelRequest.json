@@ -7,10 +7,10 @@
   "origin": "timeschedule_generation",
   "payload_bytes": 537,
   "payload": {
-    "session_id": "session-0001",
-    "turn_id": "id-0001",
+    "session_id": "session-0004",
+    "turn_id": "id-0010",
     "cwd": "C:\\lab\\m0-sample",
-    "transcript_path": "C:\\Users\\lab-user\\.codex\\sessions\\2026\\11\\18\\rollout-2026-11-18T08-12-11-session-0001.jsonl",
+    "transcript_path": "C:\\Users\\lab-user\\.codex\\sessions\\2026\\11\\18\\rollout-2026-11-18T08-12-11-session-0004.jsonl",
     "model": "gpt-6-luna",
     "hook_event_name": "PostModelRequest",
     "status": "completed",
