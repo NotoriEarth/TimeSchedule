@@ -11,6 +11,8 @@ const SOURCES = { claude: 'claude.mjs', codex: 'codex.mjs' };
 const loadAdapter = name => import(`../scripts/activity-adapters/${SOURCES[name]}`);
 const readJson = file => JSON.parse(readFileSync(file, 'utf8'));
 const isSample = file => /^\d{2,}-.*\.json$/.test(file);
+// `100-…` must come after `11-…`: compare the leading number, not the text.
+const bySampleNumber = (a, b) => Number.parseInt(path.basename(a), 10) - Number.parseInt(path.basename(b), 10) || a.localeCompare(b);
 
 function allScenarios() {
   const scenarios = [];
@@ -19,7 +21,7 @@ function allScenarios() {
     if (!existsSync(sourceDir)) continue;
     for (const name of readdirSync(sourceDir).sort()) {
       const dir = path.join(sourceDir, name);
-      const files = readdirSync(dir).filter(isSample).sort().map(file => path.join(dir, file));
+      const files = readdirSync(dir).filter(isSample).sort(bySampleNumber).map(file => path.join(dir, file));
       scenarios.push({ source, name, dir, files });
     }
   }
@@ -28,7 +30,7 @@ function allScenarios() {
 const allFixtureFiles = () => allScenarios().flatMap(scenario => scenario.files);
 const scenarioRecords = (source, scenario) => {
   const dir = path.join(FIXTURES, source, scenario);
-  return readdirSync(dir).filter(isSample).sort().map(file => readJson(path.join(dir, file)));
+  return readdirSync(dir).filter(isSample).sort(bySampleNumber).map(file => readJson(path.join(dir, file)));
 };
 const sessionOf = (source, scenario) => [...new Set(scenarioRecords(source, scenario).map(record => record.payload.session_id))];
 
@@ -207,7 +209,7 @@ test('a_verified_event_without_its_required_fields_is_malformed', async () => {
     const noTurn = capture(adapter, { payload: { hook_event_name: 'Stop', last_assistant_message: 'done', turn_id: undefined, prompt_id: undefined } });
     assert.deepEqual(normalizeEvent(noTurn, ctx()), malformed);
     assert.deepEqual(classifyTurns([noTurn], ctx()), []);
-    const skippedNoTurn = capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Write', turn_id: '', prompt_id: '' } });
+    const skippedNoTurn = capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_use_id: 'call_1', tool_input: {}, turn_id: '', prompt_id: '' } });
     assert.deepEqual(normalizeEvent(skippedNoTurn, ctx()), malformed);
     // An empty final message is still a final message.
     assert.equal(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'Stop', last_assistant_message: '' } }), ctx()).outcome, 'activity');
@@ -216,7 +218,7 @@ test('a_verified_event_without_its_required_fields_is_malformed', async () => {
 
 test('redundant_event_is_excluded_without_body', async () => {
   for (const { adapter, normalizeEvent } of await adapters()) {
-    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Write' } }), ctx()),
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_use_id: 'call_1', tool_input: { file_path: 'x' } } }), ctx()),
       { outcome: 'excluded', reason: 'redundant_event' });
   }
 });
@@ -264,7 +266,7 @@ test('the_caller_is_not_asked_about_records_that_fail_an_earlier_check', async (
     const refuse = ctx(() => { throw new Error('must not be asked'); });
     assert.equal(normalizeEvent({ ...capture(adapter), origin: 'timeschedule_generation' }, refuse).outcome, 'excluded');
     assert.equal(normalizeEvent({ ...capture(adapter), tool_version: 'x' }, refuse).outcome, 'unsupported');
-    assert.equal(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Write' } }), refuse).outcome, 'excluded');
+    assert.equal(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_use_id: 'call_1', tool_input: {} } }), refuse).outcome, 'excluded');
     assert.equal(normalizeEvent(capture(adapter, { payload: { prompt: undefined } }), refuse).outcome, 'unsupported');
   }
 });
@@ -474,7 +476,7 @@ test('a finished turn and a killed turn stay separate when classified together',
 });
 
 function turnRecord(adapter, event, at, extra = {}) {
-  const base = capture(adapter, { payload: { hook_event_name: event, cwd: 'C:\\lab\\m0-sample', last_assistant_message: 'done', tool_name: 'Bash' } });
+  const base = capture(adapter, { payload: { hook_event_name: event, cwd: 'C:\\lab\\m0-sample', last_assistant_message: 'done', tool_name: 'Bash', tool_use_id: 'call_1', tool_input: {} } });
   return { ...base, capture_id: `${event}-${at}`, captured_at: `2026-11-18T00:00:00.${at}Z`, ...extra };
 }
 
@@ -523,8 +525,56 @@ test('classifyTurns names the hook that ended the turn even when more hooks foll
 
 test('turn ids that contain a line break do not merge two turns', async () => {
   const { adapter, classifyTurns } = await loadAdapter('codex');
-  const open = capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: 'C:\\lab\\m0-sample', session_id: 's', turn_id: 'x\ny' } });
+  const open = capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'call_1', tool_input: {}, cwd: 'C:\\lab\\m0-sample', session_id: 's', turn_id: 'x\ny' } });
   const stop = { ...capture(adapter, { payload: { hook_event_name: 'Stop', last_assistant_message: 'done', cwd: 'C:\\lab\\m0-sample', session_id: 's\nx', turn_id: 'y' } }),
     capture_id: 'second', captured_at: '2026-11-17T22:48:03.000Z' };
   assert.deepEqual(classifyTurns([open, stop], LAB).map(turn => turn.ending).sort(), ['completed', 'unterminated']);
+});
+
+// ---- review round 6 (gpt-6.2-astra) ----
+
+test('a_tool_event_without_a_string_id_and_an_input_object_is_malformed', async () => {
+  for (const { adapter, normalizeEvent, classifyTurns } of await adapters()) {
+    const malformed = { outcome: 'unsupported', reason: 'malformed' };
+    const tool = { tool_name: 'Bash', tool_use_id: 'call_1', tool_input: { command: 'x' } };
+    for (const event of ['PreToolUse', 'PostToolUse']) {
+      const good = capture(adapter, { payload: { hook_event_name: event, ...tool } });
+      assert.notEqual(normalizeEvent(good, ctx()).reason, 'malformed', event);
+      for (const change of [{ tool_use_id: undefined }, { tool_use_id: { nested: 'SECRET-IN-ID' } }, { tool_use_id: 7 },
+        { tool_input: undefined }, { tool_input: ['a'] }, { tool_input: 'text' }, { tool_input: null }, { tool_name: undefined }]) {
+        const bad = capture(adapter, { payload: { hook_event_name: event, ...tool, ...change } });
+        const result = normalizeEvent(bad, ctx());
+        assert.deepEqual(result, malformed, `${event} ${JSON.stringify(change)}`);
+        assert.ok(!JSON.stringify(result).includes('SECRET-IN-ID'));
+        assert.deepEqual(classifyTurns([bad], ctx()), [], `${event} ${JSON.stringify(change)}`);
+      }
+    }
+  }
+});
+
+test('every tool sample carries a string id and an input object', () => {
+  let seen = 0;
+  for (const file of allFixtureFiles()) {
+    const { payload } = readJson(file);
+    if (!/ToolUse/.test(payload.hook_event_name)) continue;
+    seen += 1;
+    assert.equal(typeof payload.tool_use_id, 'string', file);
+    assert.ok(payload.tool_input && typeof payload.tool_input === 'object' && !Array.isArray(payload.tool_input), file);
+  }
+  assert.ok(seen > 0);
+});
+
+test('a_failed_folder_lookup_is_an_unconfirmed_folder_not_a_crash', async () => {
+  for (const { adapter, normalizeEvent, classifyTurns } of await adapters()) {
+    const failing = ctx(cwd => { if (cwd === 'C:\\broken') throw new Error('lookup failed'); return CONFIRMED; });
+    const result = normalizeEvent(capture(adapter, { payload: { cwd: 'C:\\broken' } }), failing);
+    assert.deepEqual(result, { outcome: 'candidate', candidate: { source: adapter.source, path: 'C:\\broken' } });
+    const stop = (cwd, id) => ({ ...capture(adapter, { payload: { hook_event_name: 'Stop', last_assistant_message: 'done', cwd, turn_id: id, prompt_id: id } }), capture_id: id });
+    const turns = classifyTurns([stop('C:\\broken', 'turn-broken'), stop('C:\\fine', 'turn-fine')], failing);
+    assert.deepEqual(turns.map(turn => turn.turn_id), ['turn-fine'], 'one failing folder does not hide the others');
+  }
+});
+
+test('samples are replayed in numeric order past the ninety-ninth', () => {
+  assert.deepEqual(['10-b.json', '100-z.json', '11-c.json', '02-a.json'].sort(bySampleNumber), ['02-a.json', '10-b.json', '11-c.json', '100-z.json']);
 });

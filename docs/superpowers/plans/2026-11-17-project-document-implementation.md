@@ -120,7 +120,7 @@ M1만 끝났으면 ‘수집 시범’, M2만 끝났으면 ‘문서 시험’�
 **Files:** 생성 `project_activity.rs`, `activity_store.rs`, `crates/timeschedule-core/tests/project_activity.rs`; 수정 코어 `lib.rs`, `storage.rs`, `diary.rs`.
 **Interfaces:** `Storage::register_project_path(&PathRegistration) -> Result<(), String>`, `Storage::ingest_activity(&ActivityEnvelope) -> Result<ActivityReceipt, String>`, `Storage::list_project_activities(&ActivityQuery) -> Result<ActivityPage, String>`. `ActivityReceipt`는 event/revision/outcome(stored|unchanged|conflict)이며 page는 items/next_cursor다.
 
-> **작업 1에서 넘어온 조건(2026-11-18 사용자 결정):** 등록 경로와 도구가 준 작업 폴더의 대조는 이 작업의 책임이다. 작업 1의 어댑터는 `context.registrationFor(cwd)`로 결정을 받기만 하고 경로를 비교하지 않는다. 문자열 비교로 구현했던 대조는 독립 검토에서 네 번 연속 틈이 나와 제거했다. 지켜야 할 조건과 시험 항목은 [수집 지원표](../../project-capture-support.md) 9절의 "등록 경로 대조는 작업 2로 넘겼다"에 있다. 이 작업의 하위 계획은 `registrationFor`의 구현(파일 시스템으로 경로 해석, 가장 깊은 조상, 겹치는 등록의 우선순위)을 포함해야 한다.
+> **작업 1에서 넘어온 조건(2026-11-18 사용자 결정):** 등록 경로와 도구가 준 작업 폴더의 대조는 이 작업의 책임이다. 작업 1의 어댑터는 `context.registrationFor(cwd)`로 결정을 받기만 하고 경로를 비교하지 않는다. 문자열 비교로 구현했던 대조는 독립 검토에서 네 번 연속 틈이 나와 제거했다. 지켜야 할 조건과 시험 항목은 [수집 지원표](../../project-capture-support.md) 9절의 "등록 경로 대조는 작업 2로 넘겼다"에 있다. 이 작업의 하위 계획은 `registrationFor`의 구현(파일 시스템으로 경로 해석, 가장 깊은 조상, 겹치는 등록의 우선순위)을 포함해야 한다. 등록한 뒤 같은 경로의 실제 대상이 바뀐 경우(등록한 junction의 대상을 바꿈, 등록 폴더를 다른 폴더로 교체)에 이전 승인이 그대로 유효한지도 정하고 시험해야 한다. 조회가 실패하면 확정으로 답하지 않는다(어댑터는 조회 예외를 미확정으로 처리한다).
 
 - [ ] schema 6 표본에 기존 프로젝트·사용자 편집·대기 receipt를 넣고 이행 후 값이 같다는 시험, 동일명 두 폴더·worktree 별칭·재연결 시험을 작성한다.
 - [ ] 이벤트 재전송은 한 항목, 같은 키의 내용 변경은 conflict, 별도 두 실패는 두 항목이라는 assertion을 고정한다. 23:59/00:00 KST 경계·시각 미상·수신 지연·101건 조회의 다음 페이지를 시험한다.
@@ -133,6 +133,8 @@ M1만 끝났으면 ‘수집 시범’, M2만 끝났으면 ‘문서 시험’�
 
 **Files:** 생성 `activity_inbox.rs`, `activity_cli.rs`, `evidence_store.rs`, `project_backup.rs`의 수집 자료 스냅샷 부분, `scripts/activity-capture.mjs`, `tests/activity-capture.test.mjs`; 수정 native `main.rs`, `launch.rs`, `app.rs`, `worker.rs`; 참고 기존 `record_inbox.rs`, `record_cli.rs`, `document-vault.mjs`.
 **Interfaces:** `enqueue_activity(dir: &Path, value: &ActivityEnvelope) -> Result<DeliveryReceipt, String>`, `drain_activities(dir: &Path, store: &Storage) -> Result<DrainReport, String>`. 새 CLI는 `activity enqueue --input FILE --data-dir DIR --result FILE`, `activity drain --data-dir DIR`, `activity status --event-id ID --revision N --data-dir DIR --result FILE`로 구분한다.
+
+> **작업 1에서 넘어온 조건(2026-11-18):** 작업 1의 봉투는 관측 스크립트가 기록을 저장할 때 발급한 ID를 `event_id`로 쓴다. 저장된 기록의 재전송은 같은 ID를 유지하지만 훅이 다시 실행되면 새 ID를 받는다. 따라서 원문 로그에서 복구한 사건이 이미 훅으로 관측한 사건과 같은지 판정하는 기준을 이 작업에서 정해야 한다. 시험에는 같은 저장본의 재전송, 같은 내용의 별도 실행, 로그로만 복구한 사건을 각각 넣는다. 실제 수집에서 클라이언트 버전을 어디서 읽을지, 검증하지 않은 버전을 어떻게 다룰지도 이 작업 전에 정한다([수집 지원표](../../project-capture-support.md) 9절).
 
 - [ ] `queued_survives_restart`, `receipt_loss_replay_is_unchanged`, `evidence_write_failure_has_no_success_receipt`, `invalid_payload_is_quarantined`를 native 모듈 시험에 추가한다. queued는 파일 접수일 뿐 DB 저장 완료가 아니라는 assertion을 둔다.
 - [ ] 등록 거절·수집 중지·가짜 비밀값·외부 경로/junction·원문 속 명령문·부분 쓰기·송신 중단을 `tests/activity-capture.test.mjs`에서 실패시킨다. 허용 범위 밖 원문은 durable queue 이전에 차단한다.

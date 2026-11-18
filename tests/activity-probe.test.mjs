@@ -365,11 +365,11 @@ test('sanitize_replaces_an_opaque_session_id_as_a_whole_token_and_as_an_object_k
   const { sanitizeCapture } = await import('../scripts/activity-adapters/sanitize-fixture.mjs');
   const options = ids => ({ homeDir: 'C:\\Users\\realname', labRoot: 'C:\\LSH\\_capture-lab\\m0-sample', sessionIds: ids });
   const record = sample();
-  record.payload.session_id = 'tool';
+  record.payload.session_id = 'Tool';
   record.payload.hook_event_name = 'PostToolUse';
   record.payload.tool_name = 'Bash';
-  record.payload.by_session = { tool: { started: true }, '0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee': 1 };
-  record.payload.transcript_path = 'C:\\Users\\realname\\sessions\\tool.jsonl';
+  record.payload.by_session = { Tool: { started: true }, '0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee': 1 };
+  record.payload.transcript_path = 'C:\\Users\\realname\\sessions\\Tool.jsonl';
   const out = sanitizeCapture(record, options(new Map()));
   assert.equal(out.payload.session_id, 'session-0001');
   assert.equal(out.payload.hook_event_name, 'PostToolUse', 'an id is never replaced inside a longer word');
@@ -427,4 +427,82 @@ test('sanitize_cli_numbers_more_than_ninety_nine_samples_so_the_tests_still_find
   assert.equal(names.length, 101);
   assert.ok(names.includes('101-Stop.json'));
   assert.ok(names.every(name => /^\d{2,}-.*\.json$/.test(name)));
+});
+
+// ---- review round 6 (gpt-6.2-astra) ----
+
+test('sanitize_cli_finds_the_account_name_at_the_start_of_a_line_and_in_a_key', t => {
+  const dir = scratch(t);
+  const raw = path.join(dir, 'raw');
+  const out = path.join(dir, 'out');
+  mkdirSync(raw);
+  const args = ['--in', raw, '--out', out, '--home', 'C:\\Users\\otherperson', '--lab', 'C:\\LSH\\_capture-lab\\m0-sample'];
+  for (const change of [
+    record => { record.payload.note = 'first line\nOtherPerson wrote the second line'; },
+    record => { record.payload.note = 'tab\tOtherPerson'; },
+    record => { record.payload.people = { OtherPerson: 1 }; },
+  ]) {
+    const record = sample();
+    change(record);
+    writeFileSync(path.join(raw, 'a.json'), JSON.stringify(record));
+    const r = sanitizeCli(args);
+    assert.equal(r.status, 1, JSON.stringify(record.payload));
+    assert.match(r.stderr, /account name/);
+    assert.ok(!existsSync(out));
+  }
+});
+
+test('sanitize_replaces_every_session_id_the_table_already_knows', async () => {
+  const { sanitizeCapture } = await import('../scripts/activity-adapters/sanitize-fixture.mjs');
+  const ids = new Map();
+  const options = { homeDir: 'C:\\Users\\realname', labRoot: 'C:\\LSH\\_capture-lab\\m0-sample', sessionIds: ids };
+  const first = sanitizeCapture({ ...sample(), payload: { ...sample().payload, session_id: 'opaque-AAA' } }, options);
+  const second = sanitizeCapture({ ...sample(), payload: { ...sample().payload, session_id: 'opaque-BBB',
+    note: 'continues opaque-AAA here', by_session: { 'opaque-AAA': true } } }, options);
+  assert.equal(first.payload.session_id, 'session-0001');
+  assert.equal(second.payload.session_id, 'session-0002');
+  assert.equal(second.payload.note, 'continues session-0001 here');
+  assert.deepEqual(Object.keys(second.payload.by_session), ['session-0001']);
+  assert.ok(!JSON.stringify(second).includes('opaque-AAA'));
+});
+
+test('sanitize_refuses_a_session_id_that_is_also_a_field_or_event_name', async () => {
+  const { sanitizeCapture } = await import('../scripts/activity-adapters/sanitize-fixture.mjs');
+  const options = () => ({ homeDir: 'C:\\Users\\realname', labRoot: 'C:\\LSH\\_capture-lab\\m0-sample', sessionIds: new Map() });
+  for (const sessionId of ['Stop', 'cwd', 'session_id', 'tool', 'claude-code']) {
+    const record = sample();
+    record.payload.session_id = sessionId;
+    assert.throws(() => sanitizeCapture(record, options()), /session id/, sessionId);
+  }
+  // An id that merely contains such a word is fine.
+  const record = sample();
+  record.payload.session_id = 'Stop-1234';
+  assert.equal(sanitizeCapture(record, options()).payload.session_id, 'session-0001');
+});
+
+test('swapScenario_refuses_an_output_folder_that_has_subfolders', async t => {
+  const { swapScenario } = await import('../scripts/activity-adapters/sanitize-fixture.mjs');
+  const dir = scratch(t);
+  const out = path.join(dir, 'codex');
+  mkdirSync(path.join(out, 's1-normal-cli'), { recursive: true });
+  writeFileSync(path.join(out, 's1-normal-cli', '01-Stop.json'), 'another scenario');
+  assert.throws(() => swapScenario(out, [{ name: '01-New.json', text: 'new' }]), /subfolder/);
+  assert.equal(readFileSync(path.join(out, 's1-normal-cli', '01-Stop.json'), 'utf8'), 'another scenario');
+  assert.deepEqual(readdirSync(out), ['s1-normal-cli']);
+  assert.deepEqual(readdirSync(dir), ['codex']);
+});
+
+test('sanitize_cli_saves_the_id_table_before_it_replaces_the_scenario', t => {
+  const dir = scratch(t);
+  const raw = path.join(dir, 'raw');
+  const out = path.join(dir, 'out');
+  mkdirSync(raw);
+  mkdirSync(out);
+  writeFileSync(path.join(out, '01-Old.json'), 'keep me');
+  writeFileSync(path.join(raw, 'a.json'), JSON.stringify(sample()));
+  const r = sanitizeCli(['--in', raw, '--out', out, '--home', 'C:\\Users\\realname', '--lab', 'C:\\LSH\\_capture-lab\\m0-sample',
+    '--ids', path.join(dir, 'no-such-folder', 'ids.json')]);
+  assert.equal(r.status, 1);
+  assert.deepEqual(readdirSync(out), ['01-Old.json'], 'the scenario is not replaced when the id table cannot be saved');
+  assert.deepEqual(readdirSync(dir).sort(), ['out', 'raw']);
 });

@@ -82,15 +82,43 @@ export function sanitizeCapture(record, { homeDir, labRoot, sessionIds }) {
   if (!cleaned.payload || typeof cleaned.payload !== 'object') return cleaned;
 
   const sessionId = typeof cleaned.payload.session_id === 'string' && cleaned.payload.session_id ? cleaned.payload.session_id : null;
-  const sessionPlaceholder = sessionId ? placeholder(sessionIds, `session:${sessionId}`, 'session') : null;
-  const sessionToken = sessionId ? wholeWord(sessionId, 'gu') : null;
+  if (sessionId) {
+    // An id that is also one of the record's own field names or its event name cannot be
+    // told apart from the schema, and replacing it would break the record. Refuse instead
+    // of guessing. Keys deeper inside the payload are data, not schema: there a key equal
+    // to the id is how a tool indexes by session, and it is replaced.
+    const reserved = new Set([cleaned.source, cleaned.origin, cleaned.payload.hook_event_name,
+      ...Object.keys(cleaned), ...Object.keys(cleaned.payload)]);
+    if (reserved.has(sessionId)) {
+      throw new Error('the session id of a record is also a field name or event name and cannot be replaced safely');
+    }
+    placeholder(sessionIds, `session:${sessionId}`, 'session');
+  }
+  // Every session id the table knows is replaced, not only this record's: a later
+  // session can mention an earlier one. Longer ids first, so an id that contains
+  // another is replaced whole.
+  const known = [...sessionIds.entries()].filter(([key]) => key.startsWith('session:'))
+    .map(([key, value]) => ({ id: key.slice('session:'.length), value, token: wholeWord(key.slice('session:'.length), 'gu') }))
+    .sort((a, b) => b.id.length - a.id.length);
   const uuids = text => text.replace(UUID, match => placeholder(sessionIds, `uuid:${match.toLowerCase()}`, 'id'));
-  // In a value the session id is replaced wherever it stands as a whole token, never
-  // inside a longer word (`tool` must not rewrite `PostToolUse`). A key is replaced
-  // only when the whole key is the id, which is how tools index data by session.
-  const inValue = text => uuids(sessionToken ? text.replace(sessionToken, () => sessionPlaceholder) : text);
-  const inKey = key => (key === sessionId ? sessionPlaceholder : uuids(key));
+  // In a value an id is replaced wherever it stands as a whole token, never inside a
+  // longer word (`Tool` must not rewrite `PostToolUse`). A key is replaced only when
+  // the whole key is an id, which is how tools index data by session.
+  const inValue = text => uuids(known.reduce((current, item) => current.replace(item.token, () => item.value), text));
+  const inKey = key => known.find(item => item.id === key)?.value ?? uuids(key);
   return { ...cleaned, payload: mapStrings(cleaned.payload, inValue, inKey) };
+}
+
+// True when `word` matches any string value or any key. The check runs on the values
+// themselves, not on serialised JSON: there a line break becomes a backslash and an
+// `n`, and that `n` would hide a name standing at the start of a line.
+function anyText(value, word) {
+  if (typeof value === 'string') return word.test(value.replaceAll('lab-user', ''));
+  if (Array.isArray(value)) return value.some(item => anyText(item, word));
+  if (value && typeof value === 'object') {
+    return Object.entries(value).some(([key, item]) => word.test(key.replaceAll('lab-user', '')) || anyText(item, word));
+  }
+  return false;
 }
 
 // `%USERPROFILE%` (left unexpanded by PowerShell) or a bare name would be accepted as a
@@ -129,12 +157,16 @@ export function swapScenario(out, outputs, { rename = renameSync } = {}) {
   mkdirSync(parent, { recursive: true });
   rmSync(staging, { recursive: true, force: true });
   rmSync(retired, { recursive: true, force: true });
+  // A scenario folder holds files only. A subfolder means `--out` points at something
+  // else (for example the folder of all scenarios), and replacing it would delete them.
+  if (existsSync(out) && readdirSync(out).some(name => statSync(path.join(out, name)).isDirectory())) {
+    throw new Error(`${out} has a subfolder; --out must be the folder of one scenario`);
+  }
   mkdirSync(staging);
   try {
     if (existsSync(out)) {
       for (const name of readdirSync(out)) {
-        const source = path.join(out, name);
-        if (!SAMPLE_FILE.test(name) && statSync(source).isFile()) copyFileSync(source, path.join(staging, name));
+        if (!SAMPLE_FILE.test(name)) copyFileSync(path.join(out, name), path.join(staging, name));
       }
     }
     for (const output of outputs) writeFileSync(path.join(staging, output.name), output.text);
@@ -175,7 +207,7 @@ function main() {
   const outputs = records.map((record, index) => {
     const event = String(record.payload?.hook_event_name ?? 'unknown').replace(/[^A-Za-z0-9_]/g, '') || 'unknown';
     const cleaned = sanitizeCapture(record, { homeDir: options.home, labRoot: options.lab, sessionIds });
-    return { name: `${String(index + 1).padStart(2, '0')}-${event}.json`, text: `${JSON.stringify(cleaned, null, 2)}\n` };
+    return { name: `${String(index + 1).padStart(2, '0')}-${event}.json`, cleaned, text: `${JSON.stringify(cleaned, null, 2)}\n` };
   });
 
   // The account the capture came from is known only here, not to the tests that run
@@ -184,17 +216,20 @@ function main() {
   const homeName = path.win32.basename(options.home.replace(/\//g, '\\'));
   const accountWord = wholeWord(homeName, 'iu');
   for (const output of outputs) {
-    if (accountWord.test(output.text.replaceAll('lab-user', ''))) {
+    if (anyText(output.cleaned, accountWord)) {
       throw new Error(`${output.name} would still contain the account name as a word; nothing was written`);
     }
   }
 
-  swapScenario(options.out, outputs);
+  // The id table is saved first. If that fails nothing was replaced; if the swap fails
+  // afterwards the table only knows a few ids more, which keeps later runs consistent.
+  // The other order could install samples whose placeholders the table has forgotten.
   if (options.ids) {
     const temporary = `${options.ids}.tmp`;
     writeFileSync(temporary, `${JSON.stringify([...sessionIds], null, 2)}\n`);
     renameSync(temporary, options.ids);
   }
+  swapScenario(options.out, outputs);
   process.stdout.write(`${records.length} fixture file(s) written to ${options.out}\n`);
 }
 

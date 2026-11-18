@@ -39,16 +39,26 @@ function isWellFormed(record, adapter) {
 }
 
 // A verified event must still look like the samples it was verified with: the string
-// fields its body is built from, and, for an event that belongs to a turn, the turn id.
+// fields (`requires`) and object fields (`requiresObject`) its body is built from, and,
+// for an event that belongs to a turn, the turn id. Without this a damaged record would
+// pass as a normal one, and a value of the wrong type would be copied into the body.
 function hasObservedShape(payload, event, adapter) {
   if (!(event.requires ?? []).every(name => typeof payload[name] === 'string')) return false;
+  if (!(event.requiresObject ?? []).every(name => isObject(payload[name]))) return false;
   return !event.turn || isText(adapter.turnKey(payload));
 }
 
 // 'confirmed' | 'excluded' | 'unconfirmed', from the caller's answer for this folder.
 function folderDecision(context, cwd) {
   if (typeof context?.registrationFor !== 'function') return { state: 'unconfirmed' };
-  const answer = context.registrationFor(cwd);
+  let answer;
+  try {
+    answer = context.registrationFor(cwd);
+  } catch {
+    // The lookup failed for this folder. That is not a confirmation, and it must not
+    // stop the records of other folders from being handled.
+    return { state: 'unconfirmed' };
+  }
   if (!isObject(answer)) return { state: 'unconfirmed' };
   if (answer.decision === 'exclude') return { state: 'excluded' };
   if (CONFIRMED.includes(answer.decision) && isText(answer.projectId)) return { state: 'confirmed', projectId: answer.projectId };
