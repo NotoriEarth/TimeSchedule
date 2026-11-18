@@ -593,7 +593,8 @@ pub fn validate_date(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn validate_time(value: &str) -> Result<NaiveTime, String> {
+/// Parses a 24-hour HH:MM value accepted by event and task storage.
+pub fn validate_time(value: &str) -> Result<NaiveTime, String> {
     let bytes = value.as_bytes();
     if bytes.len() != 5
         || bytes[2] != b':'

@@ -1,5 +1,5 @@
 use crate::{
-    editor::{CloseIntent, Confirmation, Editor, Form, Kind},
+    editor::{CloseIntent, Confirmation, Editor, EditorPicker, Form, Kind},
     worker::{self, Scope, Snapshot},
 };
 use chrono::{Datelike, Duration, Local, NaiveDate};
@@ -180,6 +180,15 @@ pub enum Message {
     Source(String),
     SourceDone(Result<(), String>),
     Field(Field),
+    DatePicker(crate::date_choices::Part),
+    BrowseDatePicker(i32),
+    PickEditorDate(NaiveDate),
+    OpenTimePicker(crate::time_input::Field),
+    PickEditorTime(crate::time_input::Field, String),
+    DismissTimePicker(crate::time_input::Field),
+    DismissDatePicker,
+    DismissEditorPicker,
+    EditorTab(window::Id, bool),
     Body(text_editor::Action),
     Undo,
     Redo,
@@ -525,16 +534,26 @@ impl App {
                         _ => {}
                     }
                 }
-                if status == iced::event::Status::Ignored
-                    && matches!(
-                        event,
-                        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
-                            ..
-                        })
-                    )
-                {
-                    return Some(Message::EscapeWindow(id));
+                if status == iced::event::Status::Ignored {
+                    if let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        key: iced::keyboard::Key::Named(key),
+                        modifiers,
+                        ..
+                    }) = event
+                    {
+                        use iced::keyboard::key::Named;
+                        return match key {
+                            Named::Escape => Some(Message::EscapeWindow(id)),
+                            Named::Tab
+                                if !modifiers.command()
+                                    && !modifiers.alt()
+                                    && !modifiers.logo() =>
+                            {
+                                Some(Message::EditorTab(id, modifiers.shift()))
+                            }
+                            _ => None,
+                        };
+                    }
                 }
                 None
             }),
@@ -770,6 +789,18 @@ impl App {
         self.editor_generation += 1;
         self.editor = Some(Editor::new(form, self.editor_generation));
         iced::widget::operation::focus("editor-title")
+    }
+    pub(crate) fn editor_date_context(&self) -> NaiveDate {
+        self.quick_date
+            .filter(|_| self.editor_in_quick)
+            .unwrap_or(self.selected)
+    }
+    fn editor_window(&self) -> Option<window::Id> {
+        if self.editor_in_quick {
+            self.quick_window
+        } else {
+            Some(self.manager)
+        }
     }
     fn request_close(&mut self, intent: CloseIntent) -> Task<Message> {
         if let Some(editor) = &mut self.editor {
@@ -1369,8 +1400,98 @@ impl App {
                 )
             }
             Message::SourceDone(Err(e)) => self.error = e,
+            Message::DatePicker(part) => {
+                let fallback = self.editor_date_context();
+                if let Some(e) = self.editor.as_mut().filter(|e| !e.saving) {
+                    let date = e.form.date.parse::<NaiveDate>().unwrap_or(fallback);
+                    e.picker = Some(EditorPicker::Date(crate::date_choices::Picker::new(
+                        part, date,
+                    )));
+                }
+            }
+            Message::BrowseDatePicker(direction) => {
+                if let Some(EditorPicker::Date(p)) =
+                    self.editor.as_mut().and_then(|e| e.picker.as_mut())
+                {
+                    p.browse(direction);
+                }
+            }
+            Message::PickEditorDate(date) => {
+                if let Some(e) = self
+                    .editor
+                    .as_mut()
+                    .filter(|e| !e.saving && matches!(e.picker, Some(EditorPicker::Date(_))))
+                {
+                    e.form.date = date.to_string();
+                    e.picker = None;
+                }
+            }
+            Message::OpenTimePicker(field) => {
+                if let Some(e) = self
+                    .editor
+                    .as_mut()
+                    .filter(|e| !e.saving && !e.form.all_day)
+                {
+                    e.picker = Some(EditorPicker::Time(field));
+                }
+            }
+            Message::PickEditorTime(field, value) => {
+                if let Some(e) = self
+                    .editor
+                    .as_mut()
+                    .filter(|e| !e.saving && e.time_picker() == Some(field))
+                {
+                    match field {
+                        crate::time_input::Field::Start => e.form.start = value,
+                        crate::time_input::Field::End => e.form.end = value,
+                    }
+                    e.picker = None;
+                }
+            }
+            Message::DismissTimePicker(field) => {
+                if let Some(e) = self
+                    .editor
+                    .as_mut()
+                    .filter(|e| e.time_picker() == Some(field))
+                {
+                    e.picker = None;
+                }
+            }
+            Message::DismissDatePicker => {
+                if let Some(e) = self
+                    .editor
+                    .as_mut()
+                    .filter(|e| matches!(e.picker, Some(EditorPicker::Date(_))))
+                {
+                    e.picker = None;
+                }
+            }
+            Message::DismissEditorPicker => {
+                if let Some(e) = &mut self.editor {
+                    e.picker = None;
+                }
+            }
+            Message::EditorTab(id, backwards) if self.editor_window() == Some(id) => {
+                if let Some(e) = self.editor.as_mut().filter(|e| !e.saving && !e.composing) {
+                    use iced::advanced::widget::{operate, operation};
+                    e.picker = None;
+                    let id = "editor-focus-fields".into();
+                    return if backwards {
+                        operate(operation::scope(id, operation::focusable::focus_previous()))
+                    } else {
+                        operate(operation::scope(id, operation::focusable::focus_next()))
+                    };
+                }
+            }
             Message::Field(field) => {
                 if let Some(e) = self.editor.as_mut().filter(|e| !e.saving) {
+                    if !matches!(
+                        (&field, e.time_picker()),
+                        (Field::Start(_), Some(crate::time_input::Field::Start))
+                            | (Field::End(_), Some(crate::time_input::Field::End))
+                    ) {
+                        e.picker = None;
+                    }
                     match field {
                         Field::Title(v) => e.form.title = v,
                         Field::Category(v) => e.form.category_id = v,
@@ -1391,6 +1512,7 @@ impl App {
             }
             Message::Body(action) => {
                 if let Some(e) = &mut self.editor {
+                    e.picker = None;
                     e.body_action(action)
                 }
             }
@@ -1436,11 +1558,7 @@ impl App {
             }
             Message::CloseEditor => return self.request_close(CloseIntent::Editor),
             Message::EscapeWindow(id) => {
-                let editing_here = if self.editor_in_quick {
-                    Some(id) == self.quick_window
-                } else {
-                    id == self.manager
-                };
+                let editing_here = self.editor_window() == Some(id);
                 if self.editor.is_some() && !editing_here {
                     return Task::none();
                 }
@@ -1453,6 +1571,9 @@ impl App {
                 if let Some(e) = &mut self.editor {
                     if e.confirmation.is_some() {
                         e.confirmation = None;
+                        return Task::none();
+                    }
+                    if e.picker.take().is_some() {
                         return Task::none();
                     }
                     return self.request_close(CloseIntent::Editor);
@@ -1709,6 +1830,7 @@ impl App {
         if delete && editor.confirmation != Some(Confirmation::Delete) {
             return Task::none();
         }
+        editor.picker = None;
         editor.saving = true;
         editor.error.clear();
         let form = editor.form.clone();
@@ -2838,6 +2960,42 @@ mod tests {
             "failed first page must not expose old-scope pagination"
         );
     }
+    #[test]
+    fn switching_editor_pickers_keeps_the_new_field_and_saves_exact_minutes() {
+        use crate::{date_choices::Part, time_input::Field as Time};
+        let mut app = fixture();
+        let mut form = Form::new(Kind::Event, "2026-11-04".into(), None);
+        form.title = "시간 입력 검사".into();
+        form.all_day = false;
+        let _ = app.open_form(form);
+        let _ = app.update(Message::DatePicker(Part::Day));
+        let _ = app.update(Message::OpenTimePicker(Time::Start));
+        let _ = app.update(Message::DismissDatePicker);
+        let _ = app.update(Message::Field(Field::Start("09:07".into())));
+        assert_eq!(
+            app.editor.as_ref().unwrap().time_picker(),
+            Some(Time::Start)
+        );
+
+        let _ = app.update(Message::OpenTimePicker(Time::End));
+        let _ = app.update(Message::DismissTimePicker(Time::Start));
+        let _ = app.update(Message::PickEditorTime(Time::End, "10:15".into()));
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.picker.is_none());
+        let store = app.store.as_ref().unwrap();
+        editor.form.save(store).unwrap();
+        let events = store.list_events("2026-11-04", "2026-11-04").unwrap();
+        assert_eq!(events[0].start_time.as_deref(), Some("09:07"));
+        assert_eq!(events[0].end_time.as_deref(), Some("10:15"));
+
+        let _ = app.update(Message::OpenTimePicker(Time::Start));
+        let _ = app.update(Message::Field(Field::AllDay(true)));
+        let _ = app.update(Message::PickEditorTime(Time::Start, "23:45".into()));
+        let editor = app.editor.as_ref().unwrap();
+        assert!(editor.picker.is_none());
+        assert_eq!(editor.form.start, "09:07");
+    }
+
     #[test]
     fn discard_confirmation_preserves_mounted_input_selection_and_focus() {
         use iced::advanced::{
