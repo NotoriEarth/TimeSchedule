@@ -69,6 +69,11 @@ function stateFor(ctx, id) {
   return id ? optional(path.join(ctx.stateDir, id, 'state.json')) : null;
 }
 
+function readNoteForCommit(directory, ownedHead) {
+  const saved = optional(path.join(directory, 'note.json'));
+  return saved?.ownedHead === ownedHead ? saved.note : null;
+}
+
 export function audit(ctx) {
   const result = [];
   for (const task of receipts(ctx)) {
@@ -78,7 +83,6 @@ export function audit(ctx) {
     const delivered = job && saved && job.source.gitChanges?.head === saved.source.gitChanges.head
       && job.source.title === saved.source.title && job.source.detailedMarkdown === saved.source.detailedMarkdown
       && job.source.status === saved.source.status;
-    const note = fs.existsSync(path.join(directory, 'note.json'));
     const row = { branch: start.branch, workId };
     if (!head) {
       if (!complete(job?.phase)) result.push({ ...row, phase: 'branch_missing' });
@@ -93,7 +97,7 @@ export function audit(ctx) {
     if (!workId) phase = 'started_before_id';
     else if (ownHead && saved?.ownedHead === ownHead && !delivered) phase = 'delivery_ready';
     else if (ownHead && saved?.ownedHead === ownHead && job) phase = job.phase;
-    else if (ownHead) phase = note ? 'missing_with_note' : 'missing';
+    else if (ownHead) phase = readNoteForCommit(directory, ownHead) ? 'missing_with_note' : 'missing';
     else phase = 'started';
     if (!complete(phase) || row.unassigned || row.ambiguous) result.push({ ...row, phase, ownedHead: ownHead ?? null });
   }
@@ -120,16 +124,16 @@ export async function finish(ctx, id, file) {
   const head = branchHead(ctx, task);
   if (!head) throw new Error('작업 브랜치의 커밋을 확인할 수 없습니다.');
   const scan = inspectBranch(ctx.root, start, id, head);
-  if (!scan.owned.length) return { workId: id, skipped: true, reason: scan.assigned ? 'no_development_changes' : 'no_owned_commits' };
+  const ownedHead = scan.owned.at(-1)?.sha;
+  if (!ownedHead) return { workId: id, skipped: true, reason: scan.assigned ? 'no_development_changes' : 'no_owned_commits' };
   const changes = gitEvidence(ctx.root, directory, start, id, scan);
   if (!changes.paths.length) return { workId: id, skipped: true, reason: 'no_development_changes' };
-  const notePath = path.join(directory, 'note.json');
-  const note = file ? read(file) : optional(notePath);
-  if (!note) throw new Error('작업 원문 JSON 경로가 필요합니다.');
+  const note = file ? read(file) : readNoteForCommit(directory, ownedHead);
+  if (!note) throw new Error(`마지막 개발 커밋 ${ownedHead.slice(0, 8)}의 새 설명이 필요합니다. finish ${id} <NOTE.json>으로 작업 원문 JSON 경로를 지정하세요.`);
   const title = requiredText(note.title, 'title'), paragraph = requiredText(note.summary, 'summary');
   const files = note.tests ?? [];
   if (!Array.isArray(files)) throw new Error('tests에는 실행할 파일 목록을 지정하세요.');
-  write(notePath, note);
+  if (file) write(path.join(directory, 'note.json'), { ownedHead, note });
   const blocks = [paragraph];
   if (note.detail) blocks.push(requiredText(note.detail, 'detail'));
   const checks = path.join(directory, 'checks');
@@ -148,7 +152,7 @@ export async function finish(ctx, id, file) {
   const source = { workId: id, projectTitle: 'TimeSchedule', repoPath: ctx.primary, date, kind: 'development',
     title, status, diarySummary: paragraph, detailedMarkdown: blocks.join('\n\n'), gitChanges: changes };
   // The complete, deterministic input is durable before the first external write.
-  write(path.join(directory, 'delivery.json'), { source, ownedHead: scan.owned.at(-1).sha, branchHead: head, unassigned: scan.unassigned, ambiguous: scan.ambiguous });
+  write(path.join(directory, 'delivery.json'), { source, ownedHead, branchHead: head, unassigned: scan.unassigned, ambiguous: scan.ambiguous });
   return retry(ctx, id);
 }
 

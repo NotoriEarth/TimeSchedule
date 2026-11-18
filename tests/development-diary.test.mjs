@@ -32,6 +32,27 @@ function fixture(t) {
   return { root, ctx, commit, write };
 }
 
+function recoveryFixture(t) {
+  const { root, ctx, commit, write } = fixture(t);
+  const { workId } = begin(ctx);
+  const directory = path.join(ctx.starts, fs.readdirSync(ctx.starts)[0]);
+  const records = JSON.stringify(new URL('../scripts/project-records.mjs', import.meta.url).href);
+  // Keep real record preparation and vault storage, with an isolated diary receipt.
+  write('scripts/project-records.mjs', `
+    export { prepare } from ${records};
+    import { sync as deliver } from ${records};
+    export const sync = options => deliver({
+      ...options, vaultRoot: ${JSON.stringify(path.join(root, '.cache', 'vault'))},
+      importer: async ({ workId, revision }) => ({ outcome: 'saved', workId, revision, entryId: workId }),
+    });
+  `);
+  const draft = summary => {
+    write('draft.json', JSON.stringify({ title: 'Development note', summary }));
+    return path.join(root, 'draft.json');
+  };
+  return { ctx, workId, commit, directory, draft };
+}
+
 test('a branch reuses its ID, including from a linked worktree', t => {
   const { root, ctx } = fixture(t);
   const first = begin(ctx);
@@ -99,4 +120,64 @@ test('documentation alone produces no delivery payload', async t => {
   write('draft.json', JSON.stringify({ title: 'notes', summary: 'notes' }));
   assert.equal((await finish(ctx, workId, path.join(root, 'draft.json'))).reason, 'no_development_changes');
   assert.equal(fs.existsSync(path.join(ctx.stateDir, workId, 'state.json')), false);
+});
+
+test('a follow-up owned development commit needs a fresh note before it can finish', async t => {
+  const { ctx, workId, commit, directory, draft } = recoveryFixture(t);
+  commit('src/value.mjs', 'export const value = 1;', workId);
+  const original = await finish(ctx, workId, draft('Implemented value one.'));
+  assert.equal(original.phase, 'local_complete', original.lastError);
+  const delivery = path.join(directory, 'delivery.json');
+  const previousDelivery = fs.readFileSync(delivery, 'utf8');
+  const followUp = commit('src/value.mjs', 'export const value = 2;', workId);
+
+  await assert.rejects(finish(ctx, workId), /원문 JSON/);
+  assert.deepEqual(audit(ctx), [{ branch: ctx.branch, workId, phase: 'missing', ownedHead: followUp }]);
+  assert.equal(fs.readFileSync(delivery, 'utf8'), previousDelivery);
+  assert.match(fs.readFileSync(original.file, 'utf8'), /Implemented value one\./);
+
+  const updated = await finish(ctx, workId, draft('Implemented value two.'));
+  assert.equal(updated.phase, 'local_complete', updated.lastError);
+  assert.equal(updated.revision, original.revision + 1);
+  const { source } = JSON.parse(fs.readFileSync(delivery, 'utf8'));
+  assert.equal(source.gitChanges.head, followUp);
+  assert.equal(source.diarySummary, 'Implemented value two.');
+  assert.deepEqual(audit(ctx), []);
+});
+
+test('a legacy note without a commit requires explicit replacement', async t => {
+  const { ctx, workId, commit, directory, draft } = recoveryFixture(t);
+  const ownedHead = commit('src/value.mjs', 'export const value = 1;', workId);
+  const noteFile = path.join(directory, 'note.json');
+  const legacy = JSON.stringify({ title: 'Legacy note', summary: 'Unknown commit.' });
+  fs.writeFileSync(noteFile, legacy);
+
+  assert.deepEqual(audit(ctx), [{ branch: ctx.branch, workId, phase: 'missing', ownedHead }]);
+  await assert.rejects(finish(ctx, workId), /원문 JSON/);
+  assert.equal(fs.readFileSync(noteFile, 'utf8'), legacy);
+  assert.equal(fs.existsSync(path.join(directory, 'delivery.json')), false);
+  const result = await finish(ctx, workId, draft('Checked value one.'));
+  assert.equal(result.phase, 'local_complete', result.lastError);
+  assert.deepEqual(audit(ctx), []);
+});
+
+test('an interrupted note follows its owned commit across other authors and documentation', async t => {
+  const { ctx, workId, commit, directory, draft } = recoveryFixture(t);
+  const other = 'Other <other@example.invalid>';
+  commit('src/theirs.mjs', 'export const theirs = 1;', undefined, other);
+  const ownedHead = commit('src/mine.mjs', 'export const mine = 1;', workId);
+  // Interrupt the first finish after the note is saved, before a delivery is durable.
+  const delivery = path.join(directory, 'delivery.json');
+  fs.mkdirSync(delivery);
+  await assert.rejects(finish(ctx, workId, draft('Implemented my change.')), { syscall: 'rename', dest: delivery });
+  fs.rmdirSync(delivery);
+  commit('docs/notes.md', 'Documentation only.', workId);
+  const theirs = commit('src/later.mjs', 'export const later = 1;', workId, other);
+
+  assert.deepEqual(audit(ctx), [{ branch: ctx.branch, workId, ownedHead, ambiguous: [theirs], phase: 'missing_with_note' }]);
+  const recovered = await finish(ctx, workId);
+  assert.equal(recovered.phase, 'local_complete', recovered.lastError);
+  const { source } = JSON.parse(fs.readFileSync(delivery, 'utf8'));
+  assert.equal(source.diarySummary, 'Implemented my change.');
+  assert.deepEqual(source.gitChanges.paths, ['src/mine.mjs']);
 });
