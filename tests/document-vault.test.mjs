@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { createServer } from 'node:net';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { initVault, saveDocument, adoptDocument, vaultStatus, configureVault, vaultPreferences } from '../scripts/document-vault.mjs';
 
 function fixture(t) {
@@ -14,6 +15,54 @@ function fixture(t) {
   return { root: path.join(temp, 'vault'), stateDir: path.join(temp, 'state') };
 }
 const source = () => ({ id: randomUUID(), collection: 'studies', group: 'rust', title: 'Rust 공부', date: '2026-11-16', markdown: '# 소유권\n\n공부한 원문입니다.\n', tags: ['rust'] });
+
+function runCli(stateDir, ...args) {
+  const script = fileURLToPath(new URL('../scripts/document-vault.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [script, ...args, '--state-dir', stateDir], { encoding: 'utf8', windowsHide: true });
+  assert.ifError(result.error);
+  return result;
+}
+
+test('vault CLI rejects misplaced options before reading settings or opening the vault', t => {
+  const { root, stateDir } = fixture(t);
+  fs.mkdirSync(stateDir);
+  fs.writeFileSync(path.join(stateDir, 'vault-settings.json'), 'invalid JSON');
+  const cases = [
+    ['status', '--id', 'abc'],
+    ['init', '--root', root, '--id', 'abc'],
+    ['config', '--space', 'off', '--id', 'abc'],
+    ['import', '--input', 'missing.json', '--id', 'abc'],
+    ['adopt', '--id', randomUUID(), '--root', root],
+    ['status', '--unknown', 'abc'],
+  ];
+  for (const args of cases) {
+    const result = runCli(stateDir, ...args);
+    const flag = args.at(-2);
+    assert.equal(result.status, 1, args.join(' '));
+    assert.ok(result.stderr.includes(args[0]) && result.stderr.includes(flag), result.stderr);
+    assert.equal(result.stdout, '');
+  }
+  assert.equal(fs.existsSync(root), false);
+});
+
+test('vault CLI accepts each command with its own options and a shared state directory', t => {
+  const { root, stateDir } = fixture(t);
+  const run = (...args) => {
+    const result = runCli(stateDir, ...args);
+    assert.equal(result.status, 0, result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  assert.equal(run('init', '--root', root).root, fs.realpathSync(root));
+  assert.equal(run('config', '--space', 'on').spaceEnabled, true);
+  const document = source();
+  const input = path.join(stateDir, 'input.json');
+  fs.writeFileSync(input, JSON.stringify(document));
+  const saved = run('import', '--input', input);
+  assert.equal(saved.id, document.id);
+  fs.writeFileSync(saved.file, '직접 편집한 문서');
+  assert.equal(run('adopt', '--id', document.id).revision, 2);
+  assert.equal(run('status').records[0].id, document.id);
+});
 
 test('independent vault initializes idempotently and saves project and study Markdown without Git', async t => {
   const f = fixture(t); await initVault(f.root); await initVault(f.root);
