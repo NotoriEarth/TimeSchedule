@@ -225,34 +225,47 @@ export async function vaultStatus(root) {
   });
 }
 
-async function main(args) {
-  const command = args.shift(), options = {};
-  const names = { '--root': 'root', '--state-dir': 'stateDir', '--input': 'input', '--space': 'space', '--id': 'id' };
-  while (args.length) {
-    const key = args.shift(), value = args.shift();
-    if (!names[key] || !value || value.startsWith('--') || Object.hasOwn(options, names[key])) throw new Error('명령 인자를 확인해 주세요.');
-    options[names[key]] = value;
+async function main([command, ...args]) {
+  const allowedOptions = {
+    init: ['--root'],
+    config: ['--space'],
+    import: ['--input'],
+    adopt: ['--id'],
+    status: [],
+  };
+  if (!Object.hasOwn(allowedOptions, command)) {
+    throw new Error('사용법: node scripts/document-vault.mjs init --root PATH | import --input FILE | adopt --id UUID | status | config --space on|off');
   }
-  const stateDir = path.resolve(options.stateDir ?? DEFAULT_STATE);
+  const options = {};
+  while (args.length) {
+    const key = args.shift();
+    if (key !== '--state-dir' && !allowedOptions[command].includes(key)) {
+      throw new Error(`${command} 명령에서 ${key} 옵션을 사용할 수 없습니다.`);
+    }
+    const name = key.slice(2);
+    const value = args.shift();
+    if (!value || value.startsWith('--') || Object.hasOwn(options, name)) throw new Error('명령 인자를 확인해 주세요.');
+    options[name] = value;
+  }
+  const stateDir = path.resolve(options['state-dir'] ?? DEFAULT_STATE);
   let result;
   if (command === 'init') {
-    if (!options.root || options.input || options.space) throw new Error('init --root ABSOLUTE_PATH를 사용하세요.');
+    if (!options.root) throw new Error('init --root ABSOLUTE_PATH를 사용하세요.');
     result = await configureVault(stateDir, { root: options.root });
   } else if (command === 'config') {
-    if (!['on', 'off'].includes(options.space) || options.root || options.input) throw new Error('config --space on|off를 사용하세요.');
+    if (!['on', 'off'].includes(options.space)) throw new Error('config --space on|off를 사용하세요.');
     result = await configureVault(stateDir, { spaceEnabled: options.space === 'on' });
   } else if (command === 'import') {
-    if (!options.input || options.space || options.root) throw new Error('import --input FILE를 사용하세요. 저장 경로는 init으로 선택합니다.');
+    if (!options.input) throw new Error('import --input FILE를 사용하세요. 저장 경로는 init으로 선택합니다.');
     const settings = vaultPreferences(stateDir);
     result = await saveDocument(readJson(options.input), { root: settings.root });
   } else if (command === 'adopt') {
-    if (!options.id || options.input || options.space || options.root) throw new Error('adopt --id UUID를 사용하세요.');
+    if (!options.id) throw new Error('adopt --id UUID를 사용하세요.');
     result = await adoptDocument(options.id, { root: vaultPreferences(stateDir).root });
   } else if (command === 'status') {
-    if (options.root || options.input || options.space) throw new Error('status에는 --state-dir만 지정할 수 있습니다.');
     const settings = vaultPreferences(stateDir);
     result = { ...settings, ...(await vaultStatus(settings.root)) };
-  } else throw new Error('사용법: node scripts/document-vault.mjs init --root PATH | import --input FILE | adopt --id UUID | status | config --space on|off');
+  }
   console.log(JSON.stringify(result, null, 2));
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
