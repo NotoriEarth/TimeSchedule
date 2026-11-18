@@ -14,5 +14,6 @@ description: TimeSchedule에서 개발 변경을 커밋할 때 작업의 문제�
 ## 새 채팅에서의 복구
 
 - 진행 중인 같은 작업을 이어갈 때는 기존 ID로 작업을 마친 뒤 한 번 전달한다. 이전 작업의 `missing_with_note`는 `finish <UUID>`로 저장해 둔 설명과 테스트를 사용한다. `missing`은 소유 커밋과 남은 검사 영수증을 확인하고 복원 가능한 사실로 원문을 만든다. 선택 이유가 남아 있지 않으면 그 한계를 쓴다.
+- 같은 ID의 후속 개발 커밋이 `missing`이면 이전 설명이나 직전 전달본을 읽어 첫 작업의 문제, 해결, 당시 검증 범위를 보존한다. 직전 기록 이후부터 `ownedHead`까지 내 작업 ID가 붙은 커밋 본문과 diff를 해당 작업의 검사 영수증과 대조한다. `summary`나 `detail`에 후속 변경이 필요했던 이유, 바꾼 내용, 실제 검사와 결과를 새 문단으로 덧붙인다. `tests`에 완료 커밋에서 다시 실행할 검사를 지정하고 `finish <UUID> <NOTE.json>`으로 같은 항목을 갱신한다. 확인할 수 없는 이유나 검증 결과는 그 한계를 적는다.
 - `delivery_ready`, `prepared`, `diary_queued` 등 전달 대기는 `retry <UUID>`로 보관한 입력을 다시 보낸다. `conflict`는 기존 사용자 편집을 확인한다. `started_before_id`는 시작 시점만 확인된 작업이다. ID 없는 `unassigned`와 작성자가 섞인 `ambiguous`는 검토 후보로만 알린다.
 - Markdown 수정, 조사, 기존 테스트만 수행한 대화에는 개발 일지를 발행하지 않는다. 보관된 자료와 수신 상태의 의미는 `docs/project-records.md`를 따른다.

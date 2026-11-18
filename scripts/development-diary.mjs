@@ -119,6 +119,39 @@ function requiredText(value, label) {
   return value.trim().replace(/\r\n/g, '\n');
 }
 
+const compactText = text => text.trim().replace(/\s+/gu, ' ');
+function narrativeParagraphs(note) {
+  return [note.summary, note.detail].filter(text => typeof text === 'string')
+    .flatMap(text => text.split(/\n\s*\n/u)).map(compactText).filter(Boolean);
+}
+
+function repeatsEarlierNote(ctx, task, ownedHead, evidenceHead, note) {
+  const parts = narrativeParagraphs(note);
+  let unseen = parts;
+  const matchRecordedParagraphs = text => {
+    const previous = compactText(text);
+    unseen = unseen.filter(part => !previous.includes(part));
+    return unseen.length === 0;
+  };
+  const saved = optional(path.join(task.directory, 'note.json'));
+  if (saved) {
+    const previous = narrativeParagraphs(saved.note ?? saved);
+    const legacySource = saved.ownedHead ? null : stateFor(ctx, task.workId)?.source;
+    const sameCommit = saved.ownedHead === ownedHead || (legacySource?.gitChanges?.head === evidenceHead
+      && compactText(legacySource.detailedMarkdown).startsWith(previous.join(' ')));
+    if (sameCommit && parts.join('\n') === previous.join('\n')) return false;
+    if (!sameCommit && matchRecordedParagraphs(previous.join(' '))) return true;
+  }
+  // Each prepared revision retains the original body, including captures made
+  // before notes were bound to commits. Mixed-author evidence can be projected.
+  const revisions = path.join(ctx.stateDir, task.workId);
+  if (!fs.existsSync(revisions)) return false;
+  return fs.readdirSync(revisions).filter(name => /^\d+\.json$/.test(name)).some(name => {
+    const { source } = read(path.join(revisions, name));
+    return source.gitChanges?.head !== evidenceHead && matchRecordedParagraphs(source.detailedMarkdown);
+  });
+}
+
 export async function finish(ctx, id, file) {
   const task = taskById(ctx, id), { start, directory } = task;
   const head = branchHead(ctx, task);
@@ -131,11 +164,17 @@ export async function finish(ctx, id, file) {
   const note = file ? read(file) : readNoteForCommit(directory, ownedHead);
   if (!note) throw new Error(`마지막 개발 커밋 ${ownedHead.slice(0, 8)}의 새 설명이 필요합니다. finish ${id} <NOTE.json>으로 작업 원문 JSON 경로를 지정하세요.`);
   const title = requiredText(note.title, 'title'), paragraph = requiredText(note.summary, 'summary');
+  const detail = note.detail ? requiredText(note.detail, 'detail') : '';
   const files = note.tests ?? [];
   if (!Array.isArray(files)) throw new Error('tests에는 실행할 파일 목록을 지정하세요.');
-  if (file) write(path.join(directory, 'note.json'), { ownedHead, note });
+  if (file) {
+    if (repeatsEarlierNote(ctx, task, ownedHead, changes.head, note)) {
+      throw new Error(`후속 개발 커밋 ${ownedHead.slice(0, 8)}의 변경 이유와 근거를 요약(summary)이나 상세 설명(detail)에 덧붙이세요.`);
+    }
+    write(path.join(directory, 'note.json'), { ownedHead, note });
+  }
   const blocks = [paragraph];
-  if (note.detail) blocks.push(requiredText(note.detail, 'detail'));
+  if (detail) blocks.push(detail);
   const checks = path.join(directory, 'checks');
   if (fs.existsSync(checks)) for (const name of fs.readdirSync(checks).filter(n => n.endsWith('.json')).sort()) {
     const receipt = read(path.join(checks, name));

@@ -46,8 +46,8 @@ function recoveryFixture(t) {
       importer: async ({ workId, revision }) => ({ outcome: 'saved', workId, revision, entryId: workId }),
     });
   `);
-  const draft = summary => {
-    write('draft.json', JSON.stringify({ title: 'Development note', summary }));
+  const draft = (summary, fields = {}) => {
+    write('draft.json', JSON.stringify({ title: 'Development note', summary, ...fields }));
     return path.join(root, 'draft.json');
   };
   return { ctx, workId, commit, directory, draft };
@@ -143,6 +143,60 @@ test('a follow-up owned development commit needs a fresh note before it can fini
   assert.equal(source.gitChanges.head, followUp);
   assert.equal(source.diarySummary, 'Implemented value two.');
   assert.deepEqual(audit(ctx), []);
+});
+
+test('renaming an input or editing only metadata cannot explain a follow-up commit', async t => {
+  const { ctx, workId, commit, directory, draft } = recoveryFixture(t);
+  commit('src/value.mjs', 'export const value = 1;', workId);
+  const summary = 'Implemented value one.';
+  const detail = 'The first version\nreturns one.';
+  const input = draft(summary, { detail });
+  const original = await finish(ctx, workId, input);
+  assert.equal(original.phase, 'local_complete', original.lastError);
+  const copy = path.join(path.dirname(input), 'renamed.json');
+  fs.copyFileSync(input, copy);
+  const replay = await finish(ctx, workId, copy);
+  assert.equal(replay.unchanged, true);
+  assert.equal(replay.revision, original.revision);
+
+  const followUp = commit('src/value.mjs', 'export const value = 2;', workId);
+  const saved = name => fs.readFileSync(path.join(directory, name), 'utf8');
+  const noteBefore = saved('note.json'), deliveryBefore = saved('delivery.json');
+  await assert.rejects(finish(ctx, workId, copy), /요약|상세/);
+  const metadataOnly = draft('  ' + summary, {
+    title: 'Follow-up', detail: detail.replace('\n', '\r\n  '),
+    verification: 'Ran another check.', status: 'verified', tests: ['tests/missing.test.mjs'],
+  });
+  await assert.rejects(finish(ctx, workId, metadataOnly), /요약|상세/);
+  await assert.rejects(finish(ctx, workId, draft(summary)), /요약|상세/);
+  await assert.rejects(finish(ctx, workId, draft(summary, { detail: detail + '\n\n' + summary })), /요약|상세/);
+  assert.equal(saved('note.json'), noteBefore);
+  assert.equal(saved('delivery.json'), deliveryBefore);
+  assert.deepEqual(audit(ctx), [{ branch: ctx.branch, workId, ownedHead: followUp, phase: 'missing' }]);
+
+  const expanded = detail + '\n\nThe follow-up returns two to meet the revised requirement.';
+  const updated = await finish(ctx, workId, draft(summary, { detail: expanded }));
+  assert.equal(updated.phase, 'local_complete', updated.lastError);
+  assert.equal(updated.revision, original.revision + 1);
+  assert.equal(updated.entryId, original.entryId);
+  assert.ok(fs.readFileSync(updated.file, 'utf8').includes(expanded));
+  await assert.rejects(finish(ctx, workId, copy), /요약|상세/);
+  assert.deepEqual(audit(ctx), []);
+});
+
+test('an older completed revision cannot be submitted as evidence for a third commit', async t => {
+  const { ctx, workId, commit, draft } = recoveryFixture(t);
+  const original = 'Started with value one.';
+  commit('src/value.mjs', 'export const value = 1;', workId);
+  await finish(ctx, workId, draft(original));
+  commit('src/value.mjs', 'export const value = 2;', workId);
+  const second = 'Changed the value from one to two.';
+  await finish(ctx, workId, draft(second));
+  commit('src/value.mjs', 'export const value = 3;', workId);
+
+  await assert.rejects(finish(ctx, workId, draft(original)), /요약|상세/);
+  await assert.rejects(finish(ctx, workId, draft(original, { detail: second })), /요약|상세/);
+  assert.equal(audit(ctx)[0].phase, 'missing');
 });
 
 test('a legacy note without a commit requires explicit replacement', async t => {
