@@ -11,15 +11,16 @@ export const adapter = {
   turnKey: payload => payload.prompt_id,
   // `turn` marks events that belong to a turn: 'open' while it runs, 'completed' when the
   // tool's own end-of-turn hook fires. No user-interrupt hook was observed for Claude Code.
+  // `requires` lists the string fields every observed sample of the event carried.
   events: {
-    SessionStart: { kind: 'session_start', body: payload => ({ source: payload.source }) },
-    UserPromptSubmit: { kind: 'user_prompt', turn: 'open', body: payload => ({ prompt: payload.prompt }) },
+    SessionStart: { kind: 'session_start', requires: ['source'], body: payload => ({ source: payload.source }) },
+    UserPromptSubmit: { kind: 'user_prompt', turn: 'open', requires: ['prompt'], body: payload => ({ prompt: payload.prompt }) },
     // Every observed PreToolUse was followed by PostToolUse or PostToolUseFailure.
-    PreToolUse: { skip: 'redundant_event', turn: 'open' },
-    PostToolUse: { kind: 'tool_result', turn: 'open', body: payload => toolBody(payload) },
-    PostToolUseFailure: { kind: 'tool_result', turn: 'open', body: payload => toolBody(payload, { failed: true }) },
-    Stop: { kind: 'turn_end', turn: 'completed', body: payload => ({ last_assistant_message: payload.last_assistant_message }) },
-    SessionEnd: { kind: 'session_end', body: payload => ({ reason: payload.reason }) },
+    PreToolUse: { skip: 'redundant_event', turn: 'open', requires: ['tool_name'] },
+    PostToolUse: { kind: 'tool_result', turn: 'open', requires: ['tool_name'], body: payload => toolBody(payload) },
+    PostToolUseFailure: { kind: 'tool_result', turn: 'open', requires: ['tool_name'], body: payload => toolBody(payload, { failed: true }) },
+    Stop: { kind: 'turn_end', turn: 'completed', requires: ['last_assistant_message'], body: payload => ({ last_assistant_message: payload.last_assistant_message }) },
+    SessionEnd: { kind: 'session_end', requires: ['reason'], body: payload => ({ reason: payload.reason }) },
   },
 };
 

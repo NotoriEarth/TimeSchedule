@@ -3,112 +3,25 @@
 //
 // The order of the checks is the contract. Earlier checks win, and every check fails
 // closed: a record yields a body only when its origin is exactly `tool`, its client
-// version and event are verified, and its folder is registered as `new` or `link`.
+// version and event are verified, the event carries the fields it was observed with,
+// and the caller says its folder is confirmed.
+//
+// Which project a folder belongs to is NOT decided here. Whether two spellings name one
+// folder is a property of the file system (case sensitivity is set per directory;
+// junctions, symlinks, worktrees and short names need a lookup), and a function that
+// only sees strings cannot get it right in both directions: every attempt either let an
+// excluded folder through under another spelling or let a different folder borrow a
+// registration. So the caller resolves the folder, with the file system, and tells the
+// adapter the decision through `context.registrationFor(cwd)`:
+//
+//   { decision: 'new' | 'link', projectId }  the folder is confirmed for that project
+//   { decision: 'exclude' }                  the folder is excluded
+//   anything else, or no answer             not confirmed: path candidate only, no body
 
 const isText = value => typeof value === 'string' && value.length > 0;
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const ORIGINS = ['tool', 'timeschedule_generation'];
 const CONFIRMED = ['new', 'link'];
-// Returned when the registrations cannot be trusted to answer for a folder.
-const CONFLICT = Object.freeze({ canonicalPath: null, decision: 'conflict', projectId: null });
-
-// ---- paths -------------------------------------------------------------------
-//
-// Windows decides whether two spellings name one folder; a string function can only
-// imitate that, and every imitation so far either let an excluded folder through under
-// another spelling or let a different folder borrow a registration. So this module does
-// not interpret paths. It accepts a path only in canonical form and compares names:
-//
-//   accepted   `C:\a\b`, `\\server\share\a`; `/` for `\`; one trailing separator
-//   refused    `.` and `..` names, empty names (doubled separators), names ending in a
-//              dot or space, names with `< > : " | ? *` or control characters,
-//              `\\?\` and `\\.\` forms, drive-relative `D:` and `D:x`, relative paths
-//
-// The caller canonicalises with the file system (junctions, symlinks, worktrees, 8.3
-// short names, `\\?\`) before a path gets here. A refused path is `malformed`.
-function parsePath(value) {
-  if (!isText(value)) return null;
-  const text = value.replace(/\//g, '\\');
-  let parts;
-  let rest;
-  const drive = /^([A-Za-z]):\\/.exec(text);
-  const unc = /^\\\\([^\\]+)\\([^\\]+)(?:\\|$)/.exec(text);
-  if (drive) {
-    parts = [`${drive[1]}:`];
-    rest = text.slice(3);
-  } else if (unc) {
-    if (!isPlainName(unc[1]) || !isPlainName(unc[2])) return null;
-    parts = [`\\\\${unc[1]}`, unc[2]];
-    rest = text.slice(unc[0].length);
-  } else {
-    return null;
-  }
-  if (rest.endsWith('\\')) rest = rest.slice(0, -1);
-  for (const name of rest === '' ? [] : rest.split('\\')) {
-    if (!isPlainName(name)) return null;
-    parts.push(name);
-  }
-  return parts;
-}
-
-function isPlainName(name) {
-  // eslint-disable-next-line no-control-regex
-  return name !== '' && name !== '.' && name !== '..' && !/[. ]$/.test(name) && !/[<>:"|?*\u0000-\u001f]/.test(name);
-}
-
-// Two ways to compare names, because the two possible mistakes are not equally safe.
-// To CONFIRM a folder a false match is the danger, so only ASCII letters are folded and
-// every other character must be identical. To EXCLUDE (or to notice an unconfirmed or
-// conflicting registration) a missed match is the danger, so names are folded as widely
-// as JavaScript can: compatibility normalisation plus full upper and lower casing.
-const strictKey = parts => parts.map(name => name.replace(/[A-Z]/g, letter => letter.toLowerCase()));
-const looseKey = parts => parts.map(name => name.normalize('NFKC').toUpperCase().toLowerCase());
-const isPrefix = (base, target) => base.length <= target.length && base.every((name, index) => name === target[index]);
-
-// Returns the registration that answers for `cwd`, or null when none does.
-//
-// The deepest registered ancestor (or the folder itself) answers, so an excluded
-// subfolder overrides its registered parent, and a sibling that merely shares a prefix
-// (`Repo-test` vs `Repo`) is not an ancestor. Ancestors are found with the loose
-// comparison. Among registrations at that depth the most restrictive wins whatever
-// their order: an exclusion, then an unconfirmed decision. A confirmed registration
-// answers only if it also matches strictly; if it does not, or if confirmed
-// registrations name different projects, the result is a conflict and yields no body.
-// One registration that is not in canonical form makes every answer a conflict: it
-// might be the exclusion that applies.
-export function resolveRegistration(cwd, registrations) {
-  const target = parsePath(cwd);
-  if (target === null) return null;
-  const parsed = [];
-  for (const registration of registrations ?? []) {
-    const base = parsePath(registration?.canonicalPath);
-    if (base === null) return CONFLICT;
-    parsed.push({ registration, base });
-  }
-  const targetLoose = looseKey(target);
-  let depth = -1;
-  let top = [];
-  for (const item of parsed) {
-    if (!isPrefix(looseKey(item.base), targetLoose)) continue;
-    if (item.base.length > depth) {
-      depth = item.base.length;
-      top = [item];
-    } else if (item.base.length === depth) {
-      top.push(item);
-    }
-  }
-  if (top.length === 0) return null;
-  const excluded = top.find(item => item.registration.decision === 'exclude');
-  if (excluded) return excluded.registration;
-  const unconfirmed = top.find(item => !CONFIRMED.includes(item.registration.decision));
-  if (unconfirmed) return unconfirmed.registration;
-  const targetStrict = strictKey(target);
-  if (!top.every(item => isPrefix(strictKey(item.base), targetStrict))) return CONFLICT;
-  if (new Set(top.map(item => item.registration.projectId)).size > 1) return CONFLICT;
-  return top[0].registration;
-}
-
-// ---- records -------------------------------------------------------------------
 
 // The probe writes UTC timestamps with milliseconds; anything else is a damaged record.
 function isCaptureTime(value) {
@@ -122,7 +35,24 @@ function isWellFormed(record, adapter) {
   return isObject(record) && record.capture_schema === 1 && record.source === adapter.source
     && ORIGINS.includes(record.origin)
     && isText(record.capture_id) && isCaptureTime(record.captured_at) && isObject(payload)
-    && isText(payload.session_id) && isText(payload.hook_event_name) && parsePath(payload.cwd) !== null;
+    && isText(payload.session_id) && isText(payload.hook_event_name) && isText(payload.cwd);
+}
+
+// A verified event must still look like the samples it was verified with: the string
+// fields its body is built from, and, for an event that belongs to a turn, the turn id.
+function hasObservedShape(payload, event, adapter) {
+  if (!(event.requires ?? []).every(name => typeof payload[name] === 'string')) return false;
+  return !event.turn || isText(adapter.turnKey(payload));
+}
+
+// 'confirmed' | 'excluded' | 'unconfirmed', from the caller's answer for this folder.
+function folderDecision(context, cwd) {
+  if (typeof context?.registrationFor !== 'function') return { state: 'unconfirmed' };
+  const answer = context.registrationFor(cwd);
+  if (!isObject(answer)) return { state: 'unconfirmed' };
+  if (answer.decision === 'exclude') return { state: 'excluded' };
+  if (CONFIRMED.includes(answer.decision) && isText(answer.projectId)) return { state: 'confirmed', projectId: answer.projectId };
+  return { state: 'unconfirmed' };
 }
 
 export function normalizeCapture(record, context, adapter) {
@@ -132,14 +62,13 @@ export function normalizeCapture(record, context, adapter) {
   if (!adapter.verifiedVersions.includes(record.tool_version)) return { outcome: 'unsupported', reason: 'unknown_version' };
   if (!Object.hasOwn(adapter.events, payload.hook_event_name)) return { outcome: 'unsupported', reason: 'unknown_event' };
   const event = adapter.events[payload.hook_event_name];
+  if (!hasObservedShape(payload, event, adapter)) return { outcome: 'unsupported', reason: 'malformed' };
   if (event.skip) return { outcome: 'excluded', reason: event.skip };
 
-  const registration = resolveRegistration(payload.cwd, context?.registrations);
-  if (registration?.decision === 'exclude') return { outcome: 'excluded', reason: 'path_excluded' };
-  // Not registered, not confirmed, or in conflict: the path only, never a body.
-  if (!registration || !CONFIRMED.includes(registration.decision)) {
-    return { outcome: 'candidate', candidate: { source: adapter.source, path: payload.cwd } };
-  }
+  const folder = folderDecision(context, payload.cwd);
+  if (folder.state === 'excluded') return { outcome: 'excluded', reason: 'path_excluded' };
+  // The folder as the tool reported it, for the caller to ask the user about. No body.
+  if (folder.state !== 'confirmed') return { outcome: 'candidate', candidate: { source: adapter.source, path: payload.cwd } };
 
   return {
     outcome: 'activity',
@@ -151,7 +80,7 @@ export function normalizeCapture(record, context, adapter) {
       // record is recognisable. Running the hook again is a new event with a new id.
       event_id: record.capture_id,
       revision: 1,
-      project_id: registration.projectId,
+      project_id: folder.projectId,
       // Hook payloads observed in M0 carry no event time; this is when the hook ran.
       occurred_at: record.captured_at,
       received_at: context.receivedAt,
@@ -172,10 +101,11 @@ export function normalizeCapture(record, context, adapter) {
 // a turn that is still running, so the caller must know the session is over before it
 // treats the turn as lost.
 //
-// The same gates as normalizeCapture apply (origin, version, event, confirmed folder),
-// so the tool's own generation runs and unconfirmed folders never appear here. Skipped
-// events are read too: a PreToolUse with nothing after it is the only trace of an
-// interrupted tool call. Only event names and ids are read, never a body.
+// The same gates as normalizeCapture apply (origin, version, event, observed shape,
+// folder confirmed by the caller), so the tool's own generation runs and unconfirmed
+// folders never appear here. Skipped events are read too: a PreToolUse with nothing
+// after it is the only trace of an interrupted tool call. Only event names and ids are
+// read, never a body.
 //
 // The answer does not depend on the order of `records`. The terminal hook with the
 // latest capture time decides; if a Stop and an Interrupt share that time the turn is
@@ -187,15 +117,14 @@ export function classifyTurns(records, context, adapter) {
     if (!adapter.verifiedVersions.includes(record.tool_version)) return false;
     const name = record.payload.hook_event_name;
     if (!Object.hasOwn(adapter.events, name) || !adapter.events[name].turn) return false;
-    const registration = resolveRegistration(record.payload.cwd, context?.registrations);
-    return Boolean(registration) && CONFIRMED.includes(registration.decision);
+    if (!hasObservedShape(record.payload, adapter.events[name], adapter)) return false;
+    return folderDecision(context, record.payload.cwd).state === 'confirmed';
   }).sort((a, b) => (a.captured_at < b.captured_at ? -1 : a.captured_at > b.captured_at ? 1
     : a.capture_id < b.capture_id ? -1 : a.capture_id > b.capture_id ? 1 : 0));
 
   const turns = new Map();
   for (const record of usable) {
     const turnId = adapter.turnKey(record.payload);
-    if (!isText(turnId)) continue;
     // Encoded as a pair, so no character inside an id can make two turns look like one.
     const key = JSON.stringify([record.payload.session_id, turnId]);
     const turn = turns.get(key)

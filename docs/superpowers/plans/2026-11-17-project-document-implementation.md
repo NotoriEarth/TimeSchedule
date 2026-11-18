@@ -120,6 +120,8 @@ M1만 끝났으면 ‘수집 시범’, M2만 끝났으면 ‘문서 시험’�
 **Files:** 생성 `project_activity.rs`, `activity_store.rs`, `crates/timeschedule-core/tests/project_activity.rs`; 수정 코어 `lib.rs`, `storage.rs`, `diary.rs`.
 **Interfaces:** `Storage::register_project_path(&PathRegistration) -> Result<(), String>`, `Storage::ingest_activity(&ActivityEnvelope) -> Result<ActivityReceipt, String>`, `Storage::list_project_activities(&ActivityQuery) -> Result<ActivityPage, String>`. `ActivityReceipt`는 event/revision/outcome(stored|unchanged|conflict)이며 page는 items/next_cursor다.
 
+> **작업 1에서 넘어온 조건(2026-11-18 사용자 결정):** 등록 경로와 도구가 준 작업 폴더의 대조는 이 작업의 책임이다. 작업 1의 어댑터는 `context.registrationFor(cwd)`로 결정을 받기만 하고 경로를 비교하지 않는다. 문자열 비교로 구현했던 대조는 독립 검토에서 네 번 연속 틈이 나와 제거했다. 지켜야 할 조건과 시험 항목은 [수집 지원표](../../project-capture-support.md) 9절의 "등록 경로 대조는 작업 2로 넘겼다"에 있다. 이 작업의 하위 계획은 `registrationFor`의 구현(파일 시스템으로 경로 해석, 가장 깊은 조상, 겹치는 등록의 우선순위)을 포함해야 한다.
+
 - [ ] schema 6 표본에 기존 프로젝트·사용자 편집·대기 receipt를 넣고 이행 후 값이 같다는 시험, 동일명 두 폴더·worktree 별칭·재연결 시험을 작성한다.
 - [ ] 이벤트 재전송은 한 항목, 같은 키의 내용 변경은 conflict, 별도 두 실패는 두 항목이라는 assertion을 고정한다. 23:59/00:00 KST 경계·시각 미상·수신 지연·101건 조회의 다음 페이지를 시험한다.
 - [ ] `cargo test -p timeschedule-core --test project_activity --locked` 실패 확인 후 테이블·타입·저장 API를 구현한다. Windows 경로 정규화와 등록 확인을 분리하고 표기 차이만으로 다른 승인 범위를 상속하지 않는다.

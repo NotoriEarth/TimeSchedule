@@ -14,6 +14,12 @@
 
 작성일: 2026-11-18. 조사 기준 HEAD: `4cb7fd15259d1716fc8f0f1a0cacd887c6cfa691`(코드는 `main` `ad679cd`와 동일, 네이티브 앱 `0.18.0`, schema `6`).
 
+> **실행 중 바뀐 것(2026-11-18).** 아래 본문은 승인 당시의 계획이다. 실제 결과는 [인계 자료](../handoffs/2026-11-18-m0-capture-support.md)를 따른다.
+> - 등록 경로 대조(`resolveRegistration`, `NormalizeContext.registrations`)는 사용자 결정으로 작업 2로 넘겼다. 어댑터는 `context.registrationFor(cwd)`로 폴더 결정을 받는다.
+> - 턴 종료 구분용 `classifyTurns`와 제외 사유 `not_an_activity`를 추가했다.
+> - Codex 표본은 npm CLI가 아니라 Codex 앱에 포함된 실행 파일로 얻었고, Codex 시나리오는 Codex가 수행했다.
+> - 검증한 이벤트는 표본에서 본 필드를 갖춰야 하며, 아니면 `malformed`다.
+
 ## Global Constraints
 
 - 전역 설정(`~/.claude/settings.json`, `~/.codex/config.toml`, `~/.codex/hooks.json`)을 수정하지 않는다. 훅은 시험 폴더의 프로젝트 범위 파일에만 둔다.

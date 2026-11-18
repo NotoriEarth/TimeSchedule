@@ -2,7 +2,7 @@
 // Turns raw CaptureRecords from the M0 lab into fixtures that are safe to commit:
 // the real home folder, the lab folder and every session/UUID-shaped id are replaced
 // by fixed placeholders. Event structure and field names are left as observed.
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,11 +10,14 @@ import { fileURLToPath } from 'node:url';
 const HOME_PLACEHOLDER = 'C:\\Users\\lab-user';
 const LAB_PLACEHOLDER = 'C:\\lab\\m0-sample';
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const SAMPLE_FILE = /^\d{2,}-.*\.json$/;
 // Replacements are written as control-character tokens first and expanded at the very
 // end, so a later rule can never rewrite text that an earlier rule put in.
 const TOKENS = { lab: ['\u0010', '\u0011', '\u0012'], home: ['\u0013', '\u0014', '\u0015'], labFolder: '\u0016', homeName: '\u0017' };
 
 const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// A name standing on its own: not part of a longer word in any script.
+const wholeWord = (name, flags) => new RegExp(`(?<![\\p{L}\\p{N}_])${escapeRegExp(name)}(?![\\p{L}\\p{N}_])`, flags);
 
 // A Windows path can appear with doubled backslashes (a JSON document embedded in a
 // string), with backslashes, or with forward slashes.
@@ -39,23 +42,23 @@ function expand(text) {
   return current.replaceAll(TOKENS.labFolder, folderName(LAB_PLACEHOLDER)).replaceAll(TOKENS.homeName, 'lab-user');
 }
 
-// Only values are rewritten. Field names are the schema the adapters read, and a
-// fixture test fails if a name ever carries a path or an id.
-function mapStrings(value, transform) {
-  if (typeof value === 'string') return transform(value);
-  if (Array.isArray(value)) return value.map(item => mapStrings(item, transform));
+function mapStrings(value, onValue, onKey = key => key) {
+  if (typeof value === 'string') return onValue(value);
+  if (Array.isArray(value)) return value.map(item => mapStrings(item, onValue, onKey));
   if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapStrings(item, transform)]));
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [onKey(key), mapStrings(item, onValue, onKey)]));
   }
   return value;
 }
 
+// Session ids are opaque and case-sensitive; UUIDs are not. They are kept apart in the
+// table so `Session-A` and `session-a` never share a placeholder.
 function placeholder(ids, key, prefix) {
-  const known = ids.get(key.toLowerCase());
+  const known = ids.get(key);
   if (known) return known;
   const count = [...ids.values()].filter(item => item.startsWith(`${prefix}-`)).length + 1;
   const created = `${prefix}-${String(count).padStart(4, '0')}`;
-  ids.set(key.toLowerCase(), created);
+  ids.set(key, created);
   return created;
 }
 
@@ -65,7 +68,7 @@ export function sanitizeCapture(record, { homeDir, labRoot, sessionIds }) {
   // folder: right after `Users` and a separator, including the `C--Users-name-…` form
   // Claude Code derives from a path. The bare word is never replaced, because an account
   // can be called `user`, `tool` or `session` and those words are part of the schema.
-  // A fixture that still shows the account name as a word fails the fixture tests.
+  // The command refuses to write a fixture that still shows the account name as a word.
   const profileFolder = new RegExp(`(users[\\\\/-]+)${escapeRegExp(homeName)}(?![\\p{L}\\p{N}])`, 'giu');
   const paths = text => {
     let current = replacePath(text, labRoot, TOKENS.lab);
@@ -74,15 +77,20 @@ export function sanitizeCapture(record, { homeDir, labRoot, sessionIds }) {
     current = current.replace(profileFolder, (match, lead) => `${lead}${TOKENS.homeName}`);
     return expand(current);
   };
+  // Field names are the schema the adapters read, so paths are replaced in values only.
   const cleaned = mapStrings(record, paths);
   if (!cleaned.payload || typeof cleaned.payload !== 'object') return cleaned;
+
   const sessionId = typeof cleaned.payload.session_id === 'string' && cleaned.payload.session_id ? cleaned.payload.session_id : null;
-  const sessionPlaceholder = sessionId ? placeholder(sessionIds, sessionId, 'session') : null;
-  const identifiers = text => {
-    const current = sessionId ? text.replace(new RegExp(escapeRegExp(sessionId), 'gi'), () => sessionPlaceholder) : text;
-    return current.replace(UUID, match => placeholder(sessionIds, match, 'id'));
-  };
-  return { ...cleaned, payload: mapStrings(cleaned.payload, identifiers) };
+  const sessionPlaceholder = sessionId ? placeholder(sessionIds, `session:${sessionId}`, 'session') : null;
+  const sessionToken = sessionId ? wholeWord(sessionId, 'gu') : null;
+  const uuids = text => text.replace(UUID, match => placeholder(sessionIds, `uuid:${match.toLowerCase()}`, 'id'));
+  // In a value the session id is replaced wherever it stands as a whole token, never
+  // inside a longer word (`tool` must not rewrite `PostToolUse`). A key is replaced
+  // only when the whole key is the id, which is how tools index data by session.
+  const inValue = text => uuids(sessionToken ? text.replace(sessionToken, () => sessionPlaceholder) : text);
+  const inKey = key => (key === sessionId ? sessionPlaceholder : uuids(key));
+  return { ...cleaned, payload: mapStrings(cleaned.payload, inValue, inKey) };
 }
 
 // `%USERPROFILE%` (left unexpanded by PowerShell) or a bare name would be accepted as a
@@ -108,14 +116,58 @@ function parseArgs(argv) {
   return options;
 }
 
+// Replaces the samples of one scenario as a whole. The new set is built in a folder
+// beside the old one (files that are not samples, such as expected.json, are carried
+// over), then the folders are swapped with two renames. If the new folder cannot be
+// moved in, the old one is put back, so a failure never leaves the scenario empty or
+// half replaced.
+export function swapScenario(out, outputs, { rename = renameSync } = {}) {
+  const parent = path.dirname(path.resolve(out));
+  const base = path.basename(path.resolve(out));
+  const staging = path.join(parent, `.${base}.new-${process.pid}`);
+  const retired = path.join(parent, `.${base}.old-${process.pid}`);
+  mkdirSync(parent, { recursive: true });
+  rmSync(staging, { recursive: true, force: true });
+  rmSync(retired, { recursive: true, force: true });
+  mkdirSync(staging);
+  try {
+    if (existsSync(out)) {
+      for (const name of readdirSync(out)) {
+        const source = path.join(out, name);
+        if (!SAMPLE_FILE.test(name) && statSync(source).isFile()) copyFileSync(source, path.join(staging, name));
+      }
+    }
+    for (const output of outputs) writeFileSync(path.join(staging, output.name), output.text);
+    if (existsSync(out)) {
+      rename(out, retired);
+      try {
+        rename(staging, out);
+      } catch (error) {
+        renameSync(retired, out);
+        throw error;
+      }
+      rmSync(retired, { recursive: true, force: true });
+    } else {
+      rename(staging, out);
+    }
+  } catch (error) {
+    rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2));
-  // Read and convert everything first. Existing fixtures are replaced only after every
-  // input, including the id table, was read without error.
+  // Read and convert everything first. Nothing on disk changes until every input,
+  // including the id table, was read and every check below passed.
   const records = readdirSync(options.in)
     .filter(name => name.endsWith('.json'))
     .map(name => JSON.parse(readFileSync(path.join(options.in, name), 'utf8')))
     .sort((a, b) => `${a.captured_at}|${a.capture_id}`.localeCompare(`${b.captured_at}|${b.capture_id}`));
+  // An empty folder usually means the hooks never ran. Replacing a scenario with nothing
+  // would delete its samples and still report success.
+  if (records.length === 0) throw new Error(`no capture records in ${options.in}; existing fixtures were left as they are`);
+
   // With --ids the replacement table is kept between runs, so one real session keeps one
   // placeholder across scenarios and different sessions never share one. The file holds
   // real ids and must stay outside the repository.
@@ -126,24 +178,18 @@ function main() {
     return { name: `${String(index + 1).padStart(2, '0')}-${event}.json`, text: `${JSON.stringify(cleaned, null, 2)}\n` };
   });
 
-  // An empty folder usually means the hooks never ran. Replacing a scenario with nothing
-  // would delete its samples and still report success.
-  if (outputs.length === 0) throw new Error(`no capture records in ${options.in}; existing fixtures were left as they are`);
+  // The account the capture came from is known only here, not to the tests that run
+  // later under whatever account checks out the repository. A name left standing as a
+  // word (in a prompt, a tool output) needs a person: edit or drop the raw record.
+  const homeName = path.win32.basename(options.home.replace(/\//g, '\\'));
+  const accountWord = wholeWord(homeName, 'iu');
+  for (const output of outputs) {
+    if (accountWord.test(output.text.replaceAll('lab-user', ''))) {
+      throw new Error(`${output.name} would still contain the account name as a word; nothing was written`);
+    }
+  }
 
-  // Write the whole new set beside the old one first; the old set is removed only after
-  // every new file is on disk, so a failed write cannot leave the scenario empty.
-  mkdirSync(options.out, { recursive: true });
-  const staged = outputs.map(output => ({ ...output, temporary: path.join(options.out, `.tmp-${output.name}`) }));
-  try {
-    for (const output of staged) writeFileSync(output.temporary, output.text);
-  } catch (error) {
-    for (const output of staged) rmSync(output.temporary, { force: true });
-    throw error;
-  }
-  for (const name of readdirSync(options.out)) {
-    if (/^\d{2,}-.*\.json$/.test(name)) rmSync(path.join(options.out, name));
-  }
-  for (const output of staged) renameSync(output.temporary, path.join(options.out, output.name));
+  swapScenario(options.out, outputs);
   if (options.ids) {
     const temporary = `${options.ids}.tmp`;
     writeFileSync(temporary, `${JSON.stringify([...sessionIds], null, 2)}\n`);

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -339,4 +339,92 @@ test('sanitize_cli_replaces_a_scenario_as_a_whole_and_leaves_no_temporary_files'
   const r = sanitizeCli(['--in', raw, '--out', out, '--home', 'C:\\Users\\realname', '--lab', 'C:\\LSH\\_capture-lab\\m0-sample']);
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(readdirSync(out).sort(), ['01-Stop.json', 'expected.json']);
+});
+
+// ---- review round 5 (gpt-6.2-astra) ----
+
+test('sanitize_cli_refuses_output_that_still_shows_the_capture_account_as_a_word', t => {
+  const dir = scratch(t);
+  const raw = path.join(dir, 'raw');
+  const out = path.join(dir, 'out');
+  mkdirSync(raw);
+  mkdirSync(out);
+  writeFileSync(path.join(out, '01-Old.json'), 'keep me');
+  const record = sample();
+  // The account the capture came from, not the account that runs the tests.
+  record.payload.note = 'signed in as OtherPerson today';
+  writeFileSync(path.join(raw, 'a.json'), JSON.stringify(record));
+  const r = sanitizeCli(['--in', raw, '--out', out, '--home', 'C:\\Users\\otherperson', '--lab', 'C:\\LSH\\_capture-lab\\m0-sample']);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /^sanitize-fixture: .*account name/);
+  assert.deepEqual(readdirSync(out), ['01-Old.json']);
+  assert.deepEqual(readdirSync(dir).sort(), ['out', 'raw'], 'no staging folder is left behind');
+});
+
+test('sanitize_replaces_an_opaque_session_id_as_a_whole_token_and_as_an_object_key', async () => {
+  const { sanitizeCapture } = await import('../scripts/activity-adapters/sanitize-fixture.mjs');
+  const options = ids => ({ homeDir: 'C:\\Users\\realname', labRoot: 'C:\\LSH\\_capture-lab\\m0-sample', sessionIds: ids });
+  const record = sample();
+  record.payload.session_id = 'tool';
+  record.payload.hook_event_name = 'PostToolUse';
+  record.payload.tool_name = 'Bash';
+  record.payload.by_session = { tool: { started: true }, '0199aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee': 1 };
+  record.payload.transcript_path = 'C:\\Users\\realname\\sessions\\tool.jsonl';
+  const out = sanitizeCapture(record, options(new Map()));
+  assert.equal(out.payload.session_id, 'session-0001');
+  assert.equal(out.payload.hook_event_name, 'PostToolUse', 'an id is never replaced inside a longer word');
+  assert.equal(out.payload.tool_name, 'Bash');
+  assert.ok(Object.hasOwn(out.payload, 'tool_name') && Object.hasOwn(out.payload, 'hook_event_name'));
+  assert.deepEqual(Object.keys(out.payload.by_session), ['session-0001', 'id-0001']);
+  assert.equal(out.payload.transcript_path, 'C:\\Users\\lab-user\\sessions\\session-0001.jsonl');
+
+  // Ids differ by case; they must not be merged into one placeholder.
+  const ids = new Map();
+  const first = sanitizeCapture({ ...sample(), payload: { ...sample().payload, session_id: 'Session-A' } }, options(ids));
+  const second = sanitizeCapture({ ...sample(), payload: { ...sample().payload, session_id: 'session-a' } }, options(ids));
+  assert.notEqual(first.payload.session_id, second.payload.session_id);
+});
+
+test('swapScenario_puts_the_old_scenario_back_when_the_new_one_cannot_be_moved_in', async t => {
+  const { swapScenario } = await import('../scripts/activity-adapters/sanitize-fixture.mjs');
+  const dir = scratch(t);
+  const out = path.join(dir, 'scenario');
+  mkdirSync(out);
+  writeFileSync(path.join(out, '01-Old.json'), 'old one');
+  writeFileSync(path.join(out, '02-Old.json'), 'old two');
+  writeFileSync(path.join(out, 'expected.json'), '[]');
+  const outputs = [{ name: '01-New.json', text: 'new' }];
+  let calls = 0;
+  const failing = (from, to) => { calls += 1; if (calls === 2) throw new Error('simulated rename failure'); renameSync(from, to); };
+  assert.throws(() => swapScenario(out, outputs, { rename: failing }), /simulated rename failure/);
+  assert.deepEqual(readdirSync(out).sort(), ['01-Old.json', '02-Old.json', 'expected.json']);
+  assert.equal(readFileSync(path.join(out, '01-Old.json'), 'utf8'), 'old one');
+  assert.deepEqual(readdirSync(dir), ['scenario'], 'no staging or retired folder is left behind');
+
+  calls = 0;
+  assert.throws(() => swapScenario(out, outputs, { rename: () => { throw new Error('cannot retire the old folder'); } }), /cannot retire/);
+  assert.deepEqual(readdirSync(out).sort(), ['01-Old.json', '02-Old.json', 'expected.json']);
+  assert.deepEqual(readdirSync(dir), ['scenario']);
+
+  swapScenario(out, outputs);
+  assert.deepEqual(readdirSync(out).sort(), ['01-New.json', 'expected.json'], 'files that are not samples are carried over');
+  assert.deepEqual(readdirSync(dir), ['scenario']);
+});
+
+test('sanitize_cli_numbers_more_than_ninety_nine_samples_so_the_tests_still_find_them', t => {
+  const dir = scratch(t);
+  const raw = path.join(dir, 'raw');
+  mkdirSync(raw);
+  for (let index = 0; index < 101; index += 1) {
+    const record = sample();
+    record.capture_id = `11111111-1111-4111-8111-${String(index).padStart(12, '0')}`;
+    record.captured_at = `2026-11-18T01:02:03.${String(index).padStart(3, '0')}Z`;
+    writeFileSync(path.join(raw, `${index}.json`), JSON.stringify(record));
+  }
+  const r = sanitizeCli(['--in', raw, '--out', path.join(dir, 'out'), '--home', 'C:\\Users\\realname', '--lab', 'C:\\LSH\\_capture-lab\\m0-sample']);
+  assert.equal(r.status, 0, r.stderr);
+  const names = readdirSync(path.join(dir, 'out'));
+  assert.equal(names.length, 101);
+  assert.ok(names.includes('101-Stop.json'));
+  assert.ok(names.every(name => /^\d{2,}-.*\.json$/.test(name)));
 });

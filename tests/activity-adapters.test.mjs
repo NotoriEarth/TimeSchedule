@@ -10,6 +10,7 @@ const FIXTURES = path.join(root, 'tests', 'fixtures', 'project-activity');
 const SOURCES = { claude: 'claude.mjs', codex: 'codex.mjs' };
 const loadAdapter = name => import(`../scripts/activity-adapters/${SOURCES[name]}`);
 const readJson = file => JSON.parse(readFileSync(file, 'utf8'));
+const isSample = file => /^\d{2,}-.*\.json$/.test(file);
 
 function allScenarios() {
   const scenarios = [];
@@ -18,13 +19,20 @@ function allScenarios() {
     if (!existsSync(sourceDir)) continue;
     for (const name of readdirSync(sourceDir).sort()) {
       const dir = path.join(sourceDir, name);
-      const files = readdirSync(dir).filter(file => /^\d{2}-.*\.json$/.test(file)).sort().map(file => path.join(dir, file));
+      const files = readdirSync(dir).filter(isSample).sort().map(file => path.join(dir, file));
       scenarios.push({ source, name, dir, files });
     }
   }
   return scenarios;
 }
 const allFixtureFiles = () => allScenarios().flatMap(scenario => scenario.files);
+const scenarioRecords = (source, scenario) => {
+  const dir = path.join(FIXTURES, source, scenario);
+  return readdirSync(dir).filter(isSample).sort().map(file => readJson(path.join(dir, file)));
+};
+const sessionOf = (source, scenario) => [...new Set(scenarioRecords(source, scenario).map(record => record.payload.session_id))];
+
+// ---- what a fixture may contain ------------------------------------------------
 
 test('fixtures_contain_no_private_markers', () => {
   const files = allFixtureFiles();
@@ -35,13 +43,69 @@ test('fixtures_contain_no_private_markers', () => {
     assert.ok(!/\b(sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/.test(text), `${file} contains a token-shaped string`);
     assert.ok(!/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(JSON.stringify(readJson(file).payload ?? {})),
       `${file} payload contains an unreplaced id`);
+    assert.ok(!text.includes('%USERPROFILE%') && !text.includes('$env:'), `${file} contains an unexpanded variable`);
   }
 });
 
-// ---- contract guards --------------------------------------------------------
+test('fixtures do not contain the current account name as a word', () => {
+  const home = path.basename(homedir());
+  const word = new RegExp(`(?<![A-Za-z0-9_])${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
+  for (const file of allFixtureFiles()) {
+    assert.ok(!word.test(readFileSync(file, 'utf8').replaceAll('lab-user', '')), `${file} contains the account name`);
+  }
+});
 
-const REG = [{ canonicalPath: 'C:\\LSH\\TimeSchedule', decision: 'new', projectId: 'p1' }];
-const ctx = (registrations = REG) => ({ registrations, receivedAt: '2026-11-18T00:00:00.000Z' });
+function profileFolders(value, found = []) {
+  if (typeof value === 'string') {
+    for (const match of value.matchAll(/users[\\/]+([^\\/"]+)/gi)) found.push({ form: 'path', name: match[1] });
+    for (const match of value.matchAll(/users-+([^\\/"]*)/gi)) found.push({ form: 'folder-name', name: match[1] });
+  } else if (Array.isArray(value)) {
+    value.forEach(item => profileFolders(item, found));
+  } else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) { profileFolders(key, found); profileFolders(item, found); }
+  }
+  return found;
+}
+
+test('profile folder check recognises names it must reject', () => {
+  const names = value => profileFolders(value).map(item => item.name);
+  assert.deepEqual(names({ a: 'C:\\Users\\\ud64d\uae38\ub3d9\\x', b: 'c:/users/someone/y', c: ['C:\\Users\\lab-user-2\\z'] }),
+    ['\ud64d\uae38\ub3d9', 'someone', 'lab-user-2']);
+  assert.deepEqual(profileFolders('C--Users-someone-repo'), [{ form: 'folder-name', name: 'someone-repo' }]);
+});
+
+test('fixtures name no profile folder other than the placeholder (any script, any case)', () => {
+  let seen = 0;
+  for (const file of allFixtureFiles()) {
+    for (const { form, name } of profileFolders(readJson(file))) {
+      seen += 1;
+      if (form === 'path') assert.equal(name, 'lab-user', `${file}: profile folder ${name}`);
+      else assert.match(name, /^lab-user(-|$)/, `${file}: profile folder name ${name}`);
+    }
+  }
+  assert.ok(seen > 0, 'the fixtures are expected to contain transcript paths');
+});
+
+test('fixtures keep session identity across scenarios', () => {
+  for (const source of ['claude', 'codex']) {
+    const first = sessionOf(source, 's1-normal-cli');
+    assert.equal(first.length, 1);
+    assert.deepEqual(sessionOf(source, 's2-resume-cli'), first, `${source}: a resumed session keeps the id of the session it resumed`);
+    const killed = sessionOf(source, source === 'claude' ? 's6-kill-cli' : 's6-kill-after-request-cli');
+    assert.notDeepEqual(killed, first, `${source}: a different session must not share an id`);
+  }
+  assert.deepEqual(sessionOf('codex', 's2-reentry-app'), sessionOf('codex', 's1-normal-app'));
+  assert.deepEqual(sessionOf('codex', 's4-interrupt-app'), sessionOf('codex', 's1-normal-app'));
+  assert.notDeepEqual(sessionOf('codex', 's1-normal-app'), sessionOf('codex', 's1-normal-cli'));
+});
+
+// ---- contract ---------------------------------------------------------------------
+//
+// The adapter does not decide which project a folder belongs to and never compares
+// paths. The caller answers that through `context.registrationFor(cwd)`.
+
+const CONFIRMED = { decision: 'new', projectId: 'p1' };
+const ctx = (registrationFor = () => CONFIRMED) => ({ registrationFor, receivedAt: '2026-11-18T00:00:00.000Z' });
 
 function capture(adapter, { payload = {}, ...top } = {}) {
   return {
@@ -51,109 +115,78 @@ function capture(adapter, { payload = {}, ...top } = {}) {
     ...top,
     payload: payload === null ? null : {
       session_id: 'session-0001', cwd: 'C:\\LSH\\TimeSchedule', hook_event_name: 'UserPromptSubmit',
-      prompt: 'SECRET-BODY', ...payload,
+      prompt: 'SECRET-BODY', turn_id: 'turn-a', prompt_id: 'turn-a', ...payload,
     },
   };
 }
 
-for (const name of Object.keys(SOURCES)) {
-  test(`${name}: adapter_declares_source_versions_and_events`, async () => {
-    const { adapter, normalizeEvent } = await loadAdapter(name);
-    assert.equal(typeof normalizeEvent, 'function');
-    assert.match(adapter.source, /^(claude-code|codex)$/);
-    assert.ok(Array.isArray(adapter.verifiedVersions));
-    assert.equal(typeof adapter.events, 'object');
-  });
+async function adapters() {
+  const loaded = await Promise.all(Object.keys(SOURCES).map(async name => ({ name, ...(await loadAdapter(name)) })));
+  for (const item of loaded) assert.ok(item.adapter.verifiedVersions.length > 0, `${item.name} has no verified version`);
+  return loaded;
+}
 
-  test(`${name}: normalize_unknown_version_is_unsupported`, async () => {
-    const { adapter, normalizeEvent } = await loadAdapter(name);
+test('adapter_declares_source_versions_and_events', async () => {
+  for (const { adapter, normalizeEvent, classifyTurns } of await adapters()) {
+    assert.equal(typeof normalizeEvent, 'function');
+    assert.equal(typeof classifyTurns, 'function');
+    assert.match(adapter.source, /^(claude-code|codex)$/);
+    assert.equal(typeof adapter.events, 'object');
+  }
+});
+
+test('normalize_unknown_version_is_unsupported', async () => {
+  for (const { adapter, normalizeEvent } of await adapters()) {
     const record = { ...capture(adapter), tool_version: '0.0.0-unknown' };
     assert.deepEqual(normalizeEvent(record, ctx()), { outcome: 'unsupported', reason: 'unknown_version' });
     assert.deepEqual(normalizeEvent({ ...record, tool_version: null }, ctx()), { outcome: 'unsupported', reason: 'unknown_version' });
-  });
-
-  test(`${name}: generation_origin_wins_over_unknown_version`, async () => {
-    const { adapter, normalizeEvent } = await loadAdapter(name);
-    const record = { ...capture(adapter), origin: 'timeschedule_generation', tool_version: '0.0.0-unknown' };
-    assert.deepEqual(normalizeEvent(record, ctx()), { outcome: 'excluded', reason: 'generation_origin' });
-  });
-
-  test(`${name}: malformed_capture_is_unsupported`, async () => {
-    const { adapter, normalizeEvent } = await loadAdapter(name);
-    const malformed = { outcome: 'unsupported', reason: 'malformed' };
-    assert.deepEqual(normalizeEvent(capture(adapter, { payload: null }), ctx()), malformed);
-    assert.deepEqual(normalizeEvent({ ...capture(adapter), capture_schema: 2 }, ctx()), malformed);
-    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { cwd: undefined } }), ctx()), malformed);
-    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { session_id: '' } }), ctx()), malformed);
-    assert.deepEqual(normalizeEvent({ ...capture(adapter), capture_id: undefined }, ctx()), malformed);
-    assert.deepEqual(normalizeEvent({ ...capture(adapter), source: 'some-other-tool' }, ctx()), malformed);
-    assert.deepEqual(normalizeEvent(null, ctx()), malformed);
-  });
-}
-
-// The guards below need an event that becomes an activity, so they run for every adapter
-// that has at least one version verified by a lab sample.
-async function verifiedAdapters() {
-  const loaded = await Promise.all(Object.keys(SOURCES).map(async name => ({ name, ...(await loadAdapter(name)) })));
-  return loaded.filter(item => item.adapter.verifiedVersions.length > 0);
-}
-
-test('at_least_one_adapter_has_a_verified_version', async () => {
-  assert.ok((await verifiedAdapters()).length > 0);
-});
-
-test('unconfirmed_path_has_no_body', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    const result = normalizeEvent(capture(adapter, { payload: { cwd: 'C:\\Other\\Repo' } }), ctx());
-    assert.equal(result.outcome, 'candidate');
-    assert.equal(result.envelope, undefined);
-    assert.deepEqual(result.candidate, { source: adapter.source, path: 'C:\\Other\\Repo' });
-    assert.ok(!JSON.stringify(result).includes('SECRET-BODY'));
   }
 });
 
 test('generation_origin_is_excluded', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+  for (const { adapter, normalizeEvent } of await adapters()) {
     assert.deepEqual(normalizeEvent({ ...capture(adapter), origin: 'timeschedule_generation' }, ctx()),
       { outcome: 'excluded', reason: 'generation_origin' });
+    const unknownToo = { ...capture(adapter), origin: 'timeschedule_generation', tool_version: '0.0.0-unknown' };
+    assert.deepEqual(normalizeEvent(unknownToo, ctx()), { outcome: 'excluded', reason: 'generation_origin' });
   }
 });
 
-test('excluded_path_is_excluded', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    const registrations = [{ canonicalPath: 'C:\\LSH\\TimeSchedule', decision: 'exclude', projectId: 'p1' }];
-    assert.deepEqual(normalizeEvent(capture(adapter), ctx(registrations)), { outcome: 'excluded', reason: 'path_excluded' });
+test('unknown_origin_is_malformed', async () => {
+  for (const { adapter, normalizeEvent } of await adapters()) {
+    for (const origin of [undefined, null, '', 'TOOL', 'somewhere-else']) {
+      assert.deepEqual(normalizeEvent({ ...capture(adapter), origin }, ctx()), { outcome: 'unsupported', reason: 'malformed' }, String(origin));
+    }
   }
 });
 
-test('sibling_prefix_path_is_not_registered', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    const result = normalizeEvent(capture(adapter, { payload: { cwd: 'C:\\LSH\\TimeSchedule-test' } }), ctx());
-    assert.equal(result.outcome, 'candidate');
-    assert.equal(result.candidate.path, 'C:\\LSH\\TimeSchedule-test');
+test('malformed_capture_is_unsupported', async () => {
+  for (const { adapter, normalizeEvent } of await adapters()) {
+    const malformed = { outcome: 'unsupported', reason: 'malformed' };
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: null }), ctx()), malformed);
+    assert.deepEqual(normalizeEvent({ ...capture(adapter), capture_schema: 2 }, ctx()), malformed);
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { cwd: undefined } }), ctx()), malformed);
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { cwd: '' } }), ctx()), malformed);
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { cwd: 42 } }), ctx()), malformed);
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { session_id: '' } }), ctx()), malformed);
+    assert.deepEqual(normalizeEvent({ ...capture(adapter), capture_id: undefined }, ctx()), malformed);
+    assert.deepEqual(normalizeEvent({ ...capture(adapter), source: 'some-other-tool' }, ctx()), malformed);
+    assert.deepEqual(normalizeEvent(null, ctx()), malformed);
   }
 });
 
-test('path_match_ignores_case_separators_and_subfolders', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    const result = normalizeEvent(capture(adapter, { payload: { cwd: 'c:/lsh/timeschedule/crates/' } }), ctx());
-    assert.equal(result.outcome, 'activity');
-    assert.equal(result.envelope.project_id, 'p1');
-  }
-});
-
-test('nested_exclude_wins_over_parent', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    const registrations = [...REG, { canonicalPath: 'C:\\LSH\\TimeSchedule\\vendor', decision: 'exclude', projectId: 'p1' }];
-    const inside = normalizeEvent(capture(adapter, { payload: { cwd: 'C:\\LSH\\TimeSchedule\\vendor\\lib' } }), ctx(registrations));
-    assert.deepEqual(inside, { outcome: 'excluded', reason: 'path_excluded' });
-    const sibling = normalizeEvent(capture(adapter, { payload: { cwd: 'C:\\LSH\\TimeSchedule\\vendored' } }), ctx(registrations));
-    assert.equal(sibling.outcome, 'activity');
+test('capture_time_must_be_a_utc_millisecond_timestamp', async () => {
+  for (const { adapter, normalizeEvent, classifyTurns } of await adapters()) {
+    for (const captured_at of ['invalid-time', '2026-11-18', '2026-11-18T00:00:00Z', '2026-11-18T00:00:00.000+09:00', '2026-13-45T00:00:00.000Z']) {
+      assert.deepEqual(normalizeEvent({ ...capture(adapter), captured_at }, ctx()), { outcome: 'unsupported', reason: 'malformed' }, captured_at);
+      const stop = { ...capture(adapter, { payload: { hook_event_name: 'Stop', last_assistant_message: 'x' } }), captured_at };
+      assert.deepEqual(classifyTurns([stop], ctx()), [], captured_at);
+    }
   }
 });
 
 test('unknown_event_is_unsupported', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+  for (const { adapter, normalizeEvent } of await adapters()) {
     assert.deepEqual(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'NotARealEvent' } }), ctx()),
       { outcome: 'unsupported', reason: 'unknown_event' });
     // A name inherited from Object.prototype must not be mistaken for a listed event.
@@ -162,15 +195,82 @@ test('unknown_event_is_unsupported', async () => {
   }
 });
 
+test('a_verified_event_without_its_required_fields_is_malformed', async () => {
+  for (const { adapter, normalizeEvent, classifyTurns } of await adapters()) {
+    const malformed = { outcome: 'unsupported', reason: 'malformed' };
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { prompt: undefined } }), ctx()), malformed);
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { prompt: 42 } }), ctx()), malformed);
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'Stop' } }), ctx()), malformed, 'Stop without the final message');
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'SessionStart' } }), ctx()), malformed, 'SessionStart without source');
+    assert.deepEqual(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'PostToolUse', tool_use_id: 't1' } }), ctx()), malformed, 'tool result without tool name');
+    // An event that belongs to a turn must say which turn.
+    const noTurn = capture(adapter, { payload: { hook_event_name: 'Stop', last_assistant_message: 'done', turn_id: undefined, prompt_id: undefined } });
+    assert.deepEqual(normalizeEvent(noTurn, ctx()), malformed);
+    assert.deepEqual(classifyTurns([noTurn], ctx()), []);
+    const skippedNoTurn = capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Write', turn_id: '', prompt_id: '' } });
+    assert.deepEqual(normalizeEvent(skippedNoTurn, ctx()), malformed);
+    // An empty final message is still a final message.
+    assert.equal(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'Stop', last_assistant_message: '' } }), ctx()).outcome, 'activity');
+  }
+});
+
 test('redundant_event_is_excluded_without_body', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+  for (const { adapter, normalizeEvent } of await adapters()) {
     assert.deepEqual(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Write' } }), ctx()),
       { outcome: 'excluded', reason: 'redundant_event' });
   }
 });
 
+test('the_folder_decision_comes_only_from_the_caller', async () => {
+  for (const { adapter, normalizeEvent } of await adapters()) {
+    // The adapter passes the reported folder on as it is and does not interpret it.
+    for (const cwd of ['C:\\LSH\\TimeSchedule', 'c:/lsh/./timeschedule/', '\\\\?\\C:\\LSH\\TimeSchedule', 'relative\\folder', 'D:']) {
+      const asked = [];
+      const result = normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(folder => { asked.push(folder); return CONFIRMED; }));
+      assert.deepEqual(asked, [cwd]);
+      assert.equal(result.outcome, 'activity');
+      assert.equal(result.envelope.project_id, 'p1');
+    }
+    const linked = normalizeEvent(capture(adapter), ctx(() => ({ decision: 'link', projectId: 'p9' })));
+    assert.equal(linked.envelope.project_id, 'p9');
+  }
+});
+
+test('unconfirmed_path_has_no_body', async () => {
+  for (const { adapter, normalizeEvent } of await adapters()) {
+    const answers = [null, undefined, false, 'new', { decision: 'pending', projectId: 'p1' }, { decision: 'NEW', projectId: 'p1' },
+      { decision: 'conflict', projectId: null }, { decision: 'new' }, { decision: 'new', projectId: '' }, { decision: 'new', projectId: 7 }, {}];
+    for (const answer of answers) {
+      const result = normalizeEvent(capture(adapter, { payload: { cwd: 'C:\\Other\\Repo' } }), ctx(() => answer));
+      assert.deepEqual(result, { outcome: 'candidate', candidate: { source: adapter.source, path: 'C:\\Other\\Repo' } }, JSON.stringify(answer));
+      assert.ok(!JSON.stringify(result).includes('SECRET-BODY'));
+    }
+    // No way to ask: nothing is confirmed.
+    for (const context of [undefined, null, {}, { registrationFor: 'yes' }, { registrations: [{ canonicalPath: 'C:\\LSH\\TimeSchedule', decision: 'new', projectId: 'p1' }] }]) {
+      assert.equal(normalizeEvent(capture(adapter), context).outcome, 'candidate', JSON.stringify(context));
+    }
+  }
+});
+
+test('excluded_path_is_excluded', async () => {
+  for (const { adapter, normalizeEvent } of await adapters()) {
+    assert.deepEqual(normalizeEvent(capture(adapter), ctx(() => ({ decision: 'exclude', projectId: 'p1' }))), { outcome: 'excluded', reason: 'path_excluded' });
+    assert.deepEqual(normalizeEvent(capture(adapter), ctx(() => ({ decision: 'exclude' }))), { outcome: 'excluded', reason: 'path_excluded' });
+  }
+});
+
+test('the_caller_is_not_asked_about_records_that_fail_an_earlier_check', async () => {
+  for (const { adapter, normalizeEvent } of await adapters()) {
+    const refuse = ctx(() => { throw new Error('must not be asked'); });
+    assert.equal(normalizeEvent({ ...capture(adapter), origin: 'timeschedule_generation' }, refuse).outcome, 'excluded');
+    assert.equal(normalizeEvent({ ...capture(adapter), tool_version: 'x' }, refuse).outcome, 'unsupported');
+    assert.equal(normalizeEvent(capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Write' } }), refuse).outcome, 'excluded');
+    assert.equal(normalizeEvent(capture(adapter, { payload: { prompt: undefined } }), refuse).outcome, 'unsupported');
+  }
+});
+
 test('same_capture_normalizes_to_same_event_id', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+  for (const { adapter, normalizeEvent } of await adapters()) {
     const record = capture(adapter);
     const first = normalizeEvent(record, ctx());
     const second = normalizeEvent(record, ctx());
@@ -181,7 +281,7 @@ test('same_capture_normalizes_to_same_event_id', async () => {
 });
 
 test('envelope_keeps_capture_time_and_receive_time_apart', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
+  for (const { adapter, normalizeEvent } of await adapters()) {
     const { envelope } = normalizeEvent(capture(adapter), ctx());
     assert.deepEqual(envelope, {
       schema_version: 1, source: adapter.source, session_id: 'session-0001',
@@ -194,7 +294,8 @@ test('envelope_keeps_capture_time_and_receive_time_apart', async () => {
 
 // ---- fixtures pinned to observed samples -------------------------------------
 
-const LAB = { registrations: [{ canonicalPath: 'C:\\lab\\m0-sample', decision: 'new', projectId: 'lab' }], receivedAt: '2026-11-18T00:00:00.000Z' };
+// The lab folder was confirmed by the person who ran the lab; every other folder is not.
+const LAB = { registrationFor: cwd => (cwd === 'C:\\lab\\m0-sample' ? { decision: 'new', projectId: 'lab' } : null), receivedAt: '2026-11-18T00:00:00.000Z' };
 
 for (const scenario of allScenarios()) {
   test(`fixture ${scenario.source}/${scenario.name}`, async () => {
@@ -212,14 +313,41 @@ for (const scenario of allScenarios()) {
   });
 }
 
-test('every_fixture_event_name_is_listed_or_reported_unsupported', async () => {
+test('no fixture yields a body when its folder is unconfirmed or excluded', async () => {
+  for (const scenario of allScenarios()) {
+    const { normalizeEvent } = await loadAdapter(scenario.source);
+    for (const file of scenario.files) {
+      const record = readJson(file);
+      for (const answer of [null, { decision: 'exclude', projectId: 'lab' }, { decision: 'pending', projectId: 'lab' }]) {
+        const result = normalizeEvent(record, { registrationFor: () => answer, receivedAt: LAB.receivedAt });
+        assert.equal(result.envelope, undefined, file);
+        assert.notEqual(result.outcome, 'activity', file);
+      }
+    }
+  }
+});
+
+test('every_listed_event_has_a_sample_from_every_verified_version', async () => {
+  for (const source of Object.keys(SOURCES)) {
+    const { adapter } = await loadAdapter(source);
+    const seen = new Set(allScenarios().filter(scenario => scenario.source === source)
+      .flatMap(scenario => scenario.files.map(readJson)).map(record => `${record.tool_version}\n${record.payload.hook_event_name}`));
+    for (const version of adapter.verifiedVersions) {
+      for (const event of Object.keys(adapter.events)) {
+        assert.ok(seen.has(`${version}\n${event}`), `${source}: ${event} has no sample from ${version}`);
+      }
+    }
+  }
+});
+
+test('every sample of a listed event satisfies the fields that event requires', async () => {
   for (const scenario of allScenarios()) {
     const { adapter, normalizeEvent } = await loadAdapter(scenario.source);
     for (const file of scenario.files) {
       const record = readJson(file);
-      const listed = Object.hasOwn(adapter.events, record.payload.hook_event_name);
+      if (!Object.hasOwn(adapter.events, record.payload.hook_event_name)) continue;
       const result = normalizeEvent({ ...record, origin: 'tool' }, LAB);
-      assert.equal(result.outcome === 'unsupported', !listed || !adapter.verifiedVersions.includes(record.tool_version), file);
+      assert.notEqual(result.reason, 'malformed', `${file} is an observed sample and must not be called malformed`);
     }
   }
 });
@@ -300,10 +428,8 @@ test('codex session start and end keep source, model and reason', async () => {
 
 async function endings(source, scenario) {
   const { classifyTurns } = await loadAdapter(source);
-  const dir = path.join(FIXTURES, source, scenario);
-  const records = readdirSync(dir).filter(file => /^\d{2}-/.test(file)).map(file => readJson(path.join(dir, file)));
   // Order must not matter: the function sorts by capture time itself.
-  return classifyTurns(records.reverse(), LAB);
+  return classifyTurns(scenarioRecords(source, scenario).reverse(), LAB);
 }
 
 test('codex desktop turn that finished is completed', async () => {
@@ -336,102 +462,42 @@ test('compaction and session events alone are not a turn', async () => {
   assert.deepEqual(await endings('codex', 's3-compact-sessionstart-app'), []);
 });
 
-test('classifyTurns ignores records it cannot vouch for', async () => {
-  const { classifyTurns } = await loadAdapter('codex');
-  const dir = path.join(FIXTURES, 'codex', 's1-normal-app');
-  const records = readdirSync(dir).filter(file => /^\d{2}-/.test(file)).map(file => readJson(path.join(dir, file)));
-  assert.deepEqual(classifyTurns(records.map(record => ({ ...record, tool_version: '0.0.0-unknown' })), LAB), []);
-  assert.deepEqual(classifyTurns([null, { capture_schema: 1 }, ...records], LAB).map(turn => turn.ending), ['completed']);
-});
-
-// ---- review round 1 (gpt-6.2-astra): fail closed on spelling, origin, decision and order ----
-
-const NESTED = [...REG, { canonicalPath: 'C:\\LSH\\TimeSchedule\\private', decision: 'exclude', projectId: 'p1' }];
-
-test('excluded_path_cannot_be_bypassed_by_path_spelling', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    const outcome = cwd => normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(NESTED));
-    // Spellings in canonical form: only case, separator direction and one trailing separator differ.
-    for (const cwd of ['c:/LSH/timeschedule/PRIVATE/', 'C:\\LSH\\TimeSchedule\\Private\\sub', 'C:\\lsh\\TIMESCHEDULE\\private']) {
-      assert.deepEqual(outcome(cwd), { outcome: 'excluded', reason: 'path_excluded' }, cwd);
-    }
-    // Anything that would need interpreting is refused rather than guessed at, so it can
-    // neither reach the excluded folder nor borrow the parent's registration.
-    for (const cwd of [
-      'C:\\LSH\\TimeSchedule\\.\\private', 'C:\\LSH\\TimeSchedule\\a\\..\\private', 'C:\\LSH\\TimeSchedule\\\\private',
-      'C:/LSH/TimeSchedule/./private/sub', 'C:\\LSH\\TimeSchedule\\private.', 'C:\\LSH\\TimeSchedule\\private ',
-      '\\\\?\\C:\\LSH\\TimeSchedule\\private', 'c:\\lsh\\.\\TIMESCHEDULE\\x\\y\\..\\..\\PRIVATE\\',
-      'C:\\LSH\\TimeSchedule\\private\\..\\public', 'C:\\LSH\\TimeSchedule\\..\\Other',
-      'C:\\LSH\\TimeSchedule...\\sub', 'C:\\LSH\\TimeSchedule \\sub', 'C:\\LSH\\TimeSchedule\\x.\\private',
-    ]) {
-      assert.deepEqual(outcome(cwd), { outcome: 'unsupported', reason: 'malformed' }, cwd);
-    }
-    assert.equal(outcome('C:\\LSH\\TimeSchedule\\privateer').outcome, 'activity');
-    assert.equal(outcome('C:\\LSH\\TimeSchedule\\.git').outcome, 'activity', 'a leading dot is an ordinary name');
-  }
-});
-
-test('cwd_that_is_not_an_absolute_windows_path_is_malformed', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    for (const cwd of ['private', '.\\private', '..', 'C:private', '\\LSH\\TimeSchedule', '\\\\server']) {
-      assert.deepEqual(normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(NESTED)), { outcome: 'unsupported', reason: 'malformed' }, cwd);
-    }
-  }
-});
-
-test('unc_and_drive_root_registrations_match_by_segment', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    const unc = [{ canonicalPath: '\\\\server\\share\\repo', decision: 'new', projectId: 'u1' }];
-    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\SERVER\\Share\\repo\\sub' } }), ctx(unc)).envelope.project_id, 'u1');
-    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\server\\share2\\repo' } }), ctx(unc)).outcome, 'candidate');
-    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: '\\\\?\\UNC\\server\\share\\repo' } }), ctx(unc)).outcome, 'unsupported');
-    const drive = [{ canonicalPath: 'D:\\', decision: 'new', projectId: 'd1' }];
-    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: 'd:\\any\\where' } }), ctx(drive)).envelope.project_id, 'd1');
-    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: 'E:\\any' } }), ctx(drive)).outcome, 'candidate');
-    // A registration that is not an absolute path can never match.
-    const broken = [{ canonicalPath: 'TimeSchedule', decision: 'new', projectId: 'x' }];
-    assert.equal(normalizeEvent(capture(adapter), ctx(broken)).outcome, 'candidate');
-  }
-});
-
-test('unknown_origin_is_malformed', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    for (const origin of [undefined, null, '', 'TOOL', 'somewhere-else']) {
-      const result = normalizeEvent({ ...capture(adapter), origin }, ctx());
-      assert.deepEqual(result, { outcome: 'unsupported', reason: 'malformed' }, String(origin));
-    }
-  }
-});
-
-test('unconfirmed_decision_is_a_candidate_without_body', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    for (const decision of ['pending', undefined, 'NEW', null]) {
-      const registrations = [{ canonicalPath: 'C:\\LSH\\TimeSchedule', decision, projectId: 'p1' }];
-      const result = normalizeEvent(capture(adapter), ctx(registrations));
-      assert.deepEqual(result, { outcome: 'candidate', candidate: { source: adapter.source, path: 'C:\\LSH\\TimeSchedule' } }, String(decision));
-    }
-    const linked = [{ canonicalPath: 'C:\\LSH\\TimeSchedule', decision: 'link', projectId: 'p9' }];
-    assert.equal(normalizeEvent(capture(adapter), ctx(linked)).envelope.project_id, 'p9');
-  }
+test('a finished turn and a killed turn stay separate when classified together', async () => {
+  const claude = await loadAdapter('claude');
+  const together = claude.classifyTurns([...scenarioRecords('claude', 's6-kill-cli'), ...scenarioRecords('claude', 's1-normal-cli')], LAB);
+  assert.deepEqual(together.map(turn => turn.ending), ['completed', 'unterminated']);
+  const codex = await loadAdapter('codex');
+  const all = ['s1-normal-app', 's2-reentry-app', 's4-esc-attempt-completed-app', 's4-interrupt-app', 's6-kill-after-request-cli']
+    .flatMap(scenario => scenarioRecords('codex', scenario));
+  assert.deepEqual(codex.classifyTurns(all, LAB).map(turn => turn.ending).sort(),
+    ['completed', 'completed', 'completed', 'completed', 'interrupted', 'unterminated']);
 });
 
 function turnRecord(adapter, event, at, extra = {}) {
-  const base = capture(adapter, { payload: { hook_event_name: event, cwd: 'C:\\lab\\m0-sample', turn_id: 'turn-a', prompt_id: 'turn-a' } });
+  const base = capture(adapter, { payload: { hook_event_name: event, cwd: 'C:\\lab\\m0-sample', last_assistant_message: 'done', tool_name: 'Bash' } });
   return { ...base, capture_id: `${event}-${at}`, captured_at: `2026-11-18T00:00:00.${at}Z`, ...extra };
 }
 
-test('classifyTurns leaves out generation runs and paths that are not confirmed', async () => {
-  for (const { adapter, classifyTurns } of await verifiedAdapters()) {
+test('classifyTurns ignores records it cannot vouch for', async () => {
+  const { classifyTurns } = await loadAdapter('codex');
+  const records = scenarioRecords('codex', 's1-normal-app');
+  assert.deepEqual(classifyTurns(records.map(record => ({ ...record, tool_version: '0.0.0-unknown' })), LAB), []);
+  assert.deepEqual(classifyTurns([null, { capture_schema: 1 }, ...records], LAB).map(turn => turn.ending), ['completed']);
+  assert.deepEqual(classifyTurns(scenarioRecords('codex', 's7-generation-origin-cli'), LAB), [], 'the tool\'s own generation runs are not turns');
+});
+
+test('classifyTurns counts only folders the caller confirmed', async () => {
+  for (const { adapter, classifyTurns } of await adapters()) {
     const stop = turnRecord(adapter, 'Stop', '100');
     assert.equal(classifyTurns([stop], LAB).length, 1);
     assert.deepEqual(classifyTurns([{ ...stop, origin: 'timeschedule_generation' }], LAB), []);
     assert.deepEqual(classifyTurns([{ ...stop, origin: undefined }], LAB), []);
-    assert.deepEqual(classifyTurns([stop], ctx()), [], 'path is not registered');
-    assert.deepEqual(classifyTurns([stop], ctx([{ canonicalPath: 'C:\\lab\\m0-sample', decision: 'exclude', projectId: 'lab' }])), []);
-    assert.deepEqual(classifyTurns([stop], ctx([{ canonicalPath: 'C:\\lab\\m0-sample', decision: 'pending', projectId: 'lab' }])), []);
+    for (const answer of [null, { decision: 'exclude', projectId: 'lab' }, { decision: 'pending', projectId: 'lab' }, { decision: 'new' }]) {
+      assert.deepEqual(classifyTurns([stop], ctx(() => answer)), [], JSON.stringify(answer));
+    }
+    assert.deepEqual(classifyTurns([stop], undefined), []);
+    assert.deepEqual(classifyTurns([stop], {}), []);
   }
-  const { classifyTurns } = await loadAdapter('codex');
-  assert.deepEqual(classifyTurns(scenarioRecords('codex', 's7-generation-origin-cli'), LAB), []);
 });
 
 test('classifyTurns gives the same answer for any input order', async () => {
@@ -455,213 +521,10 @@ test('classifyTurns names the hook that ended the turn even when more hooks foll
   assert.deepEqual(open.map(turn => [turn.ending, turn.last_event]), [['unterminated', 'PreToolUse']]);
 });
 
-function scenarioRecords(source, scenario) {
-  const dir = path.join(FIXTURES, source, scenario);
-  return readdirSync(dir).filter(file => /^\d{2}-/.test(file)).map(file => readJson(path.join(dir, file)));
-}
-const sessionOf = (source, scenario) => [...new Set(scenarioRecords(source, scenario).map(record => record.payload.session_id))];
-
-test('fixtures keep session identity across scenarios', async () => {
-  for (const source of ['claude', 'codex']) {
-    const first = sessionOf(source, 's1-normal-cli');
-    assert.equal(first.length, 1);
-    assert.deepEqual(sessionOf(source, 's2-resume-cli'), first, `${source}: a resumed session keeps the id of the session it resumed`);
-    const killed = sessionOf(source, source === 'claude' ? 's6-kill-cli' : 's6-kill-after-request-cli');
-    assert.notDeepEqual(killed, first, `${source}: a different session must not share an id`);
-  }
-  assert.deepEqual(sessionOf('codex', 's2-reentry-app'), sessionOf('codex', 's1-normal-app'));
-  assert.deepEqual(sessionOf('codex', 's4-interrupt-app'), sessionOf('codex', 's1-normal-app'));
-  assert.notDeepEqual(sessionOf('codex', 's1-normal-app'), sessionOf('codex', 's1-normal-cli'));
-});
-
-test('a finished turn and a killed turn stay separate when classified together', async () => {
-  const claude = await loadAdapter('claude');
-  const together = claude.classifyTurns([...scenarioRecords('claude', 's6-kill-cli'), ...scenarioRecords('claude', 's1-normal-cli')], LAB);
-  assert.deepEqual(together.map(turn => turn.ending), ['completed', 'unterminated']);
-  const codex = await loadAdapter('codex');
-  const all = ['s1-normal-app', 's2-reentry-app', 's4-esc-attempt-completed-app', 's4-interrupt-app', 's6-kill-after-request-cli']
-    .flatMap(scenario => scenarioRecords('codex', scenario));
-  assert.deepEqual(codex.classifyTurns(all, LAB).map(turn => turn.ending).sort(),
-    ['completed', 'completed', 'completed', 'completed', 'interrupted', 'unterminated']);
-});
-
-test('nothing is listed as supported without a committed sample', async () => {
-  for (const source of Object.keys(SOURCES)) {
-    const { adapter } = await loadAdapter(source);
-    const records = allScenarios().filter(scenario => scenario.source === source).flatMap(scenario => scenario.files.map(readJson));
-    const seenEvents = new Set(records.map(record => record.payload.hook_event_name));
-    const seenVersions = new Set(records.map(record => record.tool_version));
-    for (const event of Object.keys(adapter.events)) assert.ok(seenEvents.has(event), `${source}: ${event} is listed but has no sample`);
-    for (const version of adapter.verifiedVersions) assert.ok(seenVersions.has(version), `${source}: ${version} is listed but has no sample`);
-  }
-});
-
-// ---- review round 2 (gpt-6.2-astra) ----
-
-test('extended_length_paths_keep_dots_and_spaces_as_part_of_the_name', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    const registrations = [{ canonicalPath: 'C:\\lab\\repo', decision: 'new', projectId: 'p1' }];
-    const outcome = cwd => normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(registrations)).outcome;
-    // The caller canonicalises; the adapter does not interpret the \\?\ form at all.
-    for (const cwd of ['\\\\?\\C:\\lab\\repo', '\\\\?\\C:\\lab\\repo\\sub', '\\\\?\\C:\\lab\\repo.', '\\\\?\\C:\\lab\\repo ',
-      '\\\\?\\C:\\lab\\repo\\..\\repo', '\\\\?\\C:\\lab\\.\\repo', '\\\\?\\C:\\\\', '\\\\?\\UNC\\server\\share\\\\x',
-      'C:\\lab\\repo.', 'C:\\lab\\.\\repo', 'C:\\lab\\repo...\\sub', 'C:\\lab\\repo \\sub']) {
-      assert.equal(outcome(cwd), 'unsupported', cwd);
-    }
-    assert.equal(outcome('C:\\lab\\repo'), 'activity');
-    assert.equal(outcome('C:\\lab\\repo\\sub'), 'activity');
-  }
-});
-
-test('drive_relative_and_device_paths_are_malformed', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    const registrations = [{ canonicalPath: 'D:\\', decision: 'new', projectId: 'd1' }];
-    for (const cwd of ['D:', 'd:', 'D:.', '\\\\?\\D:', '\\\\.\\C:\\lab', '\\\\?\\C:\\lab\\\\repo', '\\\\?\\']) {
-      assert.deepEqual(normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(registrations)), { outcome: 'unsupported', reason: 'malformed' }, cwd);
-    }
-    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: 'D:\\' } }), ctx(registrations)).outcome, 'activity');
-    // A registration written as `D:` names no folder and can never match.
-    assert.equal(normalizeEvent(capture(adapter, { payload: { cwd: 'D:\\x' } }), ctx([{ canonicalPath: 'D:', decision: 'new', projectId: 'd1' }])).outcome, 'candidate');
-  }
-});
-
-test('conflicting_registrations_for_one_folder_fail_closed_in_any_order', async () => {
-  for (const { adapter, normalizeEvent, classifyTurns } of await verifiedAdapters()) {
-    const open = { canonicalPath: 'C:\\LSH\\TimeSchedule', decision: 'new', projectId: 'p1' };
-    const closed = { canonicalPath: 'c:/lsh/timeschedule/', decision: 'exclude', projectId: 'p1' };
-    const pending = { canonicalPath: 'C:\\LSH\\TIMESCHEDULE', decision: 'pending', projectId: 'p1' };
-    const other = { canonicalPath: 'C:\\LSH\\TimeSchedule\\', decision: 'link', projectId: 'p2' };
-    const run = registrations => normalizeEvent(capture(adapter), ctx(registrations));
-    for (const order of [[open, closed], [closed, open], [open, pending, closed]]) {
-      assert.deepEqual(run(order), { outcome: 'excluded', reason: 'path_excluded' });
-    }
-    for (const order of [[open, pending], [pending, open], [open, other], [other, open]]) {
-      const result = run(order);
-      assert.equal(result.outcome, 'candidate');
-      assert.equal(result.envelope, undefined);
-    }
-    assert.equal(run([open, { ...open }]).outcome, 'activity', 'the same registration twice is not a conflict');
-    const stop = { ...capture(adapter, { payload: { hook_event_name: 'Stop', turn_id: 't', prompt_id: 't' } }) };
-    assert.deepEqual(classifyTurns([stop], ctx([open, closed])), []);
-    assert.deepEqual(classifyTurns([stop], ctx([other, open])), []);
-    assert.equal(classifyTurns([stop], ctx([open])).length, 1);
-  }
-});
-
-test('capture_time_must_be_a_utc_millisecond_timestamp', async () => {
-  for (const { adapter, normalizeEvent, classifyTurns } of await verifiedAdapters()) {
-    for (const captured_at of ['invalid-time', '2026-11-18', '2026-11-18T00:00:00Z', '2026-11-18T00:00:00.000+09:00', '2026-13-45T00:00:00.000Z']) {
-      assert.deepEqual(normalizeEvent({ ...capture(adapter), captured_at }, ctx()), { outcome: 'unsupported', reason: 'malformed' }, captured_at);
-      const stop = { ...capture(adapter, { payload: { hook_event_name: 'Stop', turn_id: 't', prompt_id: 't' } }), captured_at };
-      assert.deepEqual(classifyTurns([stop], ctx()), [], captured_at);
-    }
-  }
-});
-
-test('every_listed_event_has_a_sample_from_every_verified_version', async () => {
-  for (const source of Object.keys(SOURCES)) {
-    const { adapter } = await loadAdapter(source);
-    const seen = new Set(allScenarios().filter(scenario => scenario.source === source)
-      .flatMap(scenario => scenario.files.map(readJson)).map(record => `${record.tool_version}\n${record.payload.hook_event_name}`));
-    for (const version of adapter.verifiedVersions) {
-      for (const event of Object.keys(adapter.events)) {
-        assert.ok(seen.has(`${version}\n${event}`), `${source}: ${event} has no sample from ${version}`);
-      }
-    }
-  }
-});
-
-test('fixtures contain no unexpanded variable reference', () => {
-  for (const file of allFixtureFiles()) {
-    const text = readFileSync(file, 'utf8');
-    assert.ok(!text.includes('%USERPROFILE%') && !text.includes('$env:'), file);
-  }
-});
-
-// ---- review round 4 (gpt-6.2-astra): compare canonical paths only, strictly to confirm, loosely to exclude ----
-
-test('a_registration_that_is_not_in_canonical_form_yields_no_body_for_any_folder', async () => {
-  for (const { adapter, normalizeEvent, classifyTurns } of await verifiedAdapters()) {
-    for (const canonicalPath of ['C:\\LSH\\.\\TimeSchedule', 'C:\\LSH\\TimeSchedule.', '\\\\?\\C:\\LSH\\TimeSchedule', 'TimeSchedule', '', undefined]) {
-      for (const decision of ['new', 'exclude', 'pending']) {
-        const registrations = [...REG, { canonicalPath, decision, projectId: 'p2' }];
-        const result = normalizeEvent(capture(adapter), ctx(registrations));
-        assert.equal(result.outcome, 'candidate', `${canonicalPath} ${decision}`);
-        assert.equal(result.envelope, undefined);
-        const stop = capture(adapter, { payload: { hook_event_name: 'Stop', turn_id: 't', prompt_id: 't' } });
-        assert.deepEqual(classifyTurns([stop], ctx(registrations)), []);
-      }
-    }
-  }
-});
-
-test('non_ascii_names_confirm_only_on_an_exact_match_but_exclude_on_a_loose_one', async () => {
-  for (const { adapter, normalizeEvent } of await verifiedAdapters()) {
-    const run = (cwd, registrations) => normalizeEvent(capture(adapter, { payload: { cwd } }), ctx(registrations));
-    // U+0130 lower-cases to `i` + U+0307 in JavaScript, but Windows treats the two names as different folders.
-    const dotted = [{ canonicalPath: 'C:\\lab\\i\u0307x', decision: 'new', projectId: 'p1' }];
-    assert.equal(run('C:\\lab\\\u0130x', dotted).outcome, 'candidate');
-    assert.equal(run('C:\\lab\\i\u0307x', dotted).outcome, 'activity');
-    const accent = [{ canonicalPath: 'C:\\lab\\caf\u00e9', decision: 'new', projectId: 'p1' }];
-    assert.equal(run('C:\\LAB\\caf\u00e9\\src', accent).outcome, 'activity', 'ASCII case still folds');
-    assert.equal(run('C:\\lab\\CAF\u00c9', accent).outcome, 'candidate', 'non-ASCII case is not folded to confirm');
-    assert.equal(run('C:\\lab\\stra\u00dfe', [{ canonicalPath: 'C:\\lab\\STRASSE', decision: 'new', projectId: 'p1' }]).outcome, 'candidate');
-    // To exclude, over-matching is the safe direction.
-    const nested = [{ canonicalPath: 'C:\\lab', decision: 'new', projectId: 'p1' },
-      { canonicalPath: 'C:\\lab\\priv\u00e9', decision: 'exclude', projectId: 'p1' }];
-    assert.deepEqual(run('C:\\lab\\PRIV\u00c9\\notes', nested), { outcome: 'excluded', reason: 'path_excluded' });
-    assert.deepEqual(run('C:\\lab\\priv\u00e9', nested), { outcome: 'excluded', reason: 'path_excluded' });
-    assert.equal(run('C:\\lab\\public', nested).outcome, 'activity');
-    // Korean has no case: an exact name matches, a different name does not.
-    const korean = [{ canonicalPath: 'C:\\LSH\\\ubd84\uc11d', decision: 'new', projectId: 'k1' }];
-    assert.equal(run('c:\\lsh\\\ubd84\uc11d\\data', korean).envelope.project_id, 'k1');
-    assert.equal(run('C:\\LSH\\\ubd84\uc11d2', korean).outcome, 'candidate');
-  }
-});
-
 test('turn ids that contain a line break do not merge two turns', async () => {
   const { adapter, classifyTurns } = await loadAdapter('codex');
-  const open = capture(adapter, { payload: { hook_event_name: 'PreToolUse', cwd: 'C:\\lab\\m0-sample', session_id: 's', turn_id: 'x\ny' } });
-  const stop = { ...capture(adapter, { payload: { hook_event_name: 'Stop', cwd: 'C:\\lab\\m0-sample', session_id: 's\nx', turn_id: 'y' } }),
+  const open = capture(adapter, { payload: { hook_event_name: 'PreToolUse', tool_name: 'Bash', cwd: 'C:\\lab\\m0-sample', session_id: 's', turn_id: 'x\ny' } });
+  const stop = { ...capture(adapter, { payload: { hook_event_name: 'Stop', last_assistant_message: 'done', cwd: 'C:\\lab\\m0-sample', session_id: 's\nx', turn_id: 'y' } }),
     capture_id: 'second', captured_at: '2026-11-17T22:48:03.000Z' };
   assert.deepEqual(classifyTurns([open, stop], LAB).map(turn => turn.ending).sort(), ['completed', 'unterminated']);
-});
-
-test('fixtures do not contain the current account name as a word', () => {
-  const home = path.basename(homedir());
-  const word = new RegExp(`(?<![A-Za-z0-9_])${home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`, 'i');
-  for (const file of allFixtureFiles()) {
-    assert.ok(!word.test(readFileSync(file, 'utf8').replaceAll('lab-user', '')), `${file} contains the account name`);
-  }
-});
-
-function profileFolders(value, found = []) {
-  if (typeof value === 'string') {
-    for (const match of value.matchAll(/users[\\/]+([^\\/"]+)/gi)) found.push({ form: 'path', name: match[1] });
-    for (const match of value.matchAll(/users-+([^\\/"]*)/gi)) found.push({ form: 'folder-name', name: match[1] });
-  } else if (Array.isArray(value)) {
-    value.forEach(item => profileFolders(item, found));
-  } else if (value && typeof value === 'object') {
-    for (const [key, item] of Object.entries(value)) { profileFolders(key, found); profileFolders(item, found); }
-  }
-  return found;
-}
-
-test('profile folder check recognises names it must reject', () => {
-  const names = value => profileFolders(value).map(item => item.name);
-  assert.deepEqual(names({ a: 'C:\\Users\\\ud64d\uae38\ub3d9\\x', b: 'c:/users/someone/y', c: ['C:\\Users\\lab-user-2\\z'] }),
-    ['\ud64d\uae38\ub3d9', 'someone', 'lab-user-2']);
-  assert.deepEqual(profileFolders('C--Users-someone-repo'), [{ form: 'folder-name', name: 'someone-repo' }]);
-});
-
-test('fixtures name no profile folder other than the placeholder (any script, any case)', () => {
-  let seen = 0;
-  for (const file of allFixtureFiles()) {
-    for (const { form, name } of profileFolders(readJson(file))) {
-      seen += 1;
-      if (form === 'path') assert.equal(name, 'lab-user', `${file}: profile folder ${name}`);
-      else assert.match(name, /^lab-user(-|$)/, `${file}: profile folder name ${name}`);
-    }
-  }
-  assert.ok(seen > 0, 'the fixtures are expected to contain transcript paths');
 });
