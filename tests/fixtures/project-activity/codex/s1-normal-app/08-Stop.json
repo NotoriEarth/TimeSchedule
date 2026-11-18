@@ -1,0 +1,34 @@
+{
+  "capture_schema": 1,
+  "capture_id": "b994c476-9f1f-4c9b-9bf5-daa6fb25081d",
+  "source": "codex",
+  "tool_version": "codex-cli 0.169.0-alpha.11.1 app-bundled",
+  "captured_at": "2026-11-17T23:31:41.648Z",
+  "origin": "tool",
+  "payload_bytes": 514,
+  "payload": {
+    "session_id": "session-0001",
+    "turn_id": "id-0001",
+    "transcript_path": "C:\\Users\\lab-user\\.codex\\sessions\\2026\\11\\18\\rollout-2026-11-18T08-31-23-session-0001.jsonl",
+    "cwd": "C:\\lab\\m0-sample",
+    "hook_event_name": "Stop",
+    "model": "gpt-6-luna",
+    "permission_mode": "default",
+    "stop_hook_active": false,
+    "last_assistant_message": "`note.txt`에 `hello` 한 줄을 저장했고, 파일 내용을 확인했습니다. 완료했습니다."
+  },
+  "payload_error": null,
+  "env_names": [
+    "CODEX_APP_RUNTIME_CLI_PATH",
+    "CODEX_APP_TOOLS_PIPE_PATH",
+    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+    "CODEX_MCP_NODE_PATH",
+    "CODEX_SAGE_BACKFILL_TRACKER_TAB_REUSE",
+    "CODEX_SHELL",
+    "CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY",
+    "CODEX_TECTONIC_PATH",
+    "CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY"
+  ],
+  "env_allowlisted": {},
+  "probe_elapsed_ms": 33
+}

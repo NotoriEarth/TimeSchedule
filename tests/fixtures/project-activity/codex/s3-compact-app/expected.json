@@ -1,0 +1,12 @@
+[
+  {
+    "file": "01-PreCompact.json",
+    "outcome": "excluded",
+    "reason": "redundant_event"
+  },
+  {
+    "file": "02-PostCompact.json",
+    "outcome": "activity",
+    "kind": "compaction"
+  }
+]

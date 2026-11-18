@@ -1,0 +1,42 @@
+[
+  {
+    "file": "01-SessionStart.json",
+    "outcome": "activity",
+    "kind": "session_start"
+  },
+  {
+    "file": "02-PreModelRequest.json",
+    "outcome": "excluded",
+    "reason": "not_an_activity"
+  },
+  {
+    "file": "03-PostModelRequest.json",
+    "outcome": "excluded",
+    "reason": "not_an_activity"
+  },
+  {
+    "file": "04-PreToolUse.json",
+    "outcome": "excluded",
+    "reason": "redundant_event"
+  },
+  {
+    "file": "05-PostToolUse.json",
+    "outcome": "activity",
+    "kind": "tool_result"
+  },
+  {
+    "file": "06-PreModelRequest.json",
+    "outcome": "excluded",
+    "reason": "not_an_activity"
+  },
+  {
+    "file": "07-PostModelRequest.json",
+    "outcome": "excluded",
+    "reason": "not_an_activity"
+  },
+  {
+    "file": "08-Stop.json",
+    "outcome": "activity",
+    "kind": "turn_end"
+  }
+]

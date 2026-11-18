@@ -1,0 +1,37 @@
+{
+  "capture_schema": 1,
+  "capture_id": "f4870df0-da8c-48d8-86c5-6b016cde7c88",
+  "source": "codex",
+  "tool_version": "codex-cli 0.169.0-alpha.11.1 app-bundled",
+  "captured_at": "2026-11-18T00:10:01.471Z",
+  "origin": "tool",
+  "payload_bytes": 478,
+  "payload": {
+    "session_id": "session-0001",
+    "turn_id": "id-0001",
+    "transcript_path": "C:\\Users\\lab-user\\.codex\\sessions\\2026\\11\\18\\rollout-2026-11-18T08-31-23-session-0001.jsonl",
+    "cwd": "C:\\lab\\m0-sample",
+    "hook_event_name": "PreToolUse",
+    "model": "gpt-6-luna",
+    "permission_mode": "default",
+    "tool_name": "clocksleep",
+    "tool_input": {
+      "duration_ms": 25000
+    },
+    "tool_use_id": "call_90348af9960b4e0db866950b564b8488"
+  },
+  "payload_error": null,
+  "env_names": [
+    "CODEX_APP_RUNTIME_CLI_PATH",
+    "CODEX_APP_TOOLS_PIPE_PATH",
+    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+    "CODEX_MCP_NODE_PATH",
+    "CODEX_SAGE_BACKFILL_TRACKER_TAB_REUSE",
+    "CODEX_SHELL",
+    "CODEX_TASK_WORKSPACE_VERIFYING_IDENTITY",
+    "CODEX_TECTONIC_PATH",
+    "CODEX_WINDOWS_SANDBOX_PACKAGE_FAMILY"
+  ],
+  "env_allowlisted": {},
+  "probe_elapsed_ms": 30
+}

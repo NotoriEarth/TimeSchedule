@@ -1,0 +1,22 @@
+[
+  {
+    "file": "01-PreModelRequest.json",
+    "outcome": "excluded",
+    "reason": "not_an_activity"
+  },
+  {
+    "file": "02-PostModelRequest.json",
+    "outcome": "excluded",
+    "reason": "not_an_activity"
+  },
+  {
+    "file": "03-PreToolUse.json",
+    "outcome": "excluded",
+    "reason": "redundant_event"
+  },
+  {
+    "file": "04-Interrupt.json",
+    "outcome": "activity",
+    "kind": "interrupted"
+  }
+]

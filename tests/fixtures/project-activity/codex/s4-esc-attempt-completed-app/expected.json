@@ -1,0 +1,37 @@
+[
+  {
+    "file": "01-PreModelRequest.json",
+    "outcome": "excluded",
+    "reason": "not_an_activity"
+  },
+  {
+    "file": "02-PostModelRequest.json",
+    "outcome": "excluded",
+    "reason": "not_an_activity"
+  },
+  {
+    "file": "03-PreToolUse.json",
+    "outcome": "excluded",
+    "reason": "redundant_event"
+  },
+  {
+    "file": "04-PostToolUse.json",
+    "outcome": "activity",
+    "kind": "tool_result"
+  },
+  {
+    "file": "05-PreModelRequest.json",
+    "outcome": "excluded",
+    "reason": "not_an_activity"
+  },
+  {
+    "file": "06-PostModelRequest.json",
+    "outcome": "excluded",
+    "reason": "not_an_activity"
+  },
+  {
+    "file": "07-Stop.json",
+    "outcome": "activity",
+    "kind": "turn_end"
+  }
+]

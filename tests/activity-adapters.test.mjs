@@ -253,3 +253,95 @@ test('claude prompt and final message survive as Korean text', async () => {
   const end = normalizeEvent(readJson(path.join(dir, '08-SessionEnd.json')), LAB).envelope;
   assert.deepEqual(end.body, { reason: 'other' });
 });
+
+// ---- Codex samples (app-bundled codex-cli 0.169.0-alpha.11.1, exec CLI and desktop app) ----
+
+const codexFixture = (scenario, file) => readJson(path.join(FIXTURES, 'codex', scenario, file));
+
+test('codex stop, interrupt and compaction map to distinct kinds', async () => {
+  const { normalizeEvent } = await loadAdapter('codex');
+  const stop = normalizeEvent(codexFixture('s1-normal-app', '08-Stop.json'), LAB).envelope;
+  assert.equal(stop.kind, 'turn_end');
+  assert.match(stop.body.last_assistant_message, /note\.txt/);
+  const interrupt = normalizeEvent(codexFixture('s4-interrupt-app', '04-Interrupt.json'), LAB).envelope;
+  assert.equal(interrupt.kind, 'interrupted');
+  assert.deepEqual(interrupt.body, {});
+  const compaction = normalizeEvent(codexFixture('s3-compact-app', '02-PostCompact.json'), LAB).envelope;
+  assert.equal(compaction.kind, 'compaction');
+  assert.deepEqual(compaction.body, { trigger: 'manual' });
+  const afterCompaction = normalizeEvent(codexFixture('s3-compact-sessionstart-app', '01-SessionStart.json'), LAB).envelope;
+  assert.deepEqual(afterCompaction.body, { source: 'compact', model: 'gpt-6-luna' });
+});
+
+test('codex model requests are observed but never become activities', async () => {
+  const { normalizeEvent } = await loadAdapter('codex');
+  for (const file of ['03-PreModelRequest.json', '04-PostModelRequest.json']) {
+    assert.deepEqual(normalizeEvent(codexFixture('s1-normal-cli', file), LAB), { outcome: 'excluded', reason: 'not_an_activity' });
+  }
+});
+
+test('codex tool result has no failure flag and carries no tool text', async () => {
+  const { normalizeEvent } = await loadAdapter('codex');
+  const record = codexFixture('s5-tool-failure-cli', '06-PostToolUse.json');
+  assert.match(record.payload.tool_response, /Cannot find module/, 'the sample is the failed command');
+  const { envelope } = normalizeEvent(record, LAB);
+  assert.equal(envelope.kind, 'tool_result');
+  assert.deepEqual(Object.keys(envelope.body).sort(), ['input_keys', 'tool_name', 'tool_use_id']);
+  assert.deepEqual(envelope.body.input_keys, ['command']);
+  assert.ok(!JSON.stringify(envelope).includes('missing.js'));
+});
+
+test('codex session start and end keep source, model and reason', async () => {
+  const { normalizeEvent } = await loadAdapter('codex');
+  assert.deepEqual(normalizeEvent(codexFixture('s1-normal-cli', '01-SessionStart.json'), LAB).envelope.body, { source: 'startup', model: 'gpt-6-luna' });
+  assert.deepEqual(normalizeEvent(codexFixture('s2-resume-cli', '01-SessionStart.json'), LAB).envelope.body, { source: 'resume', model: 'gpt-6-luna' });
+  assert.deepEqual(normalizeEvent(codexFixture('s1-normal-cli', '10-SessionEnd.json'), LAB).envelope.body, { reason: 'other' });
+});
+
+// ---- how a turn ended: completed (Stop), interrupted (Interrupt), or no terminal hook at all ----
+
+async function endings(source, scenario) {
+  const { classifyTurns } = await loadAdapter(source);
+  const dir = path.join(FIXTURES, source, scenario);
+  const records = readdirSync(dir).filter(file => /^\d{2}-/.test(file)).map(file => readJson(path.join(dir, file)));
+  // Order must not matter: the function sorts by capture time itself.
+  return classifyTurns(records.reverse());
+}
+
+test('codex desktop turn that finished is completed', async () => {
+  const turns = await endings('codex', 's1-normal-app');
+  assert.deepEqual(turns.map(turn => [turn.ending, turn.last_event]), [['completed', 'Stop']]);
+  assert.equal(turns[0].session_id, 'session-0001');
+  assert.equal(typeof turns[0].turn_id, 'string');
+  assert.deepEqual((await endings('codex', 's4-esc-attempt-completed-app')).map(turn => turn.ending), ['completed']);
+  assert.deepEqual((await endings('codex', 's2-reentry-app')).map(turn => turn.ending), ['completed', 'completed']);
+});
+
+test('codex desktop turn stopped by the user is interrupted, not completed', async () => {
+  const turns = await endings('codex', 's4-interrupt-app');
+  assert.deepEqual(turns.map(turn => [turn.ending, turn.last_event]), [['interrupted', 'Interrupt']]);
+});
+
+test('codex cli turn whose process was killed has no terminal hook', async () => {
+  const turns = await endings('codex', 's6-kill-after-request-cli');
+  assert.deepEqual(turns.map(turn => [turn.ending, turn.last_event]), [['unterminated', 'PreModelRequest']]);
+});
+
+test('claude cli turns: finished is completed, killed process is unterminated', async () => {
+  assert.deepEqual((await endings('claude', 's1-normal-cli')).map(turn => [turn.ending, turn.last_event]), [['completed', 'Stop']]);
+  assert.deepEqual((await endings('claude', 's5-tool-failure-cli')).map(turn => turn.ending), ['completed']);
+  assert.deepEqual((await endings('claude', 's6-kill-cli')).map(turn => [turn.ending, turn.last_event]), [['unterminated', 'UserPromptSubmit']]);
+});
+
+test('compaction and session events alone are not a turn', async () => {
+  assert.deepEqual(await endings('codex', 's3-compact-app'), []);
+  assert.deepEqual(await endings('codex', 's3-compact-sessionstart-app'), []);
+});
+
+test('classifyTurns ignores records it cannot vouch for', async () => {
+  const { classifyTurns } = await loadAdapter('codex');
+  const dir = path.join(FIXTURES, 'codex', 's1-normal-app');
+  const records = readdirSync(dir).filter(file => /^\d{2}-/.test(file)).map(file => readJson(path.join(dir, file)));
+  assert.deepEqual(classifyTurns(records.map(record => ({ ...record, tool_version: '0.0.0-unknown' }))), []);
+  assert.deepEqual(classifyTurns([null, { capture_schema: 1 }, ...records]).map(turn => turn.ending), ['completed']);
+});
