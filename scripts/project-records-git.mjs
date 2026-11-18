@@ -12,6 +12,8 @@ const COMMIT = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const DOCUMENT = /(?:^|\/)(?:docs?|notes?|research)(?:\/|$)|\.(?:md|mdx|txt|rst|adoc)$/i;
 const DEVELOPMENT = /^(?:apps\/|crates\/|src\/|src-tauri\/|scripts\/|tests\/|vendor\/|\.github\/workflows\/|Cargo\.(?:toml|lock)$|(?:package(?:-lock)?|tsconfig(?:\.[^/]+)?)\.json$|(?:svelte|vite|vitest|tailwind|postcss|eslint)\.config\.[^/]+$|(?:pnpm-lock\.yaml|yarn\.lock|rust-toolchain(?:\.toml)?|\.gitignore|\.gitattributes)$)/;
 
+export const isDevelopmentPath = file => DEVELOPMENT.test(file) && !DOCUMENT.test(file);
+
 // Git answers a definite "no" for `cat-file -e` (no such object) and
 // `merge-base --is-ancestor` (not an ancestor) by exiting 1 without printing
 // anything. Every other failure (Git not found, a timeout, exit 128 for an
@@ -51,7 +53,7 @@ export function developmentEvidence(repoPath, evidence, projectRoot) {
   }
   if (base === head) return skip('no_development_changes');
   const selected = [...new Set(paths)].sort();
-  if (!selected.some(p => DEVELOPMENT.test(p) && !DOCUMENT.test(p))) return skip('no_development_changes');
+  if (!selected.some(isDevelopmentPath)) return skip('no_development_changes');
   try {
     const canonical = canonicalPath;
     const repo = canonical(repoPath);
