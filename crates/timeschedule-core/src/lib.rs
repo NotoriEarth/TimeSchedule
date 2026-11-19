@@ -1,4 +1,5 @@
 pub mod calendar;
+pub mod chat_experiences;
 pub mod codex_chats;
 pub mod dates;
 pub mod diary;

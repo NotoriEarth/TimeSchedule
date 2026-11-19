@@ -1,0 +1,133 @@
+use super::*;
+use crate::diary::{EntryInput, ProjectInput};
+
+const BODY:&str="Windows Codex · session\n원문: example.jsonl\n\n## 사용자 · 원문 14행\n두 프로세스의 설정 설계를 설명해줘.\n\n## AI · 원문 16행\n이전 설계는 환경변수를 사용합니다.\n\n## 사용자 · 원문 18행\n방금 답변을 수정해줘. 개인 기여는 보류.\n\n## AI · 원문 21행\n앱과 중계는 같은 설정을 공유합니다.\n환경이 다르기 때문에 저장값을 읽습니다.\n\n## 사용자 · 원문 25행\n종료 오류를 확인해줘.\n\n## 검사 출력 · 원문 26행\n종료 코드 1\nTAP version 13\n# tests 1\n# pass 0\n# fail 1\n\n## AI · 원문 28행\n테스트에서 재현했다. 수정 결과는 미확인이다.";
+fn fixture() -> (Storage, String, String) {
+    let db = Storage::open(":memory:").unwrap();
+    let project = db
+        .save_project(ProjectInput {
+            id: None,
+            title: "프로젝트".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap()
+        .id;
+    let chat = db
+        .save_entry(EntryInput {
+            id: None,
+            project_id: Some(project.clone()),
+            date: "2026-11-19".into(),
+            kind: "note".into(),
+            title: "테스트".into(),
+            body: BODY.into(),
+            source_url: String::new(),
+        })
+        .unwrap()
+        .id;
+    {
+        let c = db.connection().unwrap();
+        c.execute(
+            "UPDATE diary_entries SET source_body=body WHERE id=?1",
+            [&chat],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO codex_chat_sessions VALUES(?1,'S',?2,0,0,'','')",
+            params![project, chat],
+        )
+        .unwrap();
+    }
+    (db, project, chat)
+}
+
+#[test]
+fn review_uses_corrected_evidence_and_only_inserts_checked_items() {
+    let (db, p, chat) = fixture();
+    let review = db.review_chat(&p, &chat).unwrap();
+    assert_eq!(review.candidates.len(), 2);
+    let design = &review.candidates[0].body;
+    assert!(
+        design.contains("원문 14행")
+            && design.contains("원문 21행")
+            && !design.contains("원문 16행")
+    );
+    assert!(!design.contains("# fail") && review.candidates[1].body.contains("# fail 1"));
+    assert!(db.confirm_chat_candidates(&review, &[]).is_err());
+    assert_eq!(db.portfolio_panel(&p).unwrap().experiences, 0);
+    assert_eq!(
+        db.confirm_chat_candidates(&review, &[Kind::Design])
+            .unwrap()
+            .added,
+        1
+    );
+    let panel = db.portfolio_panel(&p).unwrap();
+    assert_eq!(panel.experiences, 1);
+    let entry = &panel.choices[0].id;
+    db.connection()
+        .unwrap()
+        .execute(
+            "UPDATE diary_entries SET body='수동 편집' WHERE id=?1",
+            [entry],
+        )
+        .unwrap();
+    assert_eq!(
+        db.confirm_chat_candidates(&review, &[Kind::Design])
+            .unwrap()
+            .kept,
+        1
+    );
+    assert_eq!(db.get_entry(entry).unwrap().body, "수동 편집");
+    db.delete_entry(entry).unwrap();
+    assert_eq!(
+        db.confirm_chat_candidates(&review, &[Kind::Design])
+            .unwrap()
+            .added,
+        0
+    );
+    assert_eq!(db.portfolio_panel(&p).unwrap().experiences, 0);
+}
+#[test]
+fn legacy_citation_reuses_same_entry_and_ignores_unchosen_role() {
+    let (db, p, chat) = fixture();
+    db.save_portfolio_answer(&p, None, "").unwrap();
+    let body = format!("수정한 경험 문장\n\nWindows Codex 채팅 「테스트」 · 기록 {chat}");
+    let e = db
+        .save_entry(EntryInput {
+            id: None,
+            project_id: Some(p.clone()),
+            date: "2026-11-19".into(),
+            kind: "design".into(),
+            title: "기존 경험".into(),
+            body: body.clone(),
+            source_url: String::new(),
+        })
+        .unwrap();
+    for _ in 0..2 {
+        let review = db.review_chat(&p, &chat).unwrap();
+        let result = db
+            .confirm_chat_candidates(&review, &[Kind::Design])
+            .unwrap();
+        assert_eq!((result.added, result.kept), (0, 1));
+        assert_eq!(db.get_entry(&e.id).unwrap(), e);
+    }
+    assert_eq!(db.portfolio_panel(&p).unwrap().answer.as_deref(), Some(""));
+}
+#[test]
+fn stale_or_wrong_project_review_cannot_save() {
+    let (db, p, chat) = fixture();
+    let review = db.review_chat(&p, &chat).unwrap();
+    assert!(db.review_chat("different", &chat).is_err());
+    db.connection()
+        .unwrap()
+        .execute(
+            "UPDATE diary_entries SET source_body='## 사용자 · 원문 3행\n안녕' WHERE id=?1",
+            [&chat],
+        )
+        .unwrap();
+    assert!(db
+        .confirm_chat_candidates(&review, &[Kind::Design])
+        .is_err());
+    assert!(db.review_chat(&p, &chat).unwrap().candidates.is_empty());
+    assert_eq!(db.portfolio_panel(&p).unwrap().experiences, 0);
+}

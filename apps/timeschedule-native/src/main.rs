@@ -4,6 +4,7 @@ mod calendar_ui;
 mod calendar_viewport;
 mod category_drag;
 mod category_ui;
+mod chat_review_ui;
 mod date_choices;
 mod date_input;
 mod day_cell;

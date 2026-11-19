@@ -549,6 +549,9 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
                 Message::SetChatCapture(p.id.clone(), !watching),
             ));
         }
+        if !app.snapshot.reviewable_chats.is_empty() {
+            panel = panel.push(crate::chat_review_ui::panel(app, &p.id));
+        }
         if let Some(state) = app
             .snapshot
             .portfolio

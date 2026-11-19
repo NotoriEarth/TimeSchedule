@@ -225,6 +225,7 @@ pub enum Message {
     Import,
     Imported(Result<ImportResult, String>),
     Portfolio(crate::portfolio_ui::Action),
+    ChatReview(crate::chat_review_ui::Action),
     Draft(bool),
     Drafted(u64, u64, Result<Form, String>),
     Native(NativeAction),
@@ -262,6 +263,7 @@ pub struct App {
     pub data_dir: PathBuf,
     pub preferences: Preferences,
     pub snapshot: Snapshot,
+    pub chat_review: crate::chat_review_ui::State,
     pub portfolio_selection:
         std::collections::BTreeMap<String, Option<std::collections::BTreeSet<String>>>,
     pub portfolio_editor: Option<crate::portfolio_ui::AnswerEdit>,
@@ -405,6 +407,7 @@ impl App {
             data_dir,
             preferences: prefs,
             snapshot: Snapshot::default(),
+            chat_review: Default::default(),
             portfolio_selection: Default::default(),
             portfolio_editor: None,
             page: Page::Month,
@@ -1006,6 +1009,10 @@ impl App {
                     | Message::MutationDone(_)
                     | Message::Imported(_)
                     | Message::Drafted(..)
+                    | Message::ChatReview(
+                        crate::chat_review_ui::Action::Read(..)
+                            | crate::chat_review_ui::Action::Finished(..)
+                    )
                     | Message::Portfolio(
                         crate::portfolio_ui::Action::Answered(..)
                             | crate::portfolio_ui::Action::Exported(..)
@@ -1365,6 +1372,7 @@ impl App {
                 return self.place_popup(self.quick_anchor(), id);
             }
             Message::Project(id) if self.editor.is_none() => {
+                self.chat_review = Default::default();
                 self.project = id;
                 self.page = Page::Projects;
                 self.search.clear();
@@ -1836,6 +1844,7 @@ impl App {
                     Err(e) => self.error = e,
                 }
             }
+            Message::ChatReview(action) => return crate::chat_review_ui::update(self, action),
             Message::Portfolio(action) => return crate::portfolio_ui::update(self, action),
             Message::Draft(portfolio) if !self.busy && self.editor.is_none() => {
                 let Some(store) = self.store.clone() else {
@@ -2021,6 +2030,7 @@ mod tests {
             data_dir: PathBuf::new(),
             preferences: Preferences::default(),
             snapshot: Snapshot::default(),
+            chat_review: Default::default(),
             portfolio_selection: Default::default(),
             portfolio_editor: None,
             page: Page::Month,
