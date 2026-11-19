@@ -26,6 +26,7 @@ pub struct Snapshot {
     pub widget_days: Vec<CalendarDay>,
     pub categories: Vec<Category>,
     pub projects: Vec<Project>,
+    pub chat_capture_project: Option<String>,
     pub portfolio: Option<timeschedule_core::portfolio::PortfolioPanel>,
     pub today: CalendarDay,
     pub tasks: Vec<Task>,
@@ -124,6 +125,10 @@ pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
         today,
         categories: store.list_categories()?,
         projects: store.list_projects()?,
+        chat_capture_project: match &scope.project {
+            Some(id) if store.chat_capture_enabled(id)? => Some(id.clone()),
+            _ => None,
+        },
         portfolio: scope
             .project
             .as_deref()
@@ -302,6 +307,19 @@ pub fn draft(
     form.body = body;
     Ok(form)
 }
+pub fn scan_chats(
+    store: &Storage,
+    reread: bool,
+) -> Result<timeschedule_core::codex_chats::ScanReport, String> {
+    let home = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|p| std::path::PathBuf::from(p).join(".codex"))
+        })
+        .ok_or("Codex 사용자 폴더를 찾을 수 없습니다.")?;
+    store.scan_codex_chats(&home, reread)
+}
+
 pub fn job<T: Send + 'static, M: Send + 'static>(
     store: Arc<Storage>,
     work: impl FnOnce(&Storage) -> Result<T, String> + Send + 'static,

@@ -152,6 +152,9 @@ pub enum Message {
     WindowClosed(window::Id),
     Tick,
     RecordsDue,
+    SetChatCapture(String, bool),
+    ScanChats,
+    ChatsScanned(Result<timeschedule_core::codex_chats::ScanReport, String>),
     RecordsDrained(Result<crate::record_inbox::DrainReport, String>),
     Navigate(Page),
     Month(i32),
@@ -294,6 +297,7 @@ pub struct App {
     _instance: Option<InstanceLock>,
     ticks: u32,
     records_due: bool,
+    chat_scanning: bool,
     records_processing: bool,
     pub manager_visible: bool,
     prefs_saving: bool,
@@ -433,6 +437,7 @@ impl App {
             _instance: instance,
             ticks: 0,
             records_due: false,
+            chat_scanning: false,
             records_processing: false,
             manager_visible: true,
             prefs_saving: false,
@@ -462,6 +467,7 @@ impl App {
                 widget,
                 load,
                 Task::done(Message::RecordsDue),
+                Task::done(Message::ScanChats),
             ]),
         )
     }
@@ -870,7 +876,12 @@ impl App {
             self.quit_when_idle = true;
             return self.save_preferences();
         }
-        if self.busy || self.prefs_saving || self.native_busy || self.mcp_setup.busy {
+        if self.busy
+            || self.prefs_saving
+            || self.native_busy
+            || self.mcp_setup.busy
+            || self.chat_scanning
+        {
             self.quit_when_idle = true;
             self.notice = "진행 중인 저장·Git·설정 작업을 마친 뒤 종료합니다.".into();
             return Task::none();
@@ -973,6 +984,7 @@ impl App {
                     | Message::Tick
                     | Message::RecordsDue
                     | Message::RecordsDrained(_)
+                    | Message::ChatsScanned(_)
                     | Message::NativeDone(..)
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Finished(_))
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Loaded(..))
@@ -1031,6 +1043,48 @@ impl App {
                     self.data_dir.clone(),
                     endpoint,
                 );
+            }
+            Message::SetChatCapture(id, enabled) => {
+                if let Some(store) = self
+                    .store
+                    .as_ref()
+                    .filter(|_| self._instance.is_some() && self.project.as_ref() == Some(&id))
+                {
+                    match store.set_chat_capture(&id, enabled) {
+                        Ok(()) => {
+                            return Task::batch([self.refresh(), Task::done(Message::ScanChats)])
+                        }
+                        Err(e) => self.error = e,
+                    }
+                }
+            }
+            Message::ScanChats => {
+                if let Some(store) = self.store.clone().filter(|_| {
+                    self._instance.is_some() && !self.chat_scanning && !self.quit_when_idle
+                }) {
+                    self.chat_scanning = true;
+                    return worker::job(
+                        store,
+                        |s| worker::scan_chats(s, false),
+                        Message::ChatsScanned,
+                    );
+                }
+            }
+            Message::ChatsScanned(result) => {
+                self.chat_scanning = false;
+                match result {
+                    Ok(r) => {
+                        if r.failed > 0 {
+                            self.error=format!("Codex 채팅 파일 {}개를 읽지 못했습니다. 다음 확인 때 재시도합니다.",r.failed);
+                        }
+                        if r.saved > 0 {
+                            self.notice =
+                                format!("Codex 채팅 {}건을 프로젝트 이력에 반영했습니다.", r.saved);
+                            return self.refresh();
+                        }
+                    }
+                    Err(e) => self.error = format!("Codex 채팅 수집 실패 · {e}"),
+                }
             }
             Message::RecordsDue => {
                 self.records_due = true;
@@ -1171,6 +1225,7 @@ impl App {
                     && !self.prefs_saving
                     && !self.native_busy
                     && !self.mcp_setup.busy
+                    && !self.chat_scanning
                 {
                     self.quit_when_idle = false;
                     return self.request_close(CloseIntent::Application);
@@ -1212,6 +1267,7 @@ impl App {
                 }
                 if self.ticks % 120 == 0 {
                     self.records_due = true;
+                    tasks.push(Task::done(Message::ScanChats));
                 }
                 if self.records_due {
                     tasks.push(self.poll_record_inbox());
@@ -1996,6 +2052,7 @@ mod tests {
             _instance: None,
             ticks: 0,
             records_due: false,
+            chat_scanning: false,
             records_processing: false,
             manager_visible: true,
             prefs_saving: false,

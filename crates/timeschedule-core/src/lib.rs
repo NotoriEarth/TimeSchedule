@@ -1,4 +1,5 @@
 pub mod calendar;
+pub mod codex_chats;
 pub mod dates;
 pub mod diary;
 pub mod evidence;
