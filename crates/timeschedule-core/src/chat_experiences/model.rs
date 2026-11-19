@@ -155,6 +155,7 @@ pub(super) fn review(
             return Err("모델 후보의 제목 또는 종류가 올바르지 않습니다.".into());
         }
         let mut body = String::new();
+        let mut citations = Vec::new();
         for (field, id, required) in [
             ("배경과 문제", p.problem, false),
             ("의사결정", p.reason, false),
@@ -184,6 +185,12 @@ pub(super) fn review(
                 "{field}: {} ({} · 원문 {}행)\n",
                 r.text, r.role, r.line
             ));
+            citations.push(super::Citation {
+                field,
+                line: r.line,
+                role: r.role.into(),
+                quote: r.text.into(),
+            });
         }
         body.push_str(&format!(
             "\nWindows Codex 채팅 「{}」 · 기록 {}\n모델: {MODEL}\n",
@@ -200,6 +207,7 @@ pub(super) fn review(
             kind,
             title: title.into(),
             body,
+            citations,
         });
     }
     Ok(candidates)

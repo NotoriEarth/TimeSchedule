@@ -103,8 +103,8 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
                     Ok(saved) => {
                         app.chat_review.checked.clear();
                         app.notice = format!(
-                            "새 경험 {}건 저장 · 기존 처리 {}건 유지",
-                            saved.added, saved.kept
+                            "새 경험 {}건 · 기존 경험 {}건 · 추가한 근거 {}건",
+                            saved.added, saved.kept, saved.evidence_added
                         );
                     }
                     Err(err) => app.error = err,

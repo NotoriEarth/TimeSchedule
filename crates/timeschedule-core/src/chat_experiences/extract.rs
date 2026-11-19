@@ -232,6 +232,7 @@ fn extract_turn(
     )
     .unwrap();
     writeln!(body, "{origin}").unwrap();
+    let mut citations = Vec::new();
     for b in turn.iter().filter(|b| {
         b.line == request.line
             || b.line == turn[latest].line
@@ -252,6 +253,12 @@ fn extract_turn(
             b.role, b.line, b.text
         )
         .unwrap();
+        citations.push(super::Citation {
+            field: "원문 발췌",
+            line: b.line,
+            role: b.role.into(),
+            quote: b.text.into(),
+        });
     }
     Some(Candidate {
         kind,
@@ -261,6 +268,7 @@ fn extract_turn(
             kind.label()
         ),
         body,
+        citations,
     })
 }
 
