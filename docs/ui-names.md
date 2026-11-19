@@ -16,11 +16,24 @@
 | 상단 검색창 / 검색 결과 | ‘일정, 프로젝트, 기록 검색’에 입력하면 현재 본문 자리에 ‘검색 결과’가 표시됨 | `app.search`, `app.search_results`, `views::search_results` |
 | 월간 다이어리 | ‘월간’. 연·월 제목 아래 달력과 선택한 날짜의 일정·기록을 표시 | `Page::Month`, `app.month`, `shell::month` |
 | 주간 다이어리 | ‘주간’. 주간 개요와 7개의 날짜 칸, ‘주간 근거 요약’ 버튼 | `Page::Week`, `app.week`, `views::week`, `views::day` |
-| 프로젝트 화면 | ‘프로젝트’. ‘모든 프로젝트’ 또는 프로젝트 이름을 골라 기록을 조회. 개별 프로젝트에서 Git 커밋 수집·근거 요약·포트폴리오 초안 작성 | `Page::Projects`, `app.project`, `views::projects` |
+| 프로젝트 화면 | ‘프로젝트’. ‘모든 프로젝트’ 또는 프로젝트 이름을 골라 기록을 조회. 개별 프로젝트의 기본 버튼은 ‘Git 커밋 수집’, ‘근거 요약’, ‘자료 발췌 초안’ | `Page::Projects`, `app.project`, `views::projects` |
 | 기록 보관함 (현행 화면 식별용) | 왼쪽 메뉴 ‘개발 기록’ → 제목 ‘기록 보관함’. 여러 날짜와 여러 종류의 기록을 조회하는 기존 화면 | `Page::Records`, `views::records`, `app.snapshot.entries` |
 | 날짜 미정 화면 | ‘날짜 미정’. 날짜가 비어 있는 일정을 모아 표시. 여기서 ‘+ 일정’을 누르면 날짜를 비워 둘 수 있음 | `Page::Tasks`, `views::tasks`, `Kind::Task` |
 | 노트 화면 | 왼쪽 메뉴 ‘노트’ → 제목 ‘메모’. ‘+ 메모’로 추가하고 제목을 눌러 편집 | `Page::Notes`, `views::notes`, `app.snapshot.notes` |
 | 설정 화면 | 왼쪽 메뉴 하단 ‘설정’. 위젯 상단의 ‘설정’도 같은 화면으로 이동 | `Page::Settings`, `views::settings`, `widget_settings::Change::Open` |
+
+## 0.30.1 앱과 캡처를 대조하는 법
+
+04번 ‘선택한 프로젝트’ 캡처는 0.20.0 기준이다. 현재 앱에서는 왼쪽에서 프로젝트 이름을 선택한 뒤 아래 문구로 기능을 찾는다.
+
+| 수정 요청에서 가리킬 대상 | 0.30.1 화면에서 찾는 법 | 코드에서 찾는 법 |
+| --- | --- | --- |
+| 자료 발췌 초안 | ‘근거 요약’ 옆의 ‘자료 발췌 초안’ 버튼. 기록 편집기의 종류 목록에는 ‘포트폴리오 초안’이라는 이름이 남아 있다. | `views::projects`, `Message::Draft(true)`, `views::KIND_LABELS` |
+| Codex 채팅 자동 수집 | 저장소가 연결된 프로젝트에서 ‘Codex 채팅 자동 수집 켜기’ 또는 ‘Codex 채팅 자동 수집 끄기’ | `views::projects`, `Message::SetChatCapture` |
+| 채팅에서 경험 검토 | 수집된 채팅이 있으면 ‘채팅에서 경험 검토 · Terra’에서 채팅을 선택한다. 설계·트러블슈팅 후보에 체크한 뒤 ‘확인한 후보만 이력에 저장’을 누른다. | `chat_review_ui::panel` |
+| 경험 선택과 Markdown 생성 | ‘포트폴리오 경험’에서 ‘경험 선택’으로 기록을 고른다. ‘백엔드 포트폴리오 · Markdown 생성’ 버튼 옆에 ‘기존 v2 재사용 완료’처럼 실제 판본 번호가 표시된다. | `portfolio_ui::panel`, `portfolio_ui::Action::Export` |
+
+30~31번 설정 캡처도 0.20.0 기준이다. 0.30.1의 ‘설정 → 로컬 일정 MCP’에는 ‘MCP 켜기’와 ‘MCP 끄기’가 있다. 설정에서 전원 제어를 찾을 때는 `views::settings`와 `Message::SetMcpEnabled`를 참고한다.
 
 ## 달력, 위젯과 날짜별 보기
 
