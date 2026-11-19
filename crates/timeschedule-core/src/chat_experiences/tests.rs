@@ -137,8 +137,7 @@ fn model_review_renders_only_resolved_evidence_and_saves_only_the_checked_kind()
     let (db, p, chat_id) = fixture();
     let (chat, source, _) = read_source(&*db.connection().unwrap(), &p, &chat_id).unwrap();
     let candidates=model::review(&chat,&source,|req|{
-        assert_eq!(req["model"],MODEL);
-        assert_eq!(req["stream"],false);
+        assert_eq!(req["model"], "gpt-6.1-terra");
         assert!(req["messages"][0]["content"].as_str().unwrap().contains("환경이 다르기 때문에"));
         Ok(serde_json::json!({
             "design":{"title":"공유 설정","problem":1,"solution":4,"reason":5,"test":0,"limit":0},
@@ -146,6 +145,8 @@ fn model_review_renders_only_resolved_evidence_and_saves_only_the_checked_kind()
         }).to_string())
     }).unwrap();
     assert!(candidates[0].body.contains("공유합니다. (AI · 원문 21행)"));
+    assert!(candidates[1].body.contains("의사결정: 근거 부족\n"));
+    assert!(candidates[1].body.contains("모델: gpt-6.1-terra\n"));
     assert!(candidates[1]
         .body
         .contains("# fail 1 (검사 출력 · 원문 26행)"));

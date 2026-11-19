@@ -1,6 +1,6 @@
 # TimeSchedule 버전 이력
 
-현재 대표 앱은 **Rust/Iced 네이티브 0.26.0**이며 실행 파일은 `artifacts/TimeSchedule.exe`이다.
+현재 대표 앱은 **Rust/Iced 네이티브 0.27.0**이며 실행 파일은 `artifacts/TimeSchedule.exe`이다.
 
 ## 버전 규칙
 
@@ -10,7 +10,11 @@
 - **부 버전**: 사용자가 체감하는 기능 묶음이나 큰 화면·구조 개선에서 올리고 수정 숫자는 0으로 돌린다.
 - **수정 버전**: 기존 기능의 버그·작은 동작·배포 문제를 고칠 때 올린다.
 - 커밋·문서 정리만으로 매번 올리지 않는다. 같은 미출시 작업에 대한 후속 수정은 그 버전에 포함한다.
-- 다음 작은 수정은 `0.26.1`, 다음 주요 기능 묶음은 `0.27.0`이다. 버전 변경 시 `apps/timeschedule-native/Cargo.toml`, `Cargo.lock`, 이 이력과 README를 함께 갱신한다. 앱 표시·Windows 속성·빌드 출력 정보는 Cargo 버전을 사용한다.
+- 다음 작은 수정은 `0.27.1`, 다음 주요 기능 묶음은 `0.28.0`이다. 버전 변경 시 `apps/timeschedule-native/Cargo.toml`, `Cargo.lock`, 이 이력과 README를 함께 갱신한다. 앱 표시·Windows 속성·빌드 출력 정보는 Cargo 버전을 사용한다.
+
+## 0.27.0 · Terra 기반 경험 검토
+
+- 선택한 채팅 발췌를 Codex CLI의 GPT-6.1 Terra(medium)로 검토한다. 앱은 저장 전에 원문 행과 검사 출력의 출처를 대조하며, 같은 채팅의 확인 이력과 사용자 편집을 유지한다. TimeSchedule MCP는 별도로 켤 필요가 없다.
 
 ## 0.26.0 · 로컬 모델 기반 경험 검토
 

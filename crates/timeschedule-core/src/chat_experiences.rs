@@ -5,6 +5,7 @@ use std::fmt;
 
 mod extract;
 mod model;
+mod terra;
 pub use model::MODEL;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,7 +116,7 @@ impl Storage {
         })
     }
     pub fn review_chat_with_model(&self, project: &str, id: &str) -> Result<Review, String> {
-        self.review_chat_with_inference(project, id, model::ollama)
+        self.review_chat_with_inference(project, id, terra::infer)
     }
 
     pub fn review_chat_with_inference(
