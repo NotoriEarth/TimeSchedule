@@ -268,6 +268,7 @@ pub struct App {
     pub portfolio_selection:
         std::collections::BTreeMap<String, Option<std::collections::BTreeSet<String>>>,
     pub portfolio_editor: Option<crate::portfolio_ui::AnswerEdit>,
+    pub portfolio_feedback: Option<(String, String)>,
     pub page: Page,
     pub month: NaiveDate,
     pub selected: NaiveDate,
@@ -410,6 +411,7 @@ impl App {
             snapshot: Snapshot::default(),
             chat_review: Default::default(),
             portfolio_writer: timeschedule_core::terra::generate,
+            portfolio_feedback: None,
             portfolio_selection: Default::default(),
             portfolio_editor: None,
             page: Page::Month,
@@ -1374,6 +1376,7 @@ impl App {
                 return self.place_popup(self.quick_anchor(), id);
             }
             Message::Project(id) if self.editor.is_none() => {
+                self.portfolio_feedback = None;
                 self.chat_review = Default::default();
                 self.project = id;
                 self.page = Page::Projects;
@@ -2034,6 +2037,7 @@ mod tests {
             snapshot: Snapshot::default(),
             chat_review: Default::default(),
             portfolio_writer: timeschedule_core::terra::generate,
+            portfolio_feedback: None,
             portfolio_selection: Default::default(),
             portfolio_editor: None,
             page: Page::Month,

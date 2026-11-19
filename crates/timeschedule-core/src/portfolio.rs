@@ -9,6 +9,13 @@ use uuid::Uuid;
 mod markdown;
 mod writing;
 
+#[derive(Clone, Debug)]
+pub struct PortfolioExport {
+    pub file: PathBuf,
+    pub revision: i64,
+    pub reused: bool,
+}
+
 pub(crate) fn migrate(c: &Connection) -> Result<(), String> {
     c.execute_batch(
         "CREATE VIEW project_experiences AS
@@ -168,6 +175,7 @@ impl Storage {
         selected: Option<&BTreeSet<String>>,
     ) -> Result<PathBuf, String> {
         self.export_edition(project, root, selected, None)
+            .map(|result| result.file)
     }
 
     pub fn export_portfolio_with_writer(
@@ -177,6 +185,17 @@ impl Storage {
         selected: Option<&BTreeSet<String>>,
         writer: impl Fn(&str) -> Result<String, String>,
     ) -> Result<PathBuf, String> {
+        self.export_portfolio_with_outcome(project, root, selected, writer)
+            .map(|result| result.file)
+    }
+
+    pub fn export_portfolio_with_outcome(
+        &self,
+        project: &str,
+        root: &Path,
+        selected: Option<&BTreeSet<String>>,
+        writer: impl Fn(&str) -> Result<String, String>,
+    ) -> Result<PortfolioExport, String> {
         self.export_edition(project, root, selected, Some(&writer))
     }
 
@@ -186,7 +205,7 @@ impl Storage {
         root: &Path,
         selected: Option<&BTreeSet<String>>,
         writer: Option<&dyn Fn(&str) -> Result<String, String>>,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PortfolioExport, String> {
         if selected.is_some_and(BTreeSet::is_empty) {
             return Err("경험을 한 건 이상 선택하세요.".into());
         }
@@ -334,9 +353,26 @@ impl Storage {
             &snapshot.evidence,
             edition.published,
         )?;
-        self.connection()?.execute("UPDATE portfolio_editions SET published=1,last_used=(SELECT COALESCE(MAX(last_used),0)+1 FROM portfolio_editions WHERE project_id=?1) WHERE project_id=?1 AND folder=?2",
+        // A concurrent export may have published our reservation during the file write.
+        let mut c = self.connection()?;
+        let tx = c
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let reused = tx
+            .query_row(
+                "SELECT published FROM portfolio_editions WHERE project_id=?1 AND folder=?2",
+                params![project, edition.folder],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(database_error)?;
+        tx.execute("UPDATE portfolio_editions SET published=1,last_used=(SELECT COALESCE(MAX(last_used),0)+1 FROM portfolio_editions WHERE project_id=?1) WHERE project_id=?1 AND folder=?2",
             params![project,edition.folder]).map_err(database_error)?;
-        Ok(file)
+        tx.commit().map_err(database_error)?;
+        Ok(PortfolioExport {
+            file,
+            revision: edition.revision,
+            reused,
+        })
     }
 }
 struct Edition {

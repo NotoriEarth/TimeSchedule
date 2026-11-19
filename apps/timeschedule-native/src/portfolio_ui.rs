@@ -7,8 +7,7 @@ use iced::{
     widget::{button, checkbox, column, row, scrollable, text, text_input},
     Element, Task,
 };
-use std::path::PathBuf;
-use timeschedule_core::portfolio::PortfolioPanel;
+use timeschedule_core::portfolio::{PortfolioExport, PortfolioPanel};
 
 pub struct AnswerEdit {
     project: String,
@@ -28,7 +27,7 @@ pub enum Action {
     Export,
     Open,
     Answered(String, Result<(), String>),
-    Exported(Result<PathBuf, String>),
+    Exported(String, Result<PortfolioExport, String>),
 }
 
 fn message(a: Action) -> Message {
@@ -55,6 +54,11 @@ fn needs_answer(p: &PortfolioPanel, ids: Option<&std::collections::BTreeSet<Stri
 pub fn panel<'a>(app: &'a App, p: &'a PortfolioPanel) -> Element<'a, Message> {
     let mut section =
         column![text(format!("포트폴리오 경험 · {}건", p.experiences)).size(16)].spacing(6);
+    let feedback = app
+        .portfolio_feedback
+        .as_ref()
+        .filter(|(id, _)| id == &p.project_id)
+        .map(|(_, status)| status.as_str());
     if let Some(file) = &p.last_file {
         section = section
             .push(control("마지막 Markdown 열기", message(Action::Open)))
@@ -67,7 +71,10 @@ pub fn panel<'a>(app: &'a App, p: &'a PortfolioPanel) -> Element<'a, Message> {
             ))
             .into();
     }
-    if app.busy || app.loading {
+    if app.busy {
+        if let Some(status) = feedback {
+            section = section.push(text(status));
+        }
         return section.into();
     }
     let selected = selection(app, p);
@@ -124,10 +131,16 @@ pub fn panel<'a>(app: &'a App, p: &'a PortfolioPanel) -> Element<'a, Message> {
                 }))
                 .push(control("답변 수정", message(Action::Edit)));
         }
-        section = section.push(quiet("선택한 경험과 역할 답변을 Codex Terra에 보내 작성합니다. 같은 입력은 편집한 판본을 유지합니다.")).push(control(
+        let mut actions = row![control(
             "백엔드 포트폴리오 · Markdown 생성",
-            message(Action::Export),
-        ));
+            message(Action::Export)
+        )]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        if let Some(status) = feedback {
+            actions = actions.push(text(status).size(14));
+        }
+        section = section.push(quiet("선택한 경험과 역할 답변을 Codex Terra에 보내 작성합니다. 같은 입력은 편집한 판본을 유지합니다.")).push(actions);
     }
     section.into()
 }
@@ -154,14 +167,29 @@ pub fn update(app: &mut App, a: Action) -> Task<Message> {
                 }
             }
         }
-        Action::Exported(result) => {
+        Action::Exported(id, result) => {
             app.busy = false;
-            match result {
-                Ok(path) => {
-                    app.notice = format!("Markdown 저장 완료 · {}", path.display());
-                    return app.refresh();
+            let status = match result {
+                Ok(outcome) => {
+                    let (event, label) = if outcome.reused {
+                        ("reused", format!("기존 v{} 재사용 완료", outcome.revision))
+                    } else {
+                        ("created", format!("새 v{} 생성 완료", outcome.revision))
+                    };
+                    app.log(&format!(
+                        "portfolio export {event} project={id} revision={}",
+                        outcome.revision
+                    ));
+                    label
                 }
-                Err(e) => app.error = e,
+                Err(e) => {
+                    app.log(&format!("portfolio export failed project={id} error={e}"));
+                    format!("Markdown 생성 실패 · {e}")
+                }
+            };
+            if app.project.as_ref() == Some(&id) {
+                app.portfolio_feedback = Some((id, status));
+                return app.refresh();
             }
         }
         action => {
@@ -173,13 +201,25 @@ pub fn update(app: &mut App, a: Action) -> Task<Message> {
             else {
                 return Task::none();
             };
-            if app.page != Page::Projects || app.busy || app.loading || app.editor.is_some() {
+            // A periodic refresh keeps the last snapshot for this project on screen.
+            // Selection and export are validated by the store against current data.
+            if app.page != Page::Projects || app.busy || app.editor.is_some() {
                 return Task::none();
             }
             let id = state.project_id.clone();
             let Some(store) = app.store.clone() else {
                 return Task::none();
             };
+            if matches!(
+                action,
+                Action::SelectMode(_)
+                    | Action::Toggle(..)
+                    | Action::Edit
+                    | Action::Save
+                    | Action::Defer
+            ) {
+                app.portfolio_feedback = None;
+            }
             match action {
                 Action::SelectMode(subset) => {
                     app.portfolio_selection
@@ -264,13 +304,15 @@ pub fn update(app: &mut App, a: Action) -> Task<Message> {
                     app.busy = true;
                     let root = app.data_dir.clone();
                     let writer = app.portfolio_writer;
-                    app.notice = "포트폴리오를 준비하고 있습니다.".into();
+                    app.portfolio_feedback = Some((id.clone(), "포트폴리오 확인 중…".into()));
+                    app.log(&format!("portfolio export requested project={id}"));
+                    let project = id.clone();
                     return worker::job(
                         store,
                         move |s| {
-                            s.export_portfolio_with_writer(&id, &root, selected.as_ref(), writer)
+                            s.export_portfolio_with_outcome(&id, &root, selected.as_ref(), writer)
                         },
-                        |r| message(Action::Exported(r)),
+                        move |r| message(Action::Exported(project.clone(), r)),
                     );
                 }
                 _ => {}
