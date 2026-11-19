@@ -25,16 +25,18 @@ pub(crate) fn preview(value: &str, limit: usize) -> String {
     }
     shortened
 }
-const KIND_LABELS: [&str; 6] = [
+const KIND_LABELS: [&str; 7] = [
     "자유 노트",
+    "설계 경험",
     "개발 기록",
     "트러블슈팅",
     "Git 커밋",
     "근거 요약",
     "포트폴리오 초안",
 ];
-const KIND_VALUES: [&str; 6] = [
+const KIND_VALUES: [&str; 7] = [
     "note",
+    "design",
     "development",
     "troubleshooting",
     "commit",
@@ -528,7 +530,7 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
                 row![
                     control("Git 커밋 수집", Message::Import),
                     control("근거 요약", Message::Draft(false)),
-                    control("포트폴리오 초안", Message::Draft(true))
+                    control("자료 발췌 초안", Message::Draft(true))
                 ]
                 .spacing(6),
             );
@@ -536,6 +538,14 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
         panel = panel.push(quiet(
             "최근 500개 커밋을 수집하며 중복과 사용자 수정을 보존합니다.",
         ));
+        if let Some(state) = app
+            .snapshot
+            .portfolio
+            .as_ref()
+            .filter(|s| s.project_id == p.id)
+        {
+            panel = panel.push(crate::portfolio_ui::panel(app, state));
+        }
         c = c.push(paper(panel));
     }
     // The same diary records, newest date first, one heading per date. The

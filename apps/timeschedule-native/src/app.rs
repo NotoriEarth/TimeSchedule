@@ -220,6 +220,7 @@ pub enum Message {
     SearchDone(u64, Result<Vec<SearchHit>, String>),
     Import,
     Imported(Result<ImportResult, String>),
+    Portfolio(crate::portfolio_ui::Action),
     Draft(bool),
     Drafted(u64, u64, Result<Form, String>),
     Native(NativeAction),
@@ -256,6 +257,7 @@ pub struct App {
     pub data_dir: PathBuf,
     pub preferences: Preferences,
     pub snapshot: Snapshot,
+    pub portfolio_editor: Option<crate::portfolio_ui::AnswerEdit>,
     pub page: Page,
     pub month: NaiveDate,
     pub selected: NaiveDate,
@@ -420,6 +422,7 @@ impl App {
             data_dir,
             preferences: prefs,
             snapshot: Snapshot::default(),
+            portfolio_editor: None,
             page: Page::Month,
             month,
             selected: today,
@@ -972,6 +975,10 @@ impl App {
                     | Message::MutationDone(_)
                     | Message::Imported(_)
                     | Message::Drafted(..)
+                    | Message::Portfolio(
+                        crate::portfolio_ui::Action::Answered(..)
+                            | crate::portfolio_ui::Action::Exported(..)
+                    )
                     | Message::EntryLoaded(..)
                     | Message::FormLoaded(..)
                     | Message::Composition(..)
@@ -1735,6 +1742,7 @@ impl App {
                     Err(e) => self.error = e,
                 }
             }
+            Message::Portfolio(action) => return crate::portfolio_ui::update(self, action),
             Message::Draft(portfolio) if !self.busy && self.editor.is_none() => {
                 let Some(store) = self.store.clone() else {
                     return Task::none();
@@ -1918,6 +1926,7 @@ mod tests {
             data_dir: PathBuf::new(),
             preferences: Preferences::default(),
             snapshot: Snapshot::default(),
+            portfolio_editor: None,
             page: Page::Month,
             month: date.with_day(1).unwrap(),
             selected: date,

@@ -82,7 +82,7 @@ export function audit(ctx) {
     const saved = optional(path.join(directory, 'delivery.json'));
     const delivered = job && saved && job.source.gitChanges?.head === saved.source.gitChanges.head
       && job.source.title === saved.source.title && job.source.detailedMarkdown === saved.source.detailedMarkdown
-      && job.source.status === saved.source.status;
+      && job.source.status === saved.source.status && job.source.kind === saved.source.kind;
     const row = { branch: start.branch, workId };
     if (!head) {
       if (!complete(job?.phase)) result.push({ ...row, phase: 'branch_missing' });
@@ -222,6 +222,8 @@ export async function finish(ctx, id, file) {
   const note = file ? read(file) : readNoteForCommit(directory, ownedHead);
   if (!note) throw new Error(`마지막 개발 커밋 ${ownedHead.slice(0, 8)}의 새 설명이 필요합니다. finish ${id} <NOTE.json>으로 작업 원문 JSON 경로를 지정하세요.`);
   const title = requiredText(note.title, 'title'), paragraph = requiredText(note.summary, 'summary');
+  const kind = note.kind ?? 'development';
+  if (!['development', 'design', 'troubleshooting'].includes(kind)) throw new Error('경험 종류는 development, design 또는 troubleshooting입니다.');
   const detail = note.detail ? requiredText(note.detail, 'detail') : '';
   const files = note.tests ?? [];
   if (!Array.isArray(files)) throw new Error('tests에는 실행할 파일 목록을 지정하세요.');
@@ -249,7 +251,7 @@ export async function finish(ctx, id, file) {
   const previous = readPreviousDelivery(path.join(directory, 'delivery.json'));
   const first = firstCompletion(previous);
   const completedAt = completionTime(() => previous, ownedHead, status);
-  const source = { workId: id, projectTitle: 'TimeSchedule', repoPath: ctx.primary, date, kind: 'development',
+  const source = { workId: id, projectTitle: 'TimeSchedule', repoPath: ctx.primary, date, kind,
     title, status, diarySummary: paragraph, detailedMarkdown: blocks.join('\n\n'), gitChanges: changes,
     // Only the real commits this author tagged with this work, never a projection.
     commits: scan.owned.map(commit => commit.sha), ...(completedAt ? { completedAt } : {}) };

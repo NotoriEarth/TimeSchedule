@@ -761,6 +761,60 @@ fn run_task(app: &mut App, task: Task<Message>) {
 }
 
 #[test]
+fn project_panel_receives_experiences_and_exports_markdown_from_its_buttons() {
+    use crate::record_inbox::{
+        self,
+        tests::{sample, TestDir},
+    };
+    let dir = TestDir::new();
+    let mut app = fixture();
+    app.data_dir = dir.0.clone();
+    let store = app.store.clone().unwrap();
+    let fix = sample();
+    let mut design = sample();
+    design.kind = "design".into();
+    design.work_id = uuid::Uuid::new_v4().to_string();
+    design.title = "보관 방식 설계".into();
+    for record in [&design, &fix, &fix] {
+        record_inbox::enqueue(&dir.0, record).unwrap();
+    }
+    assert_eq!(record_inbox::drain(&dir.0, &store).unwrap().saved, 2);
+    let project = store.list_projects().unwrap().remove(0).id;
+    run_message(&mut app, Message::Project(Some(project.clone())));
+    let click = |app: &mut App, label: &str| {
+        let size = Size::new(930., 820.);
+        let target = calendar_text_bounds(crate::views::projects(app), size)
+            .into_iter()
+            .find(|(s, _)| s == label)
+            .expect("project control must be visible")
+            .1;
+        let messages = click_text(crate::views::projects(app), size, target);
+        assert!(!messages.is_empty(), "missing click for {label}");
+        for message in messages {
+            run_message(app, message);
+        }
+    };
+    click(&mut app, "개인 기여 보류");
+    assert_eq!(
+        app.snapshot.portfolio.as_ref().unwrap().answer.as_deref(),
+        Some("")
+    );
+    click(&mut app, "백엔드 포트폴리오 · Markdown 생성");
+    let state = app.snapshot.portfolio.as_ref().unwrap();
+    assert_eq!(state.experiences, 2);
+    let file = dir.0.join(state.last_file.as_ref().unwrap());
+    let markdown = std::fs::read_to_string(&file).unwrap();
+    assert!(markdown.contains("보관 방식 설계") && markdown.contains("원인과 검증 범위"));
+    assert!(file.with_file_name("evidence.md").is_file());
+    std::fs::write(&file, "지원자가 수정한 내용").unwrap();
+    click(&mut app, "백엔드 포트폴리오 · Markdown 생성");
+    assert_eq!(
+        std::fs::read_to_string(file).unwrap(),
+        "지원자가 수정한 내용"
+    );
+}
+
+#[test]
 fn calendar_routes_create_edit_move_complete_and_delete_the_same_source() {
     use crate::calendar_ui::{message, Action};
     use timeschedule_core::calendar::CalendarSource;
