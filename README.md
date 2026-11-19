@@ -1,6 +1,8 @@
 # TimeSchedule
 
-## 최신 앱 · TimeSchedule 0.21.0
+## 최신 앱 · TimeSchedule 0.22.0
+
+**설정 → 로컬 일정 MCP**에서 MCP를 끄거나 다시 켤 수 있습니다. 끄면 Claude Desktop이 이미 열어 둔 중계가 종료됩니다. 꺼둔 채 Claude를 다시 열어도 중계가 남지 않으므로, TimeSchedule을 완전히 종료한 뒤 EXE를 교체할 수 있습니다. 다시 쓰려면 **MCP 켜기**를 누르고 Claude에서 재연결하세요.
 
 **프로젝트 → 프로젝트 선택**에서 설계 경험·개발 기록·트러블슈팅이 날짜별 이력에 쌓이고, 포트폴리오에 쓸 경험 수를 볼 수 있습니다. 직접 쓴 기록과 자동 수신 기록 모두 대상입니다. 개발 일지 `finish` 입력에 `kind`를 생략하면 개발 기록으로 저장하고, `design` 또는 `troubleshooting`도 지정할 수 있습니다.
 

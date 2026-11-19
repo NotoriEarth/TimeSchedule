@@ -309,12 +309,43 @@ pub(crate) fn helper_auth_headers(args: &[String]) -> Result<String, String> {
     let url = url.ok_or("0.13.1 이전에 만든 등록이라 인증 정보를 보낼 주소를 확인할 수 없습니다. TimeSchedule 설정 → 로컬 일정 MCP → AI 연결 도우미에서 다시 등록하세요. 인증 정보는 보내지 않았습니다.")?;
     auth_headers(dir, url)
 }
+
+/// stdin can remain open and silent for the entire lifetime of Claude. The
+/// helper's main thread must be able to exit independently of that blocking read.
+fn run_stdio(dir: &Path, power: crate::mcp_power::Power) -> Result<(), String> {
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    let (finished, completion) = mpsc::channel();
+    let data_dir = dir.to_owned();
+    std::thread::spawn(move || {
+        let result = bridge(&data_dir, std::io::stdin().lock(), std::io::stdout());
+        let _ = finished.send(result);
+    });
+    loop {
+        match completion.recv_timeout(Duration::from_millis(250)) {
+            Ok(result) => return result,
+            Err(RecvTimeoutError::Disconnected) => return Err("MCP 중계가 중단되었습니다.".into()),
+            Err(RecvTimeoutError::Timeout) => {
+                if crate::mcp_power::Power::for_helper(dir)? != power {
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
 /// Runs the helper mode in `args[0]` (see `launch::HELPER_MODES`) and returns
 /// the exit code.
 pub fn run(args: &[String]) -> i32 {
     let mode = args.first().map(String::as_str).unwrap_or_default();
     let result = (|| {
         let (dir, _) = helper_arguments(args)?;
+        let power = crate::mcp_power::Power::for_helper(dir)?;
+        if !power.enabled {
+            return if mode == "--mcp-stdio" {
+                Ok(())
+            } else {
+                Err("TimeSchedule 설정에서 MCP가 꺼져 있습니다.".into())
+            };
+        }
         match mode {
             "--mcp-auth-headers" => {
                 // This stdout is the credential channel consumed by the MCP client.
@@ -325,7 +356,7 @@ pub fn run(args: &[String]) -> i32 {
                 println!("{}", json!({"status":probe(dir)?}));
                 Ok(())
             }
-            "--mcp-stdio" => bridge(dir, std::io::stdin().lock(), std::io::stdout().lock()),
+            "--mcp-stdio" => run_stdio(dir, power),
             _ => Err("알 수 없는 MCP 도우미 모드입니다.".into()),
         }
     })();

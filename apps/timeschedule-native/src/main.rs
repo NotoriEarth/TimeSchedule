@@ -15,6 +15,7 @@ mod launch;
 mod mcp;
 mod mcp_clients;
 mod mcp_connection;
+mod mcp_power;
 mod mcp_setup;
 mod mcp_setup_ui;
 mod month_jump;

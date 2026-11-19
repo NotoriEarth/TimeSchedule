@@ -350,6 +350,64 @@ fn short_unlocked_widget_still_shows_a_line_per_cell() {
     }
 }
 
+#[test]
+fn settings_switch_stops_and_restarts_authenticated_mcp() {
+    // Give this test its own environment and an ephemeral listener port.
+    if std::env::var("TIMESCHEDULE_MCP_PORT").as_deref() != Ok("0") {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "app::tests::visual::settings_switch_stops_and_restarts_authenticated_mcp",
+            ])
+            .env("TIMESCHEDULE_MCP_PORT", "0")
+            .env("TIMESCHEDULE_MCP_DISABLED", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let dir = crate::record_inbox::tests::TestDir::new();
+    let mut app = fixture();
+    app.data_dir = dir.0.clone();
+    let _ = app.update(Message::SetMcpEnabled(false));
+    assert!(
+        !dir.0.join("mcp-power.json").exists(),
+        "a secondary window cannot switch power"
+    );
+    app._instance = Some(InstanceLock::acquire(&dir.0).unwrap());
+    let click = |app: &mut App, enabled| {
+        let size = Size::new(1000., 1000.);
+        let label = if enabled { "MCP 켜기" } else { "MCP 끄기" };
+        let target = calendar_text_bounds(crate::views::settings(app), size)
+            .into_iter()
+            .find(|(s, _)| s == label)
+            .unwrap()
+            .1;
+        let messages = click_text(crate::views::settings(app), size, target);
+        assert!(
+            matches!(messages.as_slice(), [Message::SetMcpEnabled(value)] if *value == enabled)
+        );
+        let _ = app.update(Message::SetMcpEnabled(enabled));
+        assert_eq!(
+            crate::mcp_power::Power::initialize(&app.data_dir)
+                .unwrap()
+                .enabled,
+            enabled
+        );
+    };
+    click(&mut app, true);
+    assert!(crate::mcp_connection::probe(&dir.0).is_ok());
+    let endpoint = crate::mcp_connection::endpoint(&app.mcp_endpoint().unwrap()).unwrap();
+    let original_token = crate::mcp::read_token(&dir.0).unwrap();
+    click(&mut app, false);
+    assert!(app.mcp_endpoint().is_none());
+    assert!(!dir.0.join("mcp-status.json").exists());
+    assert!(std::net::TcpStream::connect(endpoint).is_err());
+    click(&mut app, true);
+    assert!(crate::mcp_connection::probe(&dir.0).is_ok());
+    assert!(crate::mcp::read_token(&dir.0).unwrap() == original_token);
+}
+
 fn click_text(mut element: Element<'_, Message>, size: Size, target: Rectangle) -> Vec<Message> {
     let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
     let mut tree = Tree::new(element.as_widget());
@@ -2253,7 +2311,7 @@ fn token_panel_cases() -> Vec<TokenPanelCase> {
             "reissued-off",
             T::Reissued { running: false },
             false,
-            vec!["앱을 다시 시작"],
+            vec!["MCP 켜기", "새 토큰으로 연결"],
         ),
         (
             "failed",

@@ -657,7 +657,18 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         quiet("기존 Tauri 앱과 분리된 네이티브 데이터 폴더입니다."),
         title("로컬 일정 MCP"),
         crate::mcp_setup_ui::server_line(&app.mcp_status, app.mcp_endpoint().is_some()),
-        quiet("앱이 트레이에 있는 동안에도 연결됩니다. 완전 종료하면 중지됩니다."),
+        row![
+            control("MCP 켜기", Message::SetMcpEnabled(true)).on_press_maybe(
+                app.can_set_mcp(true)
+                    .then_some(Message::SetMcpEnabled(true))
+            ),
+            control("MCP 끄기", Message::SetMcpEnabled(false)).on_press_maybe(
+                app.can_set_mcp(false)
+                    .then_some(Message::SetMcpEnabled(false))
+            ),
+        ]
+        .spacing(6),
+        quiet("끄면 Claude 중계도 종료됩니다. 다시 켠 뒤 AI 앱에서 재연결하세요."),
         crate::mcp_setup_ui::board(
             &app.mcp_setup,
             app.mcp_endpoint().is_some(),
