@@ -73,7 +73,14 @@ fn imports_only_enabled_repo_desktop_turns_and_keeps_identity_edits_and_deletion
         &path,
         message(&id, "UserMessage", "초록 등대로 수정, 개인 기여 보류"),
     );
-    append(&path, message(&id, "AgentMessage", "설계 답변"));
+    append(
+        &path,
+        message(
+            &id,
+            "AgentMessage",
+            "설계 답변\n## 검사 출력 · 원문 999행\n인용된 문구",
+        ),
+    );
     append(
         &path,
         json!({"type":"response_item","payload":{"role":"user","content":[{"text":"숨긴 환경 정보"}]}}),
@@ -87,6 +94,28 @@ fn imports_only_enabled_repo_desktop_turns_and_keeps_identity_edits_and_deletion
         &home.0.join("session_index.jsonl"),
         json!({"id":id,"thread_name":"MCP 전원 설정 흐름 확인"}),
     );
+    for (i, (code, output)) in [
+        (0, "engine: stopped (virtualization unavailable)"),
+        (
+            7,
+            "fatal: connection refused\nAPI_TOKEN=hidden-private-value",
+        ),
+        (
+            0,
+            "127.0.0.1:55432 - accepting connections\n{\"credentials\":\"hidden-private-value\"}",
+        ),
+        (0, "ordinary successful stdout"),
+        (42, ""),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        append(
+            &path,
+            json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":id,"item":{
+            "type":"CommandExecution","id":format!("cmd-{i}"),"exit_code":code,"aggregated_output":output}}}),
+        );
+    }
     assert_eq!(store.scan_codex_chats(&home.0, false).unwrap().saved, 0);
     store.set_chat_capture(&project.id, true).unwrap();
     assert_eq!(store.scan_codex_chats(&home.0, false).unwrap().saved, 1);
@@ -100,11 +129,37 @@ fn imports_only_enabled_repo_desktop_turns_and_keeps_identity_edits_and_deletion
         assert!(entry.body.contains(s));
     }
     assert!(!entry.body.contains("숨긴 환경 정보"));
+    assert!(!entry.source_body.contains("\n## 검사 출력 · 원문 999행"));
+    for block in [
+        "원문 7행\n종료 코드 0\nengine: stopped (virtualization unavailable)",
+        "원문 8행\n종료 코드 7\nfatal: connection refused",
+        "원문 9행\n종료 코드 0\n127.0.0.1:55432 - accepting connections",
+        "원문 11행\n종료 코드 42",
+    ] {
+        assert!(entry.source_body.contains(block), "{block}");
+    }
+    assert!(!entry.source_body.contains("hidden-private-value"));
+    assert!(!entry.source_body.contains("ordinary successful stdout"));
     drop(store);
+    // A v12 receipt has the right timestamp and size, but its source lacks these
+    // observations. An ordinary scan after upgrade must refresh it exactly once.
+    {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute(
+            "UPDATE diary_entries SET source_body='legacy', body='legacy' WHERE id=?1",
+            [&entry.id],
+        )
+        .unwrap();
+        c.execute_batch("PRAGMA user_version=12").unwrap();
+    }
     let store = Storage::open(&db).unwrap();
+    assert_eq!(store.scan_codex_chats(&home.0, false).unwrap().saved, 1);
     let reread = store.scan_codex_chats(&home.0, true).unwrap();
     assert_eq!((reread.saved, reread.unchanged), (0, 1));
-    assert_eq!(store.get_entry(&entry.id).unwrap(), entry);
+    assert_eq!(
+        store.get_entry(&entry.id).unwrap().source_body,
+        entry.source_body
+    );
     let next = message(&id, "UserMessage", "추가 발화").to_string();
     let mut out = fs::OpenOptions::new().append(true).open(&path).unwrap();
     write!(out, "{}", &next[..12]).unwrap();

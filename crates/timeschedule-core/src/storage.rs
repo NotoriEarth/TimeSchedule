@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 const MAX_TITLE_LENGTH: usize = 200;
 const MAX_TEXT_LENGTH: usize = 20_000;
 
@@ -586,6 +586,12 @@ pub(crate) fn migrate_to(connection: &mut Connection, target: i64) -> Result<(),
     }
     if version < 12 && target >= 12 {
         transaction.execute_batch("ALTER TABLE portfolio_editions ADD COLUMN terra_source TEXT; PRAGMA user_version=12;").map_err(database_error)?;
+    }
+    if version < 13 && target >= 13 {
+        // Reparse pre-upgrade transcripts through the normal edit-preserving scan.
+        transaction
+            .execute_batch("UPDATE codex_chat_sessions SET file_size=-1; PRAGMA user_version=13;")
+            .map_err(database_error)?;
     }
     transaction.commit().map_err(database_error)
 }
