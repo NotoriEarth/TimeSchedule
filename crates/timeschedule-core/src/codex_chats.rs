@@ -13,6 +13,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+mod command;
 mod transcript;
 use transcript::Transcript;
 

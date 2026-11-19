@@ -72,21 +72,41 @@ fn passages(source: &str) -> (Vec<Passage<'_>>, bool) {
             });
         }
     }
-    // Bound context on small local machines, keeping both early requirements and late corrections.
+    // Reserve room for observations from the middle of long sessions as well as the
+    // initial requirements and final decisions. Preserve transcript order and IDs.
     let cost = |p: &Passage<'_>| p.text.len() + 64;
     if rows.iter().map(cost).sum::<usize>() > 16000 {
         let mut left = 0;
         let mut right = rows.len();
         let mut size = 0;
-        while left < right && size + cost(&rows[left]) <= 6500 {
+        while left < right && size + cost(&rows[left]) <= 4800 {
             size += cost(&rows[left]);
             left += 1;
         }
-        while right > left && size + cost(&rows[right - 1]) <= 16000 {
+        while right > left && size + cost(&rows[right - 1]) <= 11200 {
             right -= 1;
             size += cost(&rows[right]);
         }
-        rows.drain(left..right);
+        let mut keep = vec![false; right - left];
+        for (i, row) in rows[left..right].iter().enumerate() {
+            if row.role == "검사 출력" && row.text.contains('\n') && size + cost(row) <= 16000 {
+                keep[i] = true;
+                size += cost(row);
+            }
+        }
+        // Use any space left for the turns immediately preceding the final decisions.
+        for (i, row) in rows[left..right].iter().enumerate().rev() {
+            if !keep[i] && size + cost(row) <= 16000 {
+                keep[i] = true;
+                size += cost(row);
+            }
+        }
+        let mut i = 0;
+        rows.retain(|_| {
+            let retain = i < left || i >= right || keep[i - left];
+            i += 1;
+            retain
+        });
         clipped = true;
     }
     for (i, row) in rows.iter_mut().enumerate() {
@@ -105,6 +125,14 @@ pub(super) fn review(
         return Ok(vec![]);
     }
     let mut prompt = format!("{INSTRUCTIONS}\n\n");
+    let tool_ids: Vec<_> = rows
+        .iter()
+        .filter(|r| {
+            r.role == "검사 출력" && !(r.text.starts_with("종료 코드 ") && !r.text.contains('\n'))
+        })
+        .map(|r| r.id)
+        .collect();
+    writeln!(prompt, "The only permitted test IDs are 0 or {tool_ids:?}. Use 0 for an unrelated test, including in design. For troubleshooting prefer a directly observed incident for problem and a related post-action readiness or test result for test. Read the service status in the output separately from the shell exit code. A successful probe may report an unhealthy service. A request, quotation by a user or assistant, or an exit code alone cannot establish recovery.").unwrap();
     for row in &rows {
         writeln!(prompt, "{} ({}) {}", row.id, row.role, row.text).unwrap();
     }
@@ -149,7 +177,7 @@ pub(super) fn review(
             let r = rows.iter().find(|r| r.id == id).ok_or_else(|| {
                 format!("{field}에 선택된 근거 {id}를 원문에서 찾을 수 없습니다.")
             })?;
-            if field == "검증 결과" && r.role != "검사 출력" {
+            if field == "검증 결과" && !tool_ids.contains(&id) {
                 return Err("모델이 실제 검사 출력 이외의 문장을 검사 결과로 선택했습니다.".into());
             }
             body.push_str(&format!(
@@ -175,4 +203,29 @@ pub(super) fn review(
         });
     }
     Ok(candidates)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_context_keeps_distinct_tool_observations_between_long_turns() {
+        let filler = ("development notes ".repeat(35) + "\n").repeat(24);
+        let source = format!("## 사용자 · 원문 2행\n{filler}\n## 검사 출력 · 원문 8행\n종료 코드 1\nerror: connection refused\n## 검사 출력 · 원문 12행\n종료 코드 0\nlocalhost:5432 - accepting connections\n## AI · 원문 15행\n{filler}");
+        let (rows, partial) = passages(&source);
+        assert!(partial);
+        assert_eq!(rows.first().unwrap().line, 2);
+        assert_eq!(rows.last().unwrap().line, 15);
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.role == "검사 출력")
+                .map(|r| (r.line, r.text))
+                .collect::<Vec<_>>(),
+            [
+                (8, "종료 코드 1\nerror: connection refused"),
+                (12, "종료 코드 0\nlocalhost:5432 - accepting connections")
+            ]
+        );
+    }
 }

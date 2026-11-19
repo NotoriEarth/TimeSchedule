@@ -170,25 +170,24 @@ pub(super) fn read(
                 )
             }
             Some("CommandExecution") => {
-                let out = item["aggregated_output"].as_str().unwrap_or("");
-                if !out.starts_with("TAP version ")
-                    || !out.lines().any(|l| l.starts_with("# tests "))
-                {
+                let Some(evidence) = super::command::evidence(item) else {
                     continue;
-                }
-                let code = item["exit_code"]
-                    .as_i64()
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "미상".into());
-                ("검사 출력", format!("종료 코드 {code}\n{out}"))
+                };
+                ("검사 출력", evidence)
             }
             _ => continue,
         };
         if ids.insert(id.to_owned()) {
-            excerpts.add(format!(
-                "\n## {label} · 원문 {n}행\n{}\n",
-                clip(&text, 16_000)
-            ));
+            let mut block = format!("\n## {label} · 원문 {n}행\n");
+            for line in clip(&text, 16_000).split_inclusive('\n') {
+                // Quoted transcript headings are content, never provenance for a new block.
+                if line.starts_with("## ") && line.contains(" · 원문 ") {
+                    block.push_str("> ");
+                }
+                block.push_str(line);
+            }
+            block.push('\n');
+            excerpts.add(block);
         }
     }
     let Some(fallback) = first_request else {
