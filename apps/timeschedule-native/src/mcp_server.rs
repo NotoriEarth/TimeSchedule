@@ -1369,6 +1369,7 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        crate::mcp_power::Power::set(&dir, true).unwrap();
         let store = Arc::new(Storage::open(":memory:").unwrap());
         let changed = Arc::new(AtomicBool::new(false));
         let server =

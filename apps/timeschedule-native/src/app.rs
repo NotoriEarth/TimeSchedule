@@ -140,6 +140,7 @@ pub enum Message {
     Calendar(crate::calendar_ui::Action),
     Category(crate::category_ui::Action),
     McpSetup(crate::mcp_setup_ui::Action),
+    SetMcpEnabled(bool),
     WidgetSetting(crate::widget_settings::Change),
     Jump(crate::month_jump::JumpMessage),
     ResizeWidget,
@@ -253,6 +254,7 @@ pub struct App {
     _mcp: Option<crate::mcp::LocalMcp>,
     mcp_changed: Arc<std::sync::atomic::AtomicBool>,
     pub mcp_status: String,
+    mcp_enabled: Option<bool>,
     pub mcp_setup: crate::mcp_setup_ui::State,
     pub data_dir: PathBuf,
     pub preferences: Preferences,
@@ -356,32 +358,6 @@ impl App {
             None
         };
         let mcp_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut mcp_recovered = None;
-        let (mcp, mcp_status) = if let Some(store) = store.clone() {
-            let started = crate::mcp::LocalMcp::start(store, mcp_changed.clone(), &data_dir);
-            mcp_recovered = started.recovered;
-            match started.server {
-                Ok(Some(server)) => {
-                    let status = server.status.clone();
-                    (Some(server), status)
-                }
-                Ok(None) => (None, "꺼짐 · TIMESCHEDULE_MCP_DISABLED=1".into()),
-                Err(error) => (None, format!("시작하지 못함 · {error}")),
-            }
-        } else {
-            (None, "꺼짐 · 데이터 저장소를 사용할 수 없습니다.".into())
-        };
-        // The settings screen reissues the token through the running server.
-        let mcp_setup = crate::mcp_setup_ui::State {
-            token_control: crate::mcp::TokenControl::for_app(mcp.as_ref(), instance.is_some()),
-            // Shown even if the server then failed to start: the old token is gone.
-            token: if mcp_recovered.is_some() {
-                crate::mcp_setup_ui::TokenPanel::Recovered
-            } else {
-                Default::default()
-            },
-            ..Default::default()
-        };
         let tray = match NativeTray::new() {
             Ok(t) => Some(t),
             Err(e) => {
@@ -415,10 +391,11 @@ impl App {
             quick_loading: false,
             editor_in_quick: false,
             store,
-            _mcp: mcp,
+            _mcp: None,
             mcp_changed,
-            mcp_status,
-            mcp_setup,
+            mcp_status: "꺼짐 · 데이터 폴더를 사용할 수 없습니다.".into(),
+            mcp_enabled: None,
+            mcp_setup: Default::default(),
             data_dir,
             preferences: prefs,
             snapshot: Snapshot::default(),
@@ -470,9 +447,11 @@ impl App {
             app.store.is_some(),
             app.error
         ));
-        if let Some(reason) = mcp_recovered {
-            // The reason only: the unusable file's content is not kept anywhere.
-            app.log(&format!("mcp token file unusable ({reason}); reissued"));
+        if app._instance.is_some() {
+            match crate::mcp_power::Power::initialize(&app.data_dir) {
+                Ok(power) => app.apply_mcp_power(power.enabled),
+                Err(error) => app.mcp_status = error,
+            }
         }
         let widget = app.open_widget();
         let load = app.refresh();
@@ -502,6 +481,43 @@ impl App {
             }
         }
     }
+    pub fn can_set_mcp(&self, enabled: bool) -> bool {
+        self._instance.is_some()
+            && !self.mcp_setup.busy
+            && if enabled {
+                self.store.is_some() && self.mcp_endpoint().is_none()
+            } else {
+                self.mcp_enabled != Some(false)
+            }
+    }
+
+    fn apply_mcp_power(&mut self, enabled: bool) {
+        self._mcp.take();
+        self.mcp_enabled = Some(enabled);
+        self.mcp_status = if !enabled {
+            "꺼짐".into()
+        } else if let Some(store) = self.store.clone() {
+            let started =
+                crate::mcp::LocalMcp::start(store, self.mcp_changed.clone(), &self.data_dir);
+            if let Some(reason) = started.recovered {
+                self.log(&format!("mcp token file unusable ({reason}); reissued"));
+                self.mcp_setup.token = crate::mcp_setup_ui::TokenPanel::Recovered;
+            }
+            match started.server {
+                Ok(server) => {
+                    let status = server.status.clone();
+                    self._mcp = Some(server);
+                    status
+                }
+                Err(error) => format!("시작하지 못함 · {error}"),
+            }
+        } else {
+            "시작하지 못함 · 데이터 저장소를 사용할 수 없습니다.".into()
+        };
+        self.mcp_setup.token_control =
+            crate::mcp::TokenControl::for_app(self._mcp.as_ref(), self._instance.is_some());
+    }
+
     /// The running MCP server's endpoint, used to judge whether each AI app's
     /// registration points at it.
     pub fn mcp_endpoint(&self) -> Option<String> {
@@ -997,6 +1013,25 @@ impl App {
                     .mcp_setup
                     .update(action, self.data_dir.clone(), endpoint);
             }
+            Message::SetMcpEnabled(enabled) => {
+                if !self.can_set_mcp(enabled) {
+                    return Task::none();
+                }
+                if let Err(error) = crate::mcp_power::Power::set(&self.data_dir, enabled) {
+                    self.error = error;
+                    return Task::none();
+                }
+                self.mcp_setup.preview = None;
+                self.mcp_setup.status.clear();
+                self.mcp_setup.token = Default::default();
+                self.apply_mcp_power(enabled);
+                let endpoint = self.mcp_endpoint();
+                return self.mcp_setup.update(
+                    crate::mcp_setup_ui::Action::Refresh,
+                    self.data_dir.clone(),
+                    endpoint,
+                );
+            }
             Message::RecordsDue => {
                 self.records_due = true;
                 return self.poll_record_inbox();
@@ -1164,7 +1199,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|server| !server.is_running())
                 {
-                    self.mcp_status = "중지됨 · 앱을 다시 시작하면 연결을 재시도합니다.".into();
+                    self.mcp_status = "중지됨 · MCP 켜기로 다시 시작하세요.".into();
                 }
                 if self
                     .mcp_changed
@@ -1922,6 +1957,7 @@ mod tests {
             _mcp: None,
             mcp_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_status: String::new(),
+            mcp_enabled: None,
             mcp_setup: Default::default(),
             data_dir: PathBuf::new(),
             preferences: Preferences::default(),

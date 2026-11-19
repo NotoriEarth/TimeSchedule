@@ -173,7 +173,7 @@ impl ClientLog {
                 let _ = gate.recv();
             }
             // Best effort: the in-memory log stays correct if the disk refuses.
-            let _ = write_atomic(
+            let _ = crate::mcp::write_json_atomic(
                 file,
                 &Stored {
                     schema_version: 1,
@@ -203,26 +203,6 @@ impl ClientLog {
     fn pause_next_write(&self, gate: std::sync::mpsc::Receiver<()>) {
         *self.pause_before_write.lock().unwrap() = Some(gate);
     }
-}
-
-fn write_atomic(file: &Path, value: &Stored) -> std::io::Result<()> {
-    use std::io::Write;
-    let bytes = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
-    let temporary = file.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
-    let result = (|| {
-        let mut out = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        out.write_all(&bytes)?;
-        out.sync_all()?;
-        drop(out);
-        std::fs::rename(&temporary, file)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
