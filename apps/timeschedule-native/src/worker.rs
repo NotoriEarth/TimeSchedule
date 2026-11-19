@@ -26,6 +26,7 @@ pub struct Snapshot {
     pub widget_days: Vec<CalendarDay>,
     pub categories: Vec<Category>,
     pub projects: Vec<Project>,
+    pub portfolio: Option<timeschedule_core::portfolio::PortfolioPanel>,
     pub today: CalendarDay,
     pub tasks: Vec<Task>,
     pub notes: Vec<Note>,
@@ -123,6 +124,11 @@ pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
         today,
         categories: store.list_categories()?,
         projects: store.list_projects()?,
+        portfolio: scope
+            .project
+            .as_deref()
+            .map(|id| store.portfolio_panel(id))
+            .transpose()?,
         tasks: store.list_tasks()?,
         notes: store.list_note_headers()?,
         entries,

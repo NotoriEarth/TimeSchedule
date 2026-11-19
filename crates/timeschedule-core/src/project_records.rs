@@ -95,7 +95,14 @@ impl ProjectRecord {
         if self.summary.trim().is_empty() {
             return Err("프로젝트 기록 요약을 입력해 주세요.".into());
         }
-        if !["development", "troubleshooting", "portfolio", "summary"].contains(&self.kind.as_str())
+        if ![
+            "design",
+            "development",
+            "troubleshooting",
+            "portfolio",
+            "summary",
+        ]
+        .contains(&self.kind.as_str())
         {
             return Err("외부 프로젝트 기록 종류를 확인해 주세요.".into());
         }
@@ -867,7 +874,7 @@ mod tests {
         let path = dir.join("schedule.db");
         {
             let store = Storage::open(&path).unwrap();
-            store.connection().unwrap().execute_batch("DROP TABLE entry_time; DROP TABLE entry_evidence; DROP TABLE IF EXISTS project_record_receipts; DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; PRAGMA user_version = 2; INSERT INTO notes VALUES ('128b13cb-0cf2-41da-84c4-db20dca65d73','기존 노트','보존할 본문','2026-10-30'); DROP TABLE search_order;").unwrap();
+            store.connection().unwrap().execute_batch("DROP VIEW project_experiences; DROP TABLE portfolio_answers; DROP TABLE portfolio_editions; DROP TABLE entry_time; DROP TABLE entry_evidence; DROP TABLE IF EXISTS project_record_receipts; DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; PRAGMA user_version = 2; INSERT INTO notes VALUES ('128b13cb-0cf2-41da-84c4-db20dca65d73','기존 노트','보존할 본문','2026-10-30'); DROP TABLE search_order;").unwrap();
         }
         {
             let store = Storage::open(&path).unwrap();

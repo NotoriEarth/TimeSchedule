@@ -319,6 +319,7 @@ impl Storage {
         validate_url(&input.source_url)?;
         if ![
             "note",
+            "design",
             "development",
             "troubleshooting",
             "commit",

@@ -59,7 +59,7 @@ function normalizeSource(input, projectRoot = PROJECT_ROOT) {
   const date = text(input.date, 'date', 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number(date.slice(0, 4)) < 1 || new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date) throw new Error('실제 YYYY-MM-DD 날짜가 필요합니다.');
   if (!Object.hasOwn(LABELS, input.status)) throw new Error('지원하지 않는 작업 상태입니다.');
-  if (!['development', 'troubleshooting', 'portfolio', 'summary'].includes(input.kind)) throw new Error('지원하지 않는 기록 종류입니다.');
+  if (!['design', 'development', 'troubleshooting', 'portfolio', 'summary'].includes(input.kind)) throw new Error('지원하지 않는 기록 종류입니다.');
   const detailedMarkdown = text(input.detailedMarkdown, '상세 기록', 48000);
   if (Buffer.byteLength(detailedMarkdown) > 48000) throw new Error('상세 기록은 UTF-8 48,000바이트 이하로 작업 단위를 나눠 주세요.');
   const paragraphs = detailedMarkdown.split(/\n{2,}/);

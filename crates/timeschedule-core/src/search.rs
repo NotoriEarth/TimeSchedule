@@ -567,7 +567,7 @@ mod tests {
         let version: i64 = c
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         drop(c);
         let stem = db.0.file_stem().unwrap().to_string_lossy().to_string();
         let backups = std::fs::read_dir(db.0.parent().unwrap())
@@ -575,7 +575,7 @@ mod tests {
             .flatten()
             .filter(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
-                name.starts_with(&stem) && name.contains(".pre-v7-")
+                name.starts_with(&stem) && name.contains(".pre-v8-")
             })
             .count();
         assert_eq!(backups, 1);

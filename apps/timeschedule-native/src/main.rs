@@ -21,6 +21,7 @@ mod month_jump;
 #[cfg(all(test, windows))]
 mod native_alpha_tests;
 mod popup;
+mod portfolio_ui;
 mod quick_editor;
 mod record_cli;
 mod record_inbox;

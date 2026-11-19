@@ -53,6 +53,16 @@ function recoveryFixture(t) {
   return { ctx, workId, commit, directory, draft };
 }
 
+test('finish delivers the selected experience kind and refuses generated portfolio input', async t => {
+  const { ctx, workId, directory, commit, draft } = recoveryFixture(t);
+  commit('src/design.mjs', 'export const storage = "local";', workId);
+  await assert.rejects(finish(ctx, workId, draft('배경', { kind: 'portfolio' })), /경험 종류/);
+  assert.equal(fs.existsSync(path.join(directory, 'delivery.json')), false);
+  const result = await finish(ctx, workId, draft('원문을 먼저 저장한다.', { kind: 'design' }));
+  assert.equal(result.phase, 'local_complete');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'delivery.json'))).source.kind, 'design');
+});
+
 test('a branch reuses its ID, including from a linked worktree', t => {
   const { root, ctx } = fixture(t);
   const first = begin(ctx);
