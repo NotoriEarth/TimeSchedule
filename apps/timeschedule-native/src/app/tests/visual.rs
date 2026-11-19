@@ -868,7 +868,18 @@ fn project_panel_receives_experiences_and_exports_markdown_from_its_buttons() {
         app.snapshot.portfolio.as_ref().unwrap().answer.as_deref(),
         Some("")
     );
+    // An earlier edition exists; the UI must report the edition actually exported.
+    store.export_portfolio(&project, &dir.0).unwrap();
     click(&mut app, "백엔드 포트폴리오 · Markdown 생성");
+    let panel_has = |app: &App, label: &str| {
+        calendar_text_bounds(
+            crate::portfolio_ui::panel(app, app.snapshot.portfolio.as_ref().unwrap()),
+            Size::new(930., 820.),
+        )
+        .iter()
+        .any(|(s, _)| s == label)
+    };
+    assert!(panel_has(&app, "새 v2 생성 완료"));
     let state = app.snapshot.portfolio.as_ref().unwrap();
     assert_eq!(state.experiences, 2);
     let file = dir.0.join(state.last_file.as_ref().unwrap());
@@ -876,11 +887,22 @@ fn project_panel_receives_experiences_and_exports_markdown_from_its_buttons() {
     assert!(markdown.contains("보관 방식 설계") && markdown.contains("원인과 검증 범위"));
     assert!(file.with_file_name("evidence.md").is_file());
     std::fs::write(&file, "지원자가 수정한 내용").unwrap();
+    app.loading = true; // Same-project background refresh, with the previous snapshot still visible.
     click(&mut app, "백엔드 포트폴리오 · Markdown 생성");
+    assert!(panel_has(&app, "기존 v2 재사용 완료"));
     assert_eq!(
-        std::fs::read_to_string(file).unwrap(),
+        std::fs::read_to_string(&file).unwrap(),
         "지원자가 수정한 내용"
     );
+    std::fs::remove_file(file.with_file_name("evidence.md")).unwrap();
+    click(&mut app, "백엔드 포트폴리오 · Markdown 생성");
+    assert!(app
+        .portfolio_feedback
+        .as_ref()
+        .unwrap()
+        .1
+        .starts_with("Markdown 생성 실패"));
+    assert!(!panel_has(&app, "기존 v2 재사용 완료"));
 }
 
 #[test]
