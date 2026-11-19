@@ -826,6 +826,17 @@ fn project_panel_receives_experiences_and_exports_markdown_from_its_buttons() {
     };
     let dir = TestDir::new();
     let mut app = fixture();
+    app.portfolio_writer = |prompt| {
+        let input: serde_json::Value =
+            serde_json::from_str(prompt.lines().last().unwrap()).unwrap();
+        let sections: Vec<_> = input["experiences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| serde_json::json!({"id":e["id"],"paragraphs":["원인과 검증 범위"]}))
+            .collect();
+        Ok(serde_json::to_string(&sections).unwrap())
+    };
     app.data_dir = dir.0.clone();
     let store = app.store.clone().unwrap();
     let fix = sample();

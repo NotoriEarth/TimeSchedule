@@ -330,3 +330,72 @@ fn existing_v9_edition_and_role_survive_upgrade() {
         Some("")
     );
 }
+
+#[test]
+fn terra_selection_preserves_legacy_edits_and_rejects_unreviewed_or_stale_results() {
+    use std::collections::BTreeSet;
+    let dir = Dir::new();
+    let store = Storage::open(dir.0.join("schedule.db")).unwrap();
+    let project = store
+        .save_project(ProjectInput {
+            id: None,
+            title: "다른 프로젝트".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap()
+        .id;
+    let chosen = store
+        .save_entry(manual(&project, "design", "선택한 자료"))
+        .unwrap()
+        .id;
+    store
+        .save_entry(manual(&project, "troubleshooting", "제외된 자료"))
+        .unwrap();
+    let selection = BTreeSet::from([chosen.clone()]);
+    store.save_portfolio_answer(&project, None, "").unwrap();
+    let old = store
+        .export_portfolio_selection(&project, &dir.0, Some(&selection))
+        .unwrap();
+    fs::write(&old, "사용자가 확정한 문장").unwrap();
+    let export = |writer: &dyn Fn(&str) -> Result<String, String>| {
+        store.export_portfolio_with_writer(&project, &dir.0, Some(&selection), writer)
+    };
+    assert!(export(&|_| Ok(r#"[{"id":"wrong","paragraphs":["다른 근거"]}]"#.into())).is_err());
+    assert!(export(&|_| Err("호출 실패".into())).is_err());
+    let reply = serde_json::json!([{"id":chosen,"paragraphs":["모델이 작성한 요약"]}]).to_string();
+    assert!(export(&|_| {
+        store.save_portfolio_answer(&project, Some(""), "수정한 역할")?;
+        Ok(reply.clone())
+    })
+    .is_err());
+    store
+        .save_portfolio_answer(&project, Some("수정한 역할"), "")
+        .unwrap();
+    let new = export(&|prompt| {
+        assert!(prompt.contains("선택한 자료") && !prompt.contains("제외된 자료"));
+        Ok(reply.clone())
+    })
+    .unwrap();
+    assert_ne!(new, old);
+    assert_eq!(fs::read_to_string(old).unwrap(), "사용자가 확정한 문장");
+    let body = fs::read_to_string(&new).unwrap();
+    for text in [
+        "사용자가 확정한 문장",
+        "모델이 작성한 요약",
+        "개인 기여: 보류",
+        &format!("evidence.md#entry-{chosen}"),
+    ] {
+        assert!(body.contains(text));
+    }
+    fs::write(&new, "다시 편집한 문장").unwrap();
+    assert_eq!(
+        export(&|_| panic!("같은 입력으로 모델을 재호출했습니다")).unwrap(),
+        new
+    );
+    assert_eq!(fs::read_to_string(new).unwrap(), "다시 편집한 문장");
+    assert_eq!(
+        store.portfolio_panel(&project).unwrap().answer.as_deref(),
+        Some("")
+    );
+}

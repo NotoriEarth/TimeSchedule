@@ -5,8 +5,7 @@ use std::fmt;
 
 mod extract;
 mod model;
-mod terra;
-pub use model::MODEL;
+pub use crate::terra::MODEL;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatChoice {
@@ -116,7 +115,13 @@ impl Storage {
         })
     }
     pub fn review_chat_with_model(&self, project: &str, id: &str) -> Result<Review, String> {
-        self.review_chat_with_inference(project, id, terra::infer)
+        self.review_chat_with_inference(project, id, |req| {
+            crate::terra::generate(
+                req["messages"][0]["content"]
+                    .as_str()
+                    .ok_or("Terra 입력이 비었습니다.")?,
+            )
+        })
     }
 
     pub fn review_chat_with_inference(
