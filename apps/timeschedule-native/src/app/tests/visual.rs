@@ -4381,3 +4381,65 @@ fn only_a_hand_written_record_offers_a_typed_time() {
     assert_eq!(t.manual_time, None);
     assert!(crate::calendar_ui::timeline_lines(&record.date, &t)[0].starts_with("작업 시작 · "));
 }
+
+#[test]
+fn project_chat_review_requires_checked_candidates_and_preserves_them_on_reread() {
+    use crate::chat_review_ui::Action;
+    use serde_json::json;
+    use timeschedule_core::{chat_experiences::Kind as ExperienceKind, diary::ProjectInput};
+    let dir = crate::record_inbox::tests::TestDir::new();
+    let mut app = fixture();
+    let store = app.store.clone().unwrap();
+    let project = store
+        .save_project(ProjectInput {
+            id: None,
+            title: "검토 대상".into(),
+            description: String::new(),
+            repo_path: dir.0.to_string_lossy().into_owned(),
+        })
+        .unwrap()
+        .id;
+    store.set_chat_capture(&project, true).unwrap();
+    let session = uuid::Uuid::new_v4().to_string();
+    let folder = dir.0.join("sessions/2026/11/19");
+    std::fs::create_dir_all(&folder).unwrap();
+    let mut lines=vec![json!({"type":"session_meta","payload":{"id":session,"cwd":dir.0,"originator":"Codex Desktop","timestamp":"2026-11-19T10:00:00Z"}}).to_string()];
+    for (id, role, body) in [
+        ("request", "UserMessage", "설계 이유를 설명해줘."),
+        (
+            "answer",
+            "AgentMessage",
+            "환경이 다르기 때문에 같은 설정을 공유합니다.",
+        ),
+    ] {
+        lines.push(json!({"type":"event_msg","payload":{"type":"item_completed","thread_id":session,"item":{"type":role,"id":id,"content":[{"text":body}]}}}).to_string());
+    }
+    std::fs::write(
+        folder.join(format!("rollout-example-{session}.jsonl")),
+        lines.join("\n") + "\n",
+    )
+    .unwrap();
+    assert_eq!(store.scan_codex_chats(&dir.0, true).unwrap().saved, 1);
+    run_message(&mut app, Message::Project(Some(project.clone())));
+    let choice = app.snapshot.reviewable_chats[0].clone();
+    for _ in 0..2 {
+        run_message(
+            &mut app,
+            Message::ChatReview(Action::Choose(choice.clone())),
+        );
+        let labels = calendar_texts(
+            crate::chat_review_ui::panel(&app, &project),
+            Size::new(800., 800.),
+        );
+        assert!(labels.iter().any(|l| l == "확인한 후보만 이력에 저장"));
+        let before = store.portfolio_panel(&project).unwrap().experiences;
+        run_message(&mut app, Message::ChatReview(Action::Save));
+        assert_eq!(store.portfolio_panel(&project).unwrap().experiences, before);
+        run_message(
+            &mut app,
+            Message::ChatReview(Action::Check(ExperienceKind::Design, true)),
+        );
+        run_message(&mut app, Message::ChatReview(Action::Save));
+        assert_eq!(store.portfolio_panel(&project).unwrap().experiences, 1);
+    }
+}

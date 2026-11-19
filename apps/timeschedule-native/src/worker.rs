@@ -26,6 +26,7 @@ pub struct Snapshot {
     pub widget_days: Vec<CalendarDay>,
     pub categories: Vec<Category>,
     pub projects: Vec<Project>,
+    pub reviewable_chats: Vec<timeschedule_core::chat_experiences::ChatChoice>,
     pub chat_capture_project: Option<String>,
     pub portfolio: Option<timeschedule_core::portfolio::PortfolioPanel>,
     pub today: CalendarDay,
@@ -125,6 +126,12 @@ pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
         today,
         categories: store.list_categories()?,
         projects: store.list_projects()?,
+        reviewable_chats: scope
+            .project
+            .as_deref()
+            .map(|p| store.reviewable_chats(p))
+            .transpose()?
+            .unwrap_or_default(),
         chat_capture_project: match &scope.project {
             Some(id) if store.chat_capture_enabled(id)? => Some(id.clone()),
             _ => None,
