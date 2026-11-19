@@ -4,6 +4,8 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::fmt;
 
 mod extract;
+mod model;
+pub use model::MODEL;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatChoice {
@@ -45,9 +47,21 @@ pub struct Candidate {
 
 #[derive(Debug, Clone)]
 pub struct Review {
-    pub project: String,
-    pub chat: ChatChoice,
-    pub candidates: Vec<Candidate>,
+    project: String,
+    chat: ChatChoice,
+    candidates: Vec<Candidate>,
+    source: String,
+}
+impl Review {
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+    pub fn chat(&self) -> &ChatChoice {
+        &self.chat
+    }
+    pub fn candidates(&self) -> &[Candidate] {
+        &self.candidates
+    }
 }
 #[derive(Default, Debug, Clone)]
 pub struct Saved {
@@ -65,18 +79,14 @@ pub(crate) fn migrate(c: &Connection) -> Result<(), String> {
     .map_err(database_error)
 }
 
-fn read_review(c: &Connection, project: &str, id: &str) -> Result<(Review, String), String> {
+fn read_source(
+    c: &Connection,
+    project: &str,
+    id: &str,
+) -> Result<(ChatChoice, String, String), String> {
     let (chat,body,date)=c.query_row("SELECT e.id,e.title,e.source_body,e.date FROM codex_chat_sessions s JOIN diary_entries e ON e.id=s.entry_id AND e.project_id=s.project_id WHERE s.project_id=?1 AND e.id=?2",
         params![project,id],|r|Ok((ChatChoice{id:r.get(0)?,title:r.get(1)?},r.get::<_,String>(2)?,r.get::<_,String>(3)?))).optional().map_err(database_error)?.ok_or("이 프로젝트에서 수집한 채팅을 다시 선택하세요.")?;
-    let candidates = extract::candidates(&chat, &body);
-    Ok((
-        Review {
-            project: project.to_owned(),
-            chat,
-            candidates,
-        },
-        date,
-    ))
+    Ok((chat, body, date))
 }
 
 impl Storage {
@@ -95,8 +105,33 @@ impl Storage {
     }
 
     pub fn review_chat(&self, project: &str, id: &str) -> Result<Review, String> {
-        let c = self.connection()?;
-        Ok(read_review(&c, project, id)?.0)
+        let (chat, source, _) = read_source(&*self.connection()?, project, id)?;
+        let candidates = extract::candidates(&chat, &source);
+        Ok(Review {
+            project: project.into(),
+            chat,
+            candidates,
+            source,
+        })
+    }
+    pub fn review_chat_with_model(&self, project: &str, id: &str) -> Result<Review, String> {
+        self.review_chat_with_inference(project, id, model::ollama)
+    }
+
+    pub fn review_chat_with_inference(
+        &self,
+        project: &str,
+        id: &str,
+        infer: impl FnOnce(&serde_json::Value) -> Result<String, String>,
+    ) -> Result<Review, String> {
+        let (chat, source, _) = read_source(&*self.connection()?, project, id)?;
+        let candidates = model::review(&chat, &source, infer)?;
+        Ok(Review {
+            project: project.into(),
+            chat,
+            candidates,
+            source,
+        })
     }
 
     pub fn confirm_chat_candidates(
@@ -111,28 +146,28 @@ impl Storage {
         let tx = c
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        let (current, date) = read_review(&tx, &review.project, &review.chat.id)?;
-        if review.candidates != current.candidates {
+        let (chat, source, date) = read_source(&tx, &review.project, &review.chat.id)?;
+        if chat != review.chat || source != review.source {
             return Err("채팅이 변경되었습니다. 후보를 다시 읽고 확인하세요.".into());
         }
         let mut saved = Saved::default();
         for &kind in selected {
-            let item = current
+            let item = review
                 .candidates
                 .iter()
                 .find(|x| x.kind == kind)
                 .ok_or("검토 목록에 없는 후보입니다.")?;
-            let key = params![current.project, current.chat.id, kind.key()];
+            let key = params![review.project, review.chat.id, kind.key()];
             let known:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM chat_experience_receipts WHERE project_id=?1 AND chat_id=?2 AND kind=?3)",key,|r|r.get(0)).map_err(database_error)?;
             if known {
                 saved.kept += 1;
                 continue;
             }
             // Earlier manually reviewed experiences cite their source diary ID on a provenance line.
-            let marker = format!(" · 기록 {}", current.chat.id);
+            let marker = format!(" · 기록 {}", review.chat.id);
             let mut legacy=tx.prepare("SELECT id,body FROM diary_entries WHERE project_id=?1 AND kind=?2 AND instr(body,?3)>0").map_err(database_error)?;
             let rows = legacy
-                .query_map(params![current.project, kind.key(), marker], |r| {
+                .query_map(params![review.project, kind.key(), marker], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
                 })
                 .map_err(database_error)?;
@@ -153,7 +188,7 @@ impl Storage {
                 [] => {
                     let id = uuid::Uuid::new_v4().to_string();
                     tx.execute("INSERT INTO diary_entries(id,project_id,date,kind,title,body,source_ref,source_body,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?6,?8)",
-                        params![id,current.project,date,kind.key(),item.title,item.body,format!("chat-experience:{}:{}:{}",current.project,current.chat.id,kind.key()),timestamp()]).map_err(database_error)?;
+                        params![id,review.project,date,kind.key(),item.title,item.body,format!("chat-experience:{}:{}:{}",review.project,review.chat.id,kind.key()),timestamp()]).map_err(database_error)?;
                     saved.added += 1;
                     id
                 }
@@ -162,7 +197,7 @@ impl Storage {
                         .into(),
                 ),
             };
-            tx.execute("INSERT INTO chat_experience_receipts(project_id,chat_id,kind,entry_id) VALUES(?1,?2,?3,?4)",params![current.project,current.chat.id,kind.key(),entry]).map_err(database_error)?;
+            tx.execute("INSERT INTO chat_experience_receipts(project_id,chat_id,kind,entry_id) VALUES(?1,?2,?3,?4)",params![review.project,review.chat.id,kind.key(),entry]).map_err(database_error)?;
         }
         tx.commit().map_err(database_error)?;
         Ok(saved)

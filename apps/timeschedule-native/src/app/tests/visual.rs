@@ -4425,7 +4425,17 @@ fn project_chat_review_requires_checked_candidates_and_preserves_them_on_reread(
     for _ in 0..2 {
         run_message(
             &mut app,
-            Message::ChatReview(Action::Choose(choice.clone())),
+            Message::ChatReview(Action::Read(
+                project.clone(),
+                store.review_chat_with_inference(&project, &choice.id, |_| {
+                    Ok(json!({
+                        "design": {"title": "설정 공유", "problem": 1, "reason": 2,
+                                   "solution": 2, "test": 0, "limit": 0},
+                        "troubleshooting": null
+                    })
+                    .to_string())
+                }),
+            )),
         );
         let labels = calendar_texts(
             crate::chat_review_ui::panel(&app, &project),

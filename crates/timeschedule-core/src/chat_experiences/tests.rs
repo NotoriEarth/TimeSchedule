@@ -131,3 +131,73 @@ fn stale_or_wrong_project_review_cannot_save() {
     assert!(db.review_chat(&p, &chat).unwrap().candidates.is_empty());
     assert_eq!(db.portfolio_panel(&p).unwrap().experiences, 0);
 }
+
+#[test]
+fn model_review_renders_only_resolved_evidence_and_saves_only_the_checked_kind() {
+    let (db, p, chat_id) = fixture();
+    let (chat, source, _) = read_source(&*db.connection().unwrap(), &p, &chat_id).unwrap();
+    let candidates=model::review(&chat,&source,|req|{
+        assert_eq!(req["model"],MODEL);
+        assert_eq!(req["stream"],false);
+        assert!(req["messages"][0]["content"].as_str().unwrap().contains("환경이 다르기 때문에"));
+        Ok(serde_json::json!({
+            "design":{"title":"공유 설정","problem":1,"solution":4,"reason":5,"test":0,"limit":0},
+            "troubleshooting":{"title":"종료 회귀 검증","problem":6,"solution":8,"reason":0,"test":7,"limit":8}
+        }).to_string())
+    }).unwrap();
+    assert!(candidates[0].body.contains("공유합니다. (AI · 원문 21행)"));
+    assert!(candidates[1]
+        .body
+        .contains("# fail 1 (검사 출력 · 원문 26행)"));
+    let review = Review {
+        project: p.clone(),
+        chat,
+        candidates,
+        source,
+    };
+    db.save_portfolio_answer(&p, None, "").unwrap();
+    assert!(db.confirm_chat_candidates(&review, &[]).is_err());
+    let result = db
+        .confirm_chat_candidates(&review, &[Kind::Troubleshooting])
+        .unwrap();
+    assert_eq!(result.added, 1);
+    let mut different = review.clone();
+    different.candidates[1].title = "다른 모델 표현".into();
+    assert_eq!(
+        db.confirm_chat_candidates(&different, &[Kind::Troubleshooting])
+            .unwrap()
+            .kept,
+        1
+    );
+    let panel = db.portfolio_panel(&p).unwrap();
+    assert_eq!(panel.experiences, 1);
+    assert_eq!(panel.choices[0].title, "종료 회귀 검증");
+    assert_eq!(panel.answer.as_deref(), Some(""));
+    db.connection()
+        .unwrap()
+        .execute(
+            "UPDATE diary_entries SET source_body=source_body||' 추가 발화' WHERE id=?1",
+            [&chat_id],
+        )
+        .unwrap();
+    assert!(db
+        .confirm_chat_candidates(&review, &[Kind::Design])
+        .is_err());
+}
+#[test]
+fn invalid_model_output_or_provider_error_never_creates_an_experience() {
+    let (db, p, id) = fixture();
+    let (chat, source, _) = read_source(&*db.connection().unwrap(), &p, &id).unwrap();
+    for (solution, test) in [(0, 0), (999, 0), (4, 4)] {
+        let answer = serde_json::json!({"design":{"title":"후보","problem":1,"solution":solution,"reason":0,"test":test,"limit":0},"troubleshooting":null});
+        assert!(model::review(&chat, &source, |_| Ok(answer.to_string())).is_err());
+    }
+    assert!(model::review(&chat, &source, |_| Err("모델 중지".into())).is_err());
+    assert!(model::review(&chat, &source, |_| Ok("{}".into())).is_err());
+    assert!(model::review(&chat, &source, |_| Ok(
+        r#"{"design":null,"troubleshooting":null}"#.into()
+    ))
+    .unwrap()
+    .is_empty());
+    assert_eq!(db.portfolio_panel(&p).unwrap().experiences, 0);
+}
