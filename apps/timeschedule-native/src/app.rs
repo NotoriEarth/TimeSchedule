@@ -100,6 +100,8 @@ impl Page {
 pub enum Field {
     Category(String),
     ShortTitle(String),
+    /// A record's typed time of day, `HH:mm` in KST.
+    Time(String),
     ProjectShortName(String),
     Title(String),
     Date(String),
@@ -173,11 +175,20 @@ pub enum Message {
     Load,
     Loaded(u64, Result<Snapshot, String>),
     More,
-    MoreLoaded(u64, Result<Vec<EntrySummary>, String>),
+    MoreLoaded(
+        u64,
+        Result<(Vec<EntrySummary>, HashMap<String, u32>), String>,
+    ),
     ToggleEntry(String),
-    EntryLoaded(u64, String, Result<Entry, String>),
+    EntryLoaded(
+        u64,
+        String,
+        Result<(Entry, timeschedule_core::timeline::EntryTimeline), String>,
+    ),
 
     Source(String),
+    /// Open an automatic record's original `record.md` by its work ID.
+    OpenOriginal(String),
     SourceDone(Result<(), String>),
     Field(Field),
     DatePicker(crate::date_choices::Part),
@@ -256,6 +267,8 @@ pub struct App {
 
     record_sync: crate::record_sync::Runner,
     pub bodies: HashMap<String, Entry>,
+    /// Times and evidence of the records unfolded in the lists, by ID.
+    pub timelines: HashMap<String, timeschedule_core::timeline::EntryTimeline>,
     pub entry_errors: HashMap<String, String>,
     pub editor: Option<Editor>,
     pub editor_generation: u64,
@@ -418,6 +431,7 @@ impl App {
 
             record_sync: crate::record_sync::Runner::default(),
             bodies: HashMap::new(),
+            timelines: HashMap::new(),
             entry_errors: HashMap::new(),
             editor: None,
             editor_generation: 0,
@@ -593,6 +607,7 @@ impl App {
         let generation = self.view_generation;
         self.expanded.clear();
         self.bodies.clear();
+        self.timelines.clear();
         self.entry_errors.clear();
         self.paging = false;
         // The previous snapshot may remain visible while loading, but it cannot
@@ -932,6 +947,7 @@ impl App {
                     | Message::EscapeWindow(_)
                     | Message::Calendar(crate::calendar_ui::Action::QuickPage(..))
                     | Message::Calendar(crate::calendar_ui::Action::GroupLoaded(..))
+                    | Message::Calendar(crate::calendar_ui::Action::GroupMoreLoaded(..))
                     | Message::QuickReady(_)
                     | Message::PopupPositioned(..)
                     | Message::Jump(crate::month_jump::JumpMessage::Ready(_))
@@ -1347,18 +1363,22 @@ impl App {
                 let offset = self.snapshot.entries.len() as u32;
                 return worker::job(
                     store,
-                    move |s| {
-                        s.list_entries(&scope.from, &scope.to, scope.project.as_deref(), offset)
-                    },
+                    move |s| worker::entry_page(s, &scope, offset),
                     move |r| Message::MoreLoaded(g, r),
                 );
             }
             Message::MoreLoaded(g, result) if g == self.view_generation && self.paging => {
                 self.paging = false;
                 match result {
-                    Ok(rows) => {
+                    Ok((rows, totals)) => {
                         self.more = rows.len() == 200;
-                        self.snapshot.entries.extend(rows)
+                        // A record moved between pages is listed once.
+                        let known: HashSet<String> =
+                            self.snapshot.entries.iter().map(|e| e.id.clone()).collect();
+                        self.snapshot
+                            .entries
+                            .extend(rows.into_iter().filter(|e| !known.contains(&e.id)));
+                        self.snapshot.entry_totals.extend(totals);
                     }
                     Err(e) => self.error = e,
                 }
@@ -1373,14 +1393,19 @@ impl App {
                 };
                 let g = self.view_generation;
                 let key = id.clone();
+                let dir = self.data_dir.clone();
                 return worker::job(
                     store,
-                    move |s| s.get_entry(&id),
+                    move |s| {
+                        worker::complete_evidence(s, &dir, std::slice::from_ref(&id));
+                        Ok((s.get_entry(&id)?, s.entry_timeline(&id)?))
+                    },
                     move |r| Message::EntryLoaded(g, key.clone(), r),
                 );
             }
             Message::EntryLoaded(g, id, result) if g == self.view_generation => match result {
-                Ok(entry) => {
+                Ok((entry, timeline)) => {
+                    self.timelines.insert(id.clone(), timeline);
                     self.bodies.insert(id, entry);
                 }
                 Err(e) => {
@@ -1398,6 +1423,19 @@ impl App {
                     },
                     Message::SourceDone,
                 )
+            }
+            Message::OpenOriginal(work_id) => {
+                let dir = self.data_dir.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::record_original::open(&dir, &work_id)
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::SourceDone,
+                );
             }
             Message::SourceDone(Err(e)) => self.error = e,
             Message::DatePicker(part) => {
@@ -1496,6 +1534,7 @@ impl App {
                         Field::Title(v) => e.form.title = v,
                         Field::Category(v) => e.form.category_id = v,
                         Field::ShortTitle(v) => e.form.short_title = v,
+                        Field::Time(v) => e.form.time = v.chars().take(5).collect(),
                         Field::ProjectShortName(v) => e.form.project_short_name = v,
                         Field::Date(v) => e.form.date = v,
                         Field::Project(v) => e.form.project_id = v,
@@ -1890,6 +1929,7 @@ mod tests {
 
             record_sync: crate::record_sync::Runner::default(),
             bodies: HashMap::new(),
+            timelines: HashMap::new(),
             entry_errors: HashMap::new(),
             editor: None,
             editor_generation: 0,

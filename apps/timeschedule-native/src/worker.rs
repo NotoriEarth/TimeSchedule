@@ -1,5 +1,7 @@
 use crate::editor::{Form, Kind};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 use timeschedule_core::{
     calendar::{CalendarDay, Category},
     diary::{EntrySummary, Project, SearchHit},
@@ -28,6 +30,64 @@ pub struct Snapshot {
     pub tasks: Vec<Task>,
     pub notes: Vec<Note>,
     pub entries: Vec<EntrySummary>,
+    /// Every record of each listed date, including ones not loaded yet.
+    pub entry_totals: HashMap<String, u32>,
+}
+/// A page of list rows and the full count of each date they cover.
+pub fn entry_page(
+    store: &Storage,
+    scope: &Scope,
+    offset: u32,
+) -> Result<(Vec<EntrySummary>, HashMap<String, u32>), String> {
+    let rows = store.list_entries(&scope.from, &scope.to, scope.project.as_deref(), offset)?;
+    // Rows come newest date first: the last row has the earliest date.
+    let totals = match (rows.last(), rows.first()) {
+        (Some(first), Some(last)) => {
+            store.entry_day_totals(&first.date, &last.date, scope.project.as_deref())?
+        }
+        _ => HashMap::new(),
+    };
+    Ok((rows, totals))
+}
+/// Before records are shown: a past automatic record gains its begin time
+/// and owned commit times from the begin receipt in the record state folder
+/// this app trusts, and from Git, only when it is opened; a failure leaves it
+/// unknown. One opening spends at most a short time in total, each Git call
+/// bounded by what is left. Each record's progress is kept for the session:
+/// commits Git did not confirm are not checked again, a record cut short
+/// continues past them when next opened, and a finished one costs only a
+/// database read.
+pub fn complete_evidence(store: &Storage, data_dir: &Path, ids: &[String]) {
+    use timeschedule_core::timeline::BackfillProgress;
+    static PROGRESS: OnceLock<Mutex<HashMap<String, BackfillProgress>>> = OnceLock::new();
+    const BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+    if data_dir.as_os_str().is_empty() || ids.is_empty() {
+        return;
+    }
+    let Ok(state_dir) = crate::record_sync::registered_state_dir(data_dir) else {
+        return;
+    };
+    let all = PROGRESS.get_or_init(Default::default);
+    let deadline = std::time::Instant::now() + BUDGET;
+    for id in ids {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let mut progress = all
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+            .unwrap_or_default();
+        if store
+            .backfill_automatic_evidence(id, &state_dir, &mut progress, deadline)
+            .is_ok()
+        {
+            all.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id.clone(), progress);
+        }
+    }
 }
 pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
     let days = store.calendar_days(&scope.event_from, &scope.event_to)?;
@@ -56,6 +116,7 @@ pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
             .pop()
             .unwrap_or_default()
     };
+    let (entries, entry_totals) = entry_page(store, scope, 0)?;
     Ok(Snapshot {
         days,
         widget_days,
@@ -64,7 +125,8 @@ pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
         projects: store.list_projects()?,
         tasks: store.list_tasks()?,
         notes: store.list_note_headers()?,
-        entries: store.list_entries(&scope.from, &scope.to, scope.project.as_deref(), 0)?,
+        entries,
+        entry_totals,
     })
 }
 pub fn hydrate_form(store: &Storage, mut form: Form) -> Result<Form, String> {
@@ -75,6 +137,7 @@ pub fn hydrate_form(store: &Storage, mut form: Form) -> Result<Form, String> {
                 form = Form::entry(value.entry.clone());
                 form.category_id = value.display.category_id.clone();
                 form.short_title = value.display.short_title.clone();
+                form.time = value.timeline.manual_time.clone().unwrap_or_default();
                 form.entry_version = Some(value);
             }
             Kind::Task => {
@@ -385,6 +448,80 @@ mod tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+    #[test]
+    fn editor_saves_typed_time_and_unread_forms_keep_it() {
+        let store = Storage::open(":memory:").unwrap();
+        let mut entry = Form::new(Kind::Entry, "2026-10-29".into(), None);
+        entry.title = "시각 기록".into();
+        entry.time = "18:40".into();
+        entry.save(&store).unwrap();
+        let id = store
+            .list_entries("2026-10-29", "2026-10-29", None, 0)
+            .unwrap()[0]
+            .id
+            .clone();
+        let hydrated = hydrate_form(&store, Form::entry(store.get_entry(&id).unwrap())).unwrap();
+        assert_eq!(hydrated.time, "18:40");
+        // A form built from the list without reading the record keeps the time.
+        let mut unread = Form::entry(store.get_entry(&id).unwrap());
+        unread.title = "제목만 수정".into();
+        unread.save(&store).unwrap();
+        assert_eq!(
+            store.entry_timeline(&id).unwrap().manual_time.as_deref(),
+            Some("18:40")
+        );
+        // Clearing the field in the editor makes the time unknown again.
+        let mut cleared = hydrate_form(&store, Form::entry(store.get_entry(&id).unwrap())).unwrap();
+        cleared.time.clear();
+        cleared.save(&store).unwrap();
+        assert_eq!(store.entry_timeline(&id).unwrap().manual_time, None);
+        let mut bad = hydrate_form(&store, Form::entry(store.get_entry(&id).unwrap())).unwrap();
+        bad.time = "오후 3시".into();
+        assert!(bad.save(&store).is_err());
+    }
+    #[test]
+    fn opening_a_past_automatic_record_fills_its_begin_from_the_registered_receipt() {
+        let dir = crate::record_inbox::tests::TestDir::new();
+        let state = dir.0.join("state");
+        let receipt = state.join("diary-starts").join("r");
+        std::fs::create_dir_all(&receipt).unwrap();
+        let node = dir.0.join("node.exe");
+        let script = dir.0.join("project-records.mjs");
+        std::fs::write(&node, "").unwrap();
+        std::fs::write(&script, "").unwrap();
+        let store = Storage::open(":memory:").unwrap();
+        let mut record = crate::record_inbox::tests::sample();
+        record.work_id = uuid::Uuid::new_v4().to_string();
+        let id = store
+            .apply_project_record(&record)
+            .unwrap()
+            .entry_id
+            .unwrap();
+        let before = store.get_entry(&id).unwrap();
+        std::fs::write(
+            receipt.join("work.json"),
+            format!(r#"{{"workId":"{}"}}"#, record.work_id),
+        )
+        .unwrap();
+        std::fs::write(
+            receipt.join("start.json"),
+            r#"{"at":"2026-10-31T00:05:00Z","owner":"me@example.invalid"}"#,
+        )
+        .unwrap();
+        // Without a registered record state folder nothing is read.
+        complete_evidence(&store, &dir.0, std::slice::from_ref(&id));
+        assert_eq!(store.entry_timeline(&id).unwrap().started_at, None);
+        crate::record_sync::register(&dir.0, &node, &script, &state).unwrap();
+        complete_evidence(&store, &dir.0, std::slice::from_ref(&id));
+        let t = store.entry_timeline(&id).unwrap();
+        assert_eq!(t.started_at.as_deref(), Some("2026-10-31T00:05:00Z"));
+        assert_eq!(t.completed_at, None, "no completion is invented");
+        assert_eq!(
+            store.get_entry(&id).unwrap(),
+            before,
+            "the record itself is untouched"
         );
     }
     #[test]

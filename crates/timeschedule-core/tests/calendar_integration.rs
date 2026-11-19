@@ -106,6 +106,10 @@ fn calendar_counts_and_pages_are_independent_of_200_entry_list() {
         (days[0].total, days[0].completed, days[0].items.len()),
         (206, 1, 16)
     );
+    assert_eq!(
+        days[0].represented, 206,
+        "items past the preview still count"
+    );
     let mut ids = std::collections::HashSet::new();
     for offset in [0, 50, 100, 150, 200] {
         let page = store.calendar_page("2026-11-03", offset).unwrap();
@@ -256,7 +260,7 @@ fn migration_keeps_backup_and_category_settings_survive_restart() {
     };
     {
         let c = rusqlite::Connection::open(&path).unwrap();
-        c.execute_batch("DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; DROP TABLE search_order; PRAGMA user_version=3;").unwrap();
+        c.execute_batch("DROP TABLE entry_time; DROP TABLE entry_evidence; DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; DROP TABLE search_order; PRAGMA user_version=3;").unwrap();
     }
     let custom = {
         let s = Storage::open(&path).unwrap();
@@ -286,7 +290,7 @@ fn migration_keeps_backup_and_category_settings_survive_restart() {
     let backups = std::fs::read_dir(&dir)
         .unwrap()
         .map(|p| p.unwrap().path())
-        .filter(|p| p.to_string_lossy().contains("pre-v6-"))
+        .filter(|p| p.to_string_lossy().contains("pre-v7-"))
         .collect::<Vec<_>>();
     assert_eq!(backups.len(), 1);
     {
@@ -369,6 +373,9 @@ fn category_delete_moves_all_records_and_preserves_content() {
         status: "verification_pending".into(),
         delivery_state: String::new(),
         detail: String::new(),
+        started_at: None,
+        completed_at: None,
+        commits: vec![],
     };
     let receipt = s.apply_project_record(&record).unwrap();
     let imported = s.get_entry(receipt.entry_id.as_ref().unwrap()).unwrap();
@@ -624,7 +631,7 @@ fn category_schema_v5_preserves_v4_data() {
     };
     {
         let raw = rusqlite::Connection::open(&path).unwrap();
-        raw.execute_batch("DROP INDEX IF EXISTS entry_display_category; DROP TABLE search_order; PRAGMA user_version=4;")
+        raw.execute_batch("DROP TABLE entry_time; DROP TABLE entry_evidence; DROP INDEX IF EXISTS entry_display_category; DROP TABLE search_order; PRAGMA user_version=4;")
             .unwrap();
     }
     {
@@ -635,7 +642,7 @@ fn category_schema_v5_preserves_v4_data() {
         assert_eq!(
             raw.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            6
+            7
         );
         let query_plan: String = raw.query_row("EXPLAIN QUERY PLAN SELECT entry_id FROM entry_display WHERE category_id=?1 ORDER BY entry_id", [&source.id], |r| r.get(3)).unwrap();
         assert!(
@@ -645,7 +652,7 @@ fn category_schema_v5_preserves_v4_data() {
         let backups = std::fs::read_dir(&dir)
             .unwrap()
             .map(|v| v.unwrap().path())
-            .filter(|p| p.to_string_lossy().contains("pre-v6-"))
+            .filter(|p| p.to_string_lossy().contains("pre-v7-"))
             .collect::<Vec<_>>();
         assert_eq!(backups.len(), 1);
         let backup = rusqlite::Connection::open(&backups[0]).unwrap();
@@ -716,6 +723,8 @@ fn one_projects_records_of_a_day_share_one_calendar_line() {
         .filter(|i| i.project_id.as_ref() != Some(&first))
         .all(|i| i.count == 1));
     assert_eq!((days[1].total, days[1].items[0].count), (1, 1));
+    // People see every record, while lines keep the grouped total.
+    assert_eq!((days[0].represented, days[1].represented), (6, 1));
 
     let page = store.calendar_section("2026-11-17", 0, false).unwrap();
     assert_eq!((page.total, page.items.len(), page.has_more), (4, 4, false));
@@ -727,5 +736,173 @@ fn one_projects_records_of_a_day_share_one_calendar_line() {
     assert_eq!(
         cards[0].id, group.id,
         "the line is headed by the first card"
+    );
+}
+
+#[test]
+fn represented_total_counts_each_item_while_lines_stay_grouped() {
+    use timeschedule_core::storage::EventInput;
+    let store = Storage::open(":memory:").unwrap();
+    let project = store
+        .save_project(ProjectInput {
+            id: None,
+            title: "TimeSchedule".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap()
+        .id;
+    let grouped = |date: &str| {
+        for title in ["검색 개선", "CI 수정", "위젯 정리"] {
+            store
+                .save_entry(EntryInput {
+                    project_id: Some(project.clone()),
+                    ..entry(date, title)
+                })
+                .unwrap();
+        }
+    };
+    // Only one project's three records: one line "TimeSchedule + 3".
+    grouped("2026-11-19");
+    // Mixed with schedules and tasks, and more lines than the 16-line preview.
+    grouped("2026-11-20");
+    store
+        .save_entry(entry("2026-11-20", "혼자 쓴 메모"))
+        .unwrap();
+    store
+        .save_event(EventInput {
+            id: None,
+            title: "끝난 회의".into(),
+            date: "2026-11-20".into(),
+            start_time: None,
+            end_time: None,
+            all_day: true,
+            notes: String::new(),
+            color: "sage".into(),
+            completed: true,
+        })
+        .unwrap();
+    for i in 0..17 {
+        store
+            .save_task(TaskInput {
+                id: None,
+                title: format!("할 일 {i}"),
+                date: Some("2026-11-20".into()),
+                completed: false,
+            })
+            .unwrap();
+    }
+
+    let days = store.calendar_days("2026-11-19", "2026-11-20").unwrap();
+    assert_eq!(
+        (days[0].total, days[0].represented, days[0].items.len()),
+        (1, 3, 1)
+    );
+    assert_eq!(days[0].items[0].count, 3);
+    // 17 tasks + 1 project line + 1 memo + 1 event = 20 lines; 17 + 3 + 1 + 1 = 22 items.
+    assert_eq!(
+        (
+            days[1].total,
+            days[1].completed,
+            days[1].represented,
+            days[1].items.len()
+        ),
+        (20, 1, 22, 16)
+    );
+    // Paging still walks grouped lines.
+    let page = store.calendar_page("2026-11-20", 0).unwrap();
+    assert_eq!(
+        (page.total, page.items.len(), page.has_more),
+        (20, 20, false)
+    );
+}
+
+#[test]
+fn manual_time_is_typed_kept_cleared_and_guarded_like_the_record() {
+    use timeschedule_core::timeline::{record_time, TimeChange, UNKNOWN};
+    let store = Storage::open(":memory:").unwrap();
+    let saved = store
+        .save_calendar_entry_timed(
+            entry("2026-11-19", "회의 정리"),
+            EntryDisplay::default(),
+            TimeChange::Set("21:15".into()),
+            None,
+        )
+        .unwrap();
+    assert_eq!(saved.timeline.manual_time.as_deref(), Some("21:15"));
+    assert_eq!(
+        record_time(&saved.entry.date, &saved.timeline),
+        "2026-11-19 21:15"
+    );
+    // Older callers that know nothing about times keep the typed one.
+    let kept = store
+        .save_calendar_entry(
+            EntryInput {
+                id: Some(saved.entry.id.clone()),
+                title: "회의 정리 수정".into(),
+                ..entry("2026-11-20", "")
+            },
+            EntryDisplay::default(),
+            Some(&saved),
+        )
+        .unwrap();
+    assert_eq!(kept.timeline.manual_time.as_deref(), Some("21:15"));
+    assert_eq!(
+        record_time(&kept.entry.date, &kept.timeline),
+        "2026-11-20 21:15"
+    );
+    // A stale window cannot overwrite a newer time.
+    let stale = store.save_calendar_entry_timed(
+        EntryInput {
+            id: Some(saved.entry.id.clone()),
+            ..entry("2026-11-19", "옛 창")
+        },
+        EntryDisplay::default(),
+        TimeChange::Set("08:00".into()),
+        Some(&saved),
+    );
+    assert!(stale.is_err());
+    let cleared = store
+        .save_calendar_entry_timed(
+            EntryInput {
+                id: Some(saved.entry.id.clone()),
+                ..entry("2026-11-20", "회의 정리 수정")
+            },
+            EntryDisplay::default(),
+            TimeChange::Clear,
+            Some(&kept),
+        )
+        .unwrap();
+    assert_eq!(cleared.timeline.manual_time, None);
+    assert_eq!(record_time(&cleared.entry.date, &cleared.timeline), UNKNOWN);
+    // A record written without a time is unknown, never the save moment.
+    let untimed = store
+        .save_calendar_entry(
+            entry("2026-11-19", "소급 입력"),
+            EntryDisplay::default(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(record_time(&untimed.entry.date, &untimed.timeline), UNKNOWN);
+    assert!(store
+        .save_calendar_entry_timed(
+            entry("2026-11-19", "잘못된 시각"),
+            EntryDisplay::default(),
+            TimeChange::Set("9:5".into()),
+            None,
+        )
+        .is_err());
+    assert_eq!(
+        store
+            .list_entries("2026-11-19", "2026-11-20", None, 0)
+            .unwrap()
+            .len(),
+        2,
+        "the rejected save left nothing behind"
+    );
+    store.delete_entry(&saved.entry.id).unwrap();
+    assert_eq!(
+        store.entry_timeline(&saved.entry.id).unwrap().manual_time,
+        None
     );
 }

@@ -42,40 +42,52 @@ fn calendar_texts(mut element: Element<'_, Message>, size: Size) -> Vec<String> 
 fn widget_displays_record_written_in_diary() {
     let app = calendar_record_fixture();
     let labels = calendar_texts(crate::desktop_widget::view(&app), Size::new(960., 640.));
+    // A project's record shows as the project and its count, even for one.
+    assert!(labels.iter().any(|s| s == "TS"), "{labels:?}");
+    assert!(labels.iter().any(|s| s == "+ 1"), "{labels:?}");
     assert!(
-        labels.iter().any(|s| s == "연동기록"),
-        "widget missing saved record: {labels:?}"
+        !labels.iter().any(|s| s.contains("연동기록")),
+        "the record title stays in the cards: {labels:?}"
     );
-    assert!(labels.iter().any(|s| s == "TS"));
 }
 
 #[test]
-fn diary_calendar_displays_project_and_task_title() {
+fn diary_calendar_displays_project_and_its_count() {
     let app = calendar_record_fixture();
     let labels = calendar_texts(crate::shell::calendar(&app), Size::new(1200., 1200.));
-    assert!(
-        labels.iter().any(|s| s == "연동기록"),
-        "diary only displays record count: {labels:?}"
+    assert!(labels.iter().any(|s| s == "TS"), "{labels:?}");
+    assert!(labels.iter().any(|s| s == "+ 1"), "{labels:?}");
+    assert!(!labels.iter().any(|s| s.contains("연동기록")), "{labels:?}");
+}
+
+#[test]
+fn project_line_prefers_the_short_name_and_counts_every_record() {
+    let app = calendar_record_fixture();
+    let mut day = selected_day(&app).clone();
+    day.items[0].project_short_name = "타임".into();
+    day.items[0].count = 3;
+    for quick in [false, true] {
+        let labels = calendar_texts(
+            crate::calendar_ui::day_items(&app, Some(&day), 200., 60., 12., quick),
+            Size::new(200., 60.),
+        );
+        assert!(labels.iter().any(|s| s == "타임"), "{labels:?}");
+        assert!(labels.iter().any(|s| s == "+ 3"), "{labels:?}");
+        assert!(!labels.iter().any(|s| s == "TS" || s.contains("연동기록")));
+    }
+    // A narrow cell keeps the whole count and cuts the name first.
+    let labels = calendar_text_bounds(
+        crate::calendar_ui::day_items(&app, Some(&day), 46., 20., 12., true),
+        Size::new(46., 20.),
     );
-    assert!(labels.iter().any(|s| s == "TS"));
+    assert!(labels.iter().any(|(s, _)| s == "+ 3"), "{labels:?}");
 }
 
 fn overflowing_calendar_fixture(count: usize) -> App {
     let mut app = calendar_record_fixture();
     for index in 1..count {
-        // One project each: records of the same project would share a line.
-        let project = app
-            .store
-            .as_ref()
-            .unwrap()
-            .save_project(timeschedule_core::diary::ProjectInput {
-                id: None,
-                title: "TS".into(),
-                description: String::new(),
-                repo_path: String::new(),
-            })
-            .unwrap();
-        let mut form = Form::new(Kind::Entry, app.selected.to_string(), Some(project.id));
+        // No project: each record keeps its own line and title.
+        let mut form = Form::new(Kind::Entry, app.selected.to_string(), None);
         form.title = format!("기록{index}");
         form.save(app.store.as_ref().unwrap()).unwrap();
     }
@@ -130,13 +142,16 @@ fn day_cell_names_hidden_items_instead_of_a_count() {
             Size::new(240., 45.),
         );
         for item in &day.items[..2] {
-            assert!(labels.iter().any(|(s, _)| s == &item.title), "{labels:?}");
+            let shown = crate::calendar_ui::cell_title(item);
+            assert!(labels.iter().any(|(s, _)| s == shown), "{labels:?}");
         }
+        // The overflow line names a project's records by the project only.
         let rest = day.items[2..]
             .iter()
-            .map(|i| i.title.as_str())
+            .map(crate::calendar_ui::cell_title)
             .collect::<Vec<_>>()
             .join(" · ");
+        assert!(rest.ends_with("TS") && !rest.contains("연동기록"), "{rest}");
         let summary = labels
             .iter()
             .find(|(s, _)| s == &rest)
@@ -151,7 +166,7 @@ fn day_cell_names_hidden_items_instead_of_a_count() {
 }
 
 #[test]
-fn day_cell_record_is_one_line_with_project_prefix() {
+fn day_cell_project_record_is_one_line_of_name_then_count() {
     let app = calendar_record_fixture();
     let day = selected_day(&app);
     for quick in [false, true] {
@@ -159,14 +174,11 @@ fn day_cell_record_is_one_line_with_project_prefix() {
             crate::calendar_ui::day_items(&app, Some(day), 160., 60., 12., quick),
             Size::new(160., 60.),
         );
-        let project = labels.iter().find(|(s, _)| s == "TS").expect("prefix").1;
-        let title = labels
-            .iter()
-            .find(|(s, _)| s == "연동기록")
-            .expect("title")
-            .1;
-        assert!((project.y - title.y).abs() < 1., "{project:?} {title:?}");
-        assert!(project.x < title.x);
+        let project = labels.iter().find(|(s, _)| s == "TS").expect("name").1;
+        let count = labels.iter().find(|(s, _)| s == "+ 1").expect("count").1;
+        assert!((project.y - count.y).abs() < 1., "{project:?} {count:?}");
+        assert!(project.x < count.x);
+        assert_eq!(labels.len(), 2, "no record title: {labels:?}");
     }
 }
 
@@ -191,6 +203,8 @@ fn day_cell_wraps_a_cut_title_when_room_remains() {
     let app = calendar_record_fixture();
     let mut day = selected_day(&app).clone();
     let title = "아주 긴 작업 제목이 날짜 칸 하나에 다 들어가지 않는 경우";
+    // A record without a project line shows its own title.
+    day.items[0].project_id = None;
     day.items[0].title = title.into();
     for quick in [false, true] {
         let labels = calendar_text_bounds(
@@ -238,7 +252,7 @@ fn day_cell_shows_completed_line_when_room() {
         crate::calendar_ui::day_items(&app, Some(&day), 160., 60., 12., true),
         Size::new(160., 60.),
     );
-    assert!(labels.iter().any(|s| s == "연동기록"), "{labels:?}");
+    assert!(labels.iter().any(|s| s == "TS"), "{labels:?}");
     assert!(labels.iter().any(|s| s == "완료 2"), "{labels:?}");
     day.items.clear();
     day.total = 2;
@@ -254,6 +268,7 @@ fn day_cell_keeps_completed_line_before_wrapping_titles() {
     let mut app = calendar_record_fixture();
     app.preferences.widget.line_gap = 1;
     let mut day = selected_day(&app).clone();
+    day.items[0].project_id = None;
     day.items[0].title = "아주 긴 작업 제목이 날짜 칸 하나에 다 들어가지 않는 경우".into();
     day.total += 2;
     day.completed = 2;
@@ -491,7 +506,7 @@ fn day_cell_summary_opens_the_day_from_its_own_window() {
     let date = app.selected;
     let rest = day.items[2..]
         .iter()
-        .map(|i| i.title.as_str())
+        .map(crate::calendar_ui::cell_title)
         .collect::<Vec<_>>()
         .join(" · ");
     let size = Size::new(240., 45.);
@@ -578,7 +593,7 @@ fn default_diary_and_widget_cells_show_every_record_of_a_busy_day() {
     let titles: Vec<_> = selected_day(&app)
         .items
         .iter()
-        .map(|i| i.title.clone())
+        .map(|i| crate::calendar_ui::cell_title(i).to_string())
         .collect();
     assert_eq!(titles.len(), 3);
     for (view, size) in [
@@ -3716,7 +3731,8 @@ fn one_projects_records_share_a_line_and_open_as_cards() {
         crate::calendar_ui::day_items(&app, Some(&day), 200., 60., 12., true),
         Size::new(200., 60.),
     );
-    assert!(labels.iter().any(|s| s == "+1"), "{labels:?}");
+    assert!(labels.iter().any(|s| s == "+ 2"), "{labels:?}");
+    assert!(!labels.iter().any(|s| s.contains("기록")), "{labels:?}");
 
     run_message(&mut app, open_message(&item, false));
     assert!(app.calendar.detail.is_none());
@@ -3823,4 +3839,433 @@ fn cards_belong_to_the_window_they_were_opened_in() {
     assert!(app.calendar.group.is_none());
     run_task(&mut app, loading);
     assert!(app.editor.is_none());
+}
+
+#[test]
+fn automatic_record_card_and_detail_show_its_timeline_and_original() {
+    use timeschedule_core::timeline::RecordCommit;
+    let mut app = fixture();
+    let store = app.store.clone().unwrap();
+    let hash = "a".repeat(40);
+    let mut record = crate::record_inbox::tests::sample();
+    record.schema_version = 3;
+    record.delivery_state = "local".into();
+    record.space_url.clear();
+    record.summary = "작업 배경과 결론".into();
+    record.detail = "작업 배경과 결론\n\n긴 상세의 9번째 줄".into();
+    record.status = "verified".into();
+    record.started_at = Some("2026-10-31T00:05:00Z".into());
+    record.completed_at = Some("2026-10-31T18:30:00+09:00".into());
+    record.commits = vec![RecordCommit {
+        hash: hash.clone(),
+        committed_at: Some("2026-10-31T09:00:00Z".into()),
+        subject: "시각 저장".into(),
+        url: format!("https://github.com/o/r/commit/{hash}"),
+    }];
+    let id = store
+        .apply_project_record(&record)
+        .unwrap()
+        .entry_id
+        .unwrap();
+    let entry = store.get_entry(&id).unwrap();
+    app.snapshot = worker::snapshot(&store, &app.scope()).unwrap();
+    let page = store
+        .project_day_page(&entry.date, entry.project_id.as_ref().unwrap(), 0, 50)
+        .unwrap();
+    app.calendar.group = Some(crate::calendar_ui::Group {
+        date: entry.date.clone(),
+        project_id: entry.project_id.clone().unwrap(),
+        quick: false,
+        entries: page.entries,
+        total: page.total,
+        loading_more: false,
+        timelines: store.entry_timelines(&[id.clone()]).unwrap(),
+        unfolded: Default::default(),
+    });
+    // The user's reading order: title, start, the work, completion, then the
+    // commits and the original. Checked on the real laid-out text.
+    let order = [
+        "원인과 검증 범위",
+        "작업 시작 · 2026-10-31 09:05",
+        "작업 배경과 결론",
+        "완료 · 2026-10-31 18:30 · 확인한 범위 검증 완료",
+        "커밋 · 2026-10-31 18:00 · aaaaaaa · 시각 저장",
+        "커밋 열기",
+        "원본 열기",
+    ];
+    fn in_order(labels: &[String], expected: &[&str]) {
+        let at: Vec<usize> = expected
+            .iter()
+            .map(|s| {
+                labels
+                    .iter()
+                    .position(|l| l.as_str() == *s)
+                    .unwrap_or_else(|| panic!("{s}: {labels:?}"))
+            })
+            .collect();
+        assert!(
+            at.windows(2).all(|w| w[0] < w[1]),
+            "{expected:?} in {labels:?}"
+        );
+    }
+    let cards = calendar_texts(crate::calendar_ui::group_view(&app), Size::new(620., 900.));
+    in_order(&cards, &order);
+    assert!(cards.iter().any(|s| s == "전체 보기"), "{cards:?}");
+    assert!(
+        !cards.iter().any(|s| s.contains("9번째")),
+        "folded to the summary"
+    );
+    assert_eq!(
+        cards
+            .iter()
+            .filter(|s| s.as_str() == "작업 배경과 결론")
+            .count(),
+        1,
+        "the summary is shown once"
+    );
+    run_message(
+        &mut app,
+        crate::calendar_ui::message(crate::calendar_ui::Action::ToggleCard(id.clone())),
+    );
+    let unfolded = calendar_texts(crate::calendar_ui::group_view(&app), Size::new(620., 900.));
+    let body = unfolded.iter().position(|s| s.contains("9번째")).unwrap();
+    let start = unfolded.iter().position(|s| s == order[1]).unwrap();
+    let done = unfolded.iter().position(|s| s == order[3]).unwrap();
+    assert!(start < body && body < done, "{unfolded:?}");
+
+    // The single detail uses the same order.
+    app.calendar.group = None;
+    app.calendar.detail =
+        Some(worker::hydrate_form(&store, Form::entry(store.get_entry(&id).unwrap())).unwrap());
+    let detail = calendar_texts(crate::calendar_ui::detail_view(&app), Size::new(620., 900.));
+    in_order(&detail, &[order[0], order[1], order[3], order[4], order[6]]);
+    let body = detail.iter().position(|s| s.contains("9번째")).unwrap();
+    assert!(
+        detail.iter().position(|s| s == order[1]).unwrap() < body
+            && body < detail.iter().position(|s| s == order[3]).unwrap(),
+        "{detail:?}"
+    );
+    app.calendar.detail = None;
+
+    // The project and records lists fold to the start and the chosen summary,
+    // and unfold to the full text in the same order, without repeating it.
+    let row = store
+        .list_entries(&entry.date, &entry.date, None, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.id == id)
+        .unwrap();
+    let folded = calendar_texts(crate::views::entry_card(&app, &row), Size::new(620., 900.));
+    in_order(
+        &folded,
+        &["+ 원인과 검증 범위", order[1], "작업 배경과 결론"],
+    );
+    assert!(
+        !folded
+            .iter()
+            .any(|s| s.contains("9번째") || s.starts_with("완료")),
+        "{folded:?}"
+    );
+    run_message(&mut app, Message::ToggleEntry(id.clone()));
+    let open = calendar_texts(crate::views::entry_card(&app, &row), Size::new(620., 900.));
+    in_order(
+        &open,
+        &[
+            "− 원인과 검증 범위",
+            order[1],
+            order[3],
+            order[4],
+            order[6],
+            "기록 수정",
+        ],
+    );
+    let body = open.iter().position(|s| s.contains("9번째")).unwrap();
+    assert!(open.iter().position(|s| s == order[1]).unwrap() < body);
+    assert!(body < open.iter().position(|s| s == order[3]).unwrap());
+    assert!(
+        !open.iter().any(|s| s == "작업 배경과 결론"),
+        "summary not repeated: {open:?}"
+    );
+    assert!(
+        !open.iter().any(|s| s.starts_with("space-work:")),
+        "{open:?}"
+    );
+
+    // Pending work shows its status, never an invented completion time.
+    record.revision = 2;
+    record.status = "verification_pending".into();
+    record.completed_at = None;
+    store.apply_project_record(&record).unwrap();
+    let pending =
+        crate::calendar_ui::timeline_lines(&entry.date, &store.entry_timeline(&id).unwrap());
+    assert!(
+        pending.contains(&"현재 상태 · 검증 대기".to_string()),
+        "{pending:?}"
+    );
+    assert!(!pending.iter().any(|l| l.starts_with("완료")));
+}
+
+#[test]
+fn a_start_restored_on_opening_stays_after_folding_the_card_again() {
+    let dir = crate::record_inbox::tests::TestDir::new();
+    let state = dir.0.join("state");
+    let receipt = state.join("diary-starts").join("r");
+    std::fs::create_dir_all(&receipt).unwrap();
+    let node = dir.0.join("node.exe");
+    let script = dir.0.join("project-records.mjs");
+    std::fs::write(&node, "").unwrap();
+    std::fs::write(&script, "").unwrap();
+    crate::record_sync::register(&dir.0, &node, &script, &state).unwrap();
+    let mut app = fixture();
+    app.data_dir = dir.0.clone();
+    let store = app.store.clone().unwrap();
+    let mut record = crate::record_inbox::tests::sample();
+    record.work_id = uuid::Uuid::new_v4().to_string();
+    let id = store
+        .apply_project_record(&record)
+        .unwrap()
+        .entry_id
+        .unwrap();
+    std::fs::write(
+        receipt.join("work.json"),
+        format!(r#"{{"workId":"{}"}}"#, record.work_id),
+    )
+    .unwrap();
+    std::fs::write(
+        receipt.join("start.json"),
+        r#"{"at":"2026-10-31T00:05:00Z","owner":"me@example.invalid"}"#,
+    )
+    .unwrap();
+    // The list row was read before opening restored the start.
+    let row = store
+        .list_entries(&record.date, &record.date, None, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.id == id)
+        .unwrap();
+    assert_eq!(row.timeline.started_at, None);
+    let started = "작업 시작 · 2026-10-31 09:05";
+    let card =
+        |app: &App| calendar_texts(crate::views::entry_card(app, &row), Size::new(620., 900.));
+    let before = card(&app);
+    assert!(!before.iter().any(|s| s == started), "{before:?}");
+
+    run_message(&mut app, Message::ToggleEntry(id.clone()));
+    let open = card(&app);
+    assert!(
+        open.iter().any(|s| s == started),
+        "restored on opening: {open:?}"
+    );
+
+    // Folded again, the card keeps the start it just showed, not unknown.
+    run_message(&mut app, Message::ToggleEntry(id.clone()));
+    assert!(!app.expanded.contains(&id));
+    let folded = card(&app);
+    assert!(folded.iter().any(|s| s == started), "{folded:?}");
+    assert!(
+        !folded
+            .iter()
+            .any(|s| s.starts_with("작업 시작") && s.ends_with("미상")),
+        "{folded:?}"
+    );
+}
+
+#[test]
+fn hand_written_record_shows_its_typed_time_or_unknown() {
+    let app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let id = selected_day(&app).items[0].id.clone();
+    let timeline = store.entry_timeline(&id).unwrap();
+    let date = app.selected.to_string();
+    assert_eq!(
+        crate::calendar_ui::timeline_lines(&date, &timeline),
+        vec!["기록 시각 · 미상".to_string()]
+    );
+    let mut form =
+        worker::hydrate_form(&store, Form::entry(store.get_entry(&id).unwrap())).unwrap();
+    form.time = "07:05".into();
+    form.save(&store).unwrap();
+    assert_eq!(
+        crate::calendar_ui::timeline_lines(&date, &store.entry_timeline(&id).unwrap()),
+        vec![format!("기록 시각 · {date} 07:05")]
+    );
+}
+
+#[test]
+fn project_page_groups_the_same_records_by_date_newest_first() {
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let project = store.list_projects().unwrap()[0].id.clone();
+    let earlier = (app.selected - Duration::days(1)).to_string();
+    let today = app.selected.to_string();
+    for (date, title) in [(&earlier, "전날기록"), (&today, "같은날")] {
+        let mut form = Form::new(Kind::Entry, date.clone(), Some(project.clone()));
+        form.title = title.into();
+        form.save(&store).unwrap();
+    }
+    let _ = app.update(Message::Project(Some(project.clone())));
+    app.snapshot = worker::snapshot(&store, &app.scope()).unwrap();
+    let groups = crate::views::date_groups(&app.snapshot.entries);
+    let shape: Vec<_> = groups
+        .iter()
+        .map(|(d, e)| (d.to_string(), e.len()))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![(app.selected.to_string(), 2), (earlier.clone(), 1)],
+        "newest date first, each count is its cards"
+    );
+    let labels = calendar_texts(crate::views::projects(&app), Size::new(900., 1400.));
+    let heading = format!("{} · 2건", app.selected);
+    let at = |s: &str| {
+        labels
+            .iter()
+            .position(|l| l == s)
+            .unwrap_or_else(|| panic!("{s}: {labels:?}"))
+    };
+    assert!(at(&heading) < at(&format!("{earlier} · 1건")));
+}
+
+#[test]
+fn a_day_of_51_records_counts_all_and_reads_the_rest_a_step_later() {
+    use crate::calendar_ui::{message, open_message, Action};
+    use std::collections::HashSet;
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let project = store.list_projects().unwrap()[0].id.clone();
+    // The fixture's record and 50 more: one past the cards' 50-record step.
+    for n in 1..=50 {
+        let mut form = Form::new(Kind::Entry, app.selected.to_string(), Some(project.clone()));
+        form.title = format!("묶음 {n}");
+        form.save(&store).unwrap();
+    }
+    run_message(&mut app, Message::Load);
+    let item = selected_day(&app)
+        .items
+        .iter()
+        .find(|i| i.project_id.as_ref() == Some(&project))
+        .unwrap()
+        .clone();
+    assert_eq!(item.count, 51);
+    run_message(&mut app, open_message(&item, false));
+    let group = app.calendar.group.as_ref().unwrap();
+    assert_eq!((group.entries.len(), group.total), (50, 51));
+    let date = app.selected.to_string();
+    let labels = calendar_texts(crate::calendar_ui::group_view(&app), Size::new(620., 900.));
+    assert!(
+        labels.iter().any(|s| *s == format!("{date} · 기록 51개")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|s| s == "기록 더 보기 · 50/51개"),
+        "{labels:?}"
+    );
+
+    run_message(&mut app, message(Action::GroupMore));
+    let group = app.calendar.group.as_ref().unwrap();
+    let ids: HashSet<_> = group.entries.iter().map(|e| e.id.clone()).collect();
+    assert_eq!((group.entries.len(), ids.len(), group.total), (51, 51, 51));
+    assert!(group
+        .entries
+        .iter()
+        .all(|e| group.timelines.contains_key(&e.id)));
+    let labels = calendar_texts(crate::calendar_ui::group_view(&app), Size::new(620., 900.));
+    assert!(
+        !labels.iter().any(|s| s.starts_with("기록 더 보기")),
+        "{labels:?}"
+    );
+    // A refresh brings back every card already read, each once.
+    run_message(&mut app, Message::Load);
+    let group = app.calendar.group.as_ref().unwrap();
+    let again: HashSet<_> = group.entries.iter().map(|e| e.id.clone()).collect();
+    assert_eq!((group.entries.len(), again), (51, ids));
+}
+
+#[test]
+fn project_heading_counts_every_record_of_a_date_past_the_first_200() {
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let project = store.list_projects().unwrap()[0].id.clone();
+    let today = app.selected.to_string();
+    // The fixture's record and 200 more on one date.
+    for n in 1..=200 {
+        let mut form = Form::new(Kind::Entry, today.clone(), Some(project.clone()));
+        form.title = format!("하루 {n}");
+        form.save(&store).unwrap();
+    }
+    run_message(&mut app, Message::Project(Some(project.clone())));
+    assert_eq!(app.snapshot.entries.len(), 200);
+    assert!(app.more);
+    let labels = calendar_texts(crate::views::projects(&app), Size::new(900., 1400.));
+    let partial = format!("{today} · 201건 · 200건 표시 · 더 불러오면 이어집니다");
+    assert!(
+        labels.iter().any(|s| *s == partial),
+        "{:?}",
+        &labels[..8.min(labels.len())]
+    );
+    run_message(&mut app, Message::More);
+    let ids: std::collections::HashSet<_> =
+        app.snapshot.entries.iter().map(|e| e.id.clone()).collect();
+    assert_eq!((app.snapshot.entries.len(), ids.len()), (201, 201));
+    let labels = calendar_texts(crate::views::projects(&app), Size::new(900., 1400.));
+    assert!(labels.iter().any(|s| *s == format!("{today} · 201건")));
+}
+
+#[test]
+fn a_project_line_stays_on_one_line_in_a_narrow_cell_of_any_height() {
+    let app = calendar_record_fixture();
+    let mut day = selected_day(&app).clone();
+    day.items[0].project_short_name = "아주 긴 프로젝트 이름입니다".into();
+    day.items[0].count = 12;
+    for height in [20., 60., 400.] {
+        for quick in [false, true] {
+            let labels = calendar_text_bounds(
+                crate::calendar_ui::day_items(&app, Some(&day), 90., height, 12., quick),
+                Size::new(90., height),
+            );
+            let count = labels
+                .iter()
+                .find(|(s, _)| s == "+ 12")
+                .unwrap_or_else(|| panic!("{labels:?}"));
+            // Only the name and its count: no second line of the name.
+            assert_eq!(labels.len(), 2, "{height} {quick}: {labels:?}");
+            let name = labels.iter().find(|(s, _)| s != "+ 12").unwrap();
+            assert!(name.0.ends_with('…'), "{labels:?}");
+            assert!((name.1.y - count.1.y).abs() < 0.5, "same line: {labels:?}");
+        }
+    }
+}
+
+#[test]
+fn only_a_hand_written_record_offers_a_typed_time() {
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let id = selected_day(&app).items[0].id.clone();
+    let label = "기록 시각 (한국시간 24시간제 HH:mm, 비우면 미상)";
+    let fields = |app: &App| calendar_texts(crate::views::editor_view(app), Size::new(620., 1400.));
+    let form = worker::hydrate_form(&store, Form::entry(store.get_entry(&id).unwrap())).unwrap();
+    let _ = app.open_form(form);
+    assert!(fields(&app).iter().any(|s| s == label));
+    app.editor = None;
+    // An automatic record keeps its begin receipt; no typed time is offered.
+    let mut record = crate::record_inbox::tests::sample();
+    record.date = app.selected.to_string();
+    let auto = store
+        .apply_project_record(&record)
+        .unwrap()
+        .entry_id
+        .unwrap();
+    let mut form =
+        worker::hydrate_form(&store, Form::entry(store.get_entry(&auto).unwrap())).unwrap();
+    assert!(!form.takes_manual_time());
+    let _ = app.open_form(form.clone());
+    assert!(!fields(&app).iter().any(|s| s == label));
+    app.editor = None;
+    // Even a typed value sent anyway is not stored for it.
+    form.time = "07:00".into();
+    form.title = "고친 제목".into();
+    form.save(&store).unwrap();
+    let t = store.entry_timeline(&auto).unwrap();
+    assert_eq!(t.manual_time, None);
+    assert!(crate::calendar_ui::timeline_lines(&record.date, &t)[0].starts_with("작업 시작 · "));
 }

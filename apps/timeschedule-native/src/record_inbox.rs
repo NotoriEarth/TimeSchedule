@@ -240,6 +240,9 @@ pub(crate) mod tests {
             status: "verification_pending".into(),
             delivery_state: String::new(),
             detail: String::new(),
+            started_at: None,
+            completed_at: None,
+            commits: vec![],
         }
     }
 
