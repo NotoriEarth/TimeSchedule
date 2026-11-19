@@ -31,12 +31,15 @@ pub fn panel<'a>(app: &'a App, project: &str) -> Element<'a, Message> {
         .chat_review
         .review
         .as_ref()
-        .filter(|r| r.project == project);
-    let mut panel = column![text("채팅에서 경험 검토").size(16)].spacing(6);
+        .filter(|r| r.project() == project);
+    let mut panel = column![text("채팅에서 경험 검토 · 로컬 모델").size(16)].spacing(6);
     if app.busy || app.loading {
         return panel.push(quiet("불러오는 중…")).into();
     }
-    let selected = review.map(|r| r.chat.clone());
+    panel = panel.push(quiet(
+        "채팅을 선택하면 이 PC의 Ollama gemma4가 원문 근거를 검토합니다.",
+    ));
+    let selected = review.map(|r| r.chat().clone());
     panel = panel.push(
         pick_list(app.snapshot.reviewable_chats.as_slice(), selected, |chat| {
             msg(Action::Choose(chat))
@@ -46,21 +49,21 @@ pub fn panel<'a>(app: &'a App, project: &str) -> Element<'a, Message> {
     if let Some(r) = review {
         panel = panel.push(crate::views::control(
             "후보 다시 읽기",
-            msg(Action::Choose(r.chat.clone())),
+            msg(Action::Choose(r.chat().clone())),
         ));
-        if r.candidates.is_empty() {
+        if r.candidates().is_empty() {
             return panel
                 .push(quiet(
                     "설계 판단이나 문제 해결 과정을 뒷받침하는 대화 근거가 부족합니다.",
                 ))
                 .into();
         }
-        for c in &r.candidates {
+        for c in r.candidates() {
             let kind = c.kind;
             panel = panel
                 .push(
                     checkbox(app.chat_review.checked.contains(&kind))
-                        .label(format!("{} 후보 확인", kind.label()))
+                        .label(format!("{} · {}", kind.label(), c.title))
                         .on_toggle(move |v| msg(Action::Check(kind, v))),
                 )
                 .push(scrollable(text(&c.body).size(13)).height(135));
@@ -79,8 +82,17 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
             app.busy = false;
             if app.project.as_ref() == Some(&project) {
                 match result {
-                    Ok(r) => app.chat_review.review = Some(r),
-                    Err(err) => app.error = err,
+                    Ok(r) => {
+                        app.notice = format!(
+                            "모델 후보 {}건 · 인용문을 확인하고 저장할 항목을 선택하세요.",
+                            r.candidates().len()
+                        );
+                        app.chat_review.review = Some(r);
+                    }
+                    Err(err) => {
+                        app.notice.clear();
+                        app.error = err;
+                    }
                 }
             }
         }
@@ -110,17 +122,18 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
             }
             app.chat_review = State::default();
             app.busy = true;
+            app.notice = "로컬 모델이 선택한 채팅을 읽고 있습니다.".into();
             let id = project.clone();
             return worker::job(
                 store,
-                move |s| s.review_chat(&id, &chat.id),
+                move |s| s.review_chat_with_model(&id, &chat.id),
                 move |r| msg(Action::Read(project.clone(), r)),
             );
         }
         Action::Check(kind, on) => {
             if app.chat_review.review.as_ref().is_some_and(|r| {
-                app.project.as_ref() == Some(&r.project)
-                    && r.candidates.iter().any(|c| c.kind == kind)
+                app.project.as_deref() == Some(r.project())
+                    && r.candidates().iter().any(|c| c.kind == kind)
             }) {
                 app.chat_review.checked.retain(|k| *k != kind);
                 if on {
@@ -133,10 +146,12 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
             else {
                 return Task::none();
             };
-            if app.project.as_ref() != Some(&review.project) || app.chat_review.checked.is_empty() {
+            if app.project.as_deref() != Some(review.project())
+                || app.chat_review.checked.is_empty()
+            {
                 return Task::none();
             }
-            let project = review.project.clone();
+            let project = review.project().to_owned();
             let selected = app.chat_review.checked.clone();
             app.busy = true;
             return worker::job(
