@@ -58,7 +58,24 @@ pub struct EntrySummary {
     pub kind: String,
     pub title: String,
     pub updated_at: String,
+    /// An automatic record's summary chosen from its original, cut for a
+    /// folded list. Empty for every other record; no body is read for a list.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub summary: String,
+    /// Only the reference-time part of the record's timeline (typed time,
+    /// source time, begin receipt). Commits and status are read when opened.
+    #[serde(skip)]
+    pub timeline: crate::timeline::EntryTimeline,
 }
+/// One page of a project's records of one day, and how many there are.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DayEntries {
+    pub entries: Vec<Entry>,
+    pub total: u32,
+}
+/// Records one step of a day's cards reads.
+pub const DAY_PAGE: u32 = 50;
+const LIST_SUMMARY_CHARS: usize = 240;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {
@@ -80,6 +97,8 @@ pub struct ImportResult {
 pub struct GitCommit {
     hash: String,
     date: String,
+    /// The committer time with its offset, exactly as Git reports it.
+    committed_at: Option<String>,
     message: String,
 }
 
@@ -105,6 +124,17 @@ pub(crate) fn entry_row(row: &Row<'_>) -> rusqlite::Result<Entry> {
         source_body: row.get(8)?,
         updated_at: row.get(9)?,
     })
+}
+/// A folded list's summary: whitespace runs as single spaces, cut with `…`.
+/// `more` says the stored text went on past what was read.
+fn list_summary(value: &str, more: bool) -> String {
+    let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = flat.chars();
+    let mut cut: String = chars.by_ref().take(LIST_SUMMARY_CHARS).collect();
+    if chars.next().is_some() || (more && !cut.is_empty()) {
+        cut.push('…');
+    }
+    cut
 }
 fn range(from: &str, to: &str) -> Result<(), String> {
     validate_date(from)?;
@@ -168,20 +198,71 @@ impl Storage {
             validate_id(id)?;
         }
         let c = self.connection()?;
-        let mut q=c.prepare("SELECT id,project_id,date,kind,title,updated_at FROM diary_entries WHERE date>=?1 AND date<=?2 AND (?3 IS NULL OR project_id=?3) ORDER BY date DESC,updated_at DESC,id LIMIT 200 OFFSET ?4").map_err(database_error)?;
+        let mut q = c
+            .prepare(
+                "SELECT e.id,e.project_id,e.date,e.kind,e.title,e.updated_at,
+                 CASE WHEN v.work_id IS NOT NULL THEN substr(e.source_body,1,?5) ELSE '' END,
+                 t.time,v.occurred_at,v.work_id,v.started_at,
+                 (v.entry_id IS NOT NULL OR e.source_ref IS NOT NULL),
+                 (v.work_id IS NOT NULL AND length(e.source_body)>?5)
+                 FROM diary_entries e LEFT JOIN entry_evidence v ON v.entry_id=e.id LEFT JOIN entry_time t ON t.entry_id=e.id
+                 WHERE e.date>=?1 AND e.date<=?2 AND (?3 IS NULL OR e.project_id=?3)
+                 ORDER BY e.date DESC,e.updated_at DESC,e.id LIMIT 200 OFFSET ?4",
+            )
+            .map_err(database_error)?;
         let rows = q
-            .query_map(params![from, to, project_id, offset], |r| {
-                Ok(EntrySummary {
-                    id: r.get(0)?,
-                    project_id: r.get(1)?,
-                    date: r.get(2)?,
-                    kind: r.get(3)?,
-                    title: r.get(4)?,
-                    updated_at: r.get(5)?,
-                })
-            })
+            .query_map(
+                params![from, to, project_id, offset, LIST_SUMMARY_CHARS as i64 * 4],
+                |r| {
+                    let sourced: bool = r.get(11)?;
+                    let manual_time: Option<String> = r.get(7)?;
+                    Ok(EntrySummary {
+                        id: r.get(0)?,
+                        project_id: r.get(1)?,
+                        date: r.get(2)?,
+                        kind: r.get(3)?,
+                        title: r.get(4)?,
+                        updated_at: r.get(5)?,
+                        summary: list_summary(&r.get::<_, String>(6)?, r.get(12)?),
+                        timeline: crate::timeline::EntryTimeline {
+                            manual_time: if sourced { None } else { manual_time },
+                            sourced,
+                            occurred_at: r.get(8)?,
+                            work_id: r.get(9)?,
+                            started_at: r.get(10)?,
+                            ..Default::default()
+                        },
+                    })
+                },
+            )
             .map_err(database_error)?
             .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(rows)
+    }
+    /// How many records each date holds between the first and last date of
+    /// loaded list rows: a date's heading counts all of them, not just the
+    /// ones a page happened to load.
+    pub fn entry_day_totals(
+        &self,
+        from: &str,
+        to: &str,
+        project_id: Option<&str>,
+    ) -> Result<std::collections::HashMap<String, u32>, String> {
+        range(from, to)?;
+        if let Some(id) = project_id {
+            validate_id(id)?;
+        }
+        let c = self.connection()?;
+        let mut q = c
+            .prepare("SELECT date,count(*) FROM diary_entries WHERE date>=?1 AND date<=?2 AND (?3 IS NULL OR project_id=?3) GROUP BY date")
+            .map_err(database_error)?;
+        let rows = q
+            .query_map(params![from, to, project_id], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))
+            })
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
             .map_err(database_error)?;
         Ok(rows)
     }
@@ -189,18 +270,41 @@ impl Storage {
         validate_id(id)?;
         self.connection()?.query_row("SELECT id,project_id,date,kind,title,body,source_url,source_ref,source_body,updated_at FROM diary_entries WHERE id=?1", [id], entry_row).map_err(database_error)
     }
-    /// The records one calendar line stands for, latest change first.
+    /// The first step of the records one calendar line stands for, latest
+    /// change first. See [`Storage::project_day_page`] for the rest.
     pub fn project_day_entries(&self, date: &str, project_id: &str) -> Result<Vec<Entry>, String> {
+        Ok(self
+            .project_day_page(date, project_id, 0, DAY_PAGE)?
+            .entries)
+    }
+    /// A step of the records one calendar line stands for, latest change first
+    /// with the ID as a stable tie-break, and the exact count of all of them,
+    /// read under one lock so the count matches what can be paged through.
+    pub fn project_day_page(
+        &self,
+        date: &str,
+        project_id: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<DayEntries, String> {
         validate_date(date)?;
         validate_id(project_id)?;
+        let limit = limit.clamp(1, 200);
         let c = self.connection()?;
-        let mut q=c.prepare("SELECT id,project_id,date,kind,title,body,source_url,source_ref,source_body,updated_at FROM diary_entries WHERE date=?1 AND project_id=?2 ORDER BY updated_at DESC,id LIMIT 50").map_err(database_error)?;
-        let rows = q
-            .query_map(params![date, project_id], entry_row)
+        let total: u32 = c
+            .query_row(
+                "SELECT count(*) FROM diary_entries WHERE date=?1 AND project_id=?2",
+                params![date, project_id],
+                |r| r.get(0),
+            )
+            .map_err(database_error)?;
+        let mut q=c.prepare("SELECT id,project_id,date,kind,title,body,source_url,source_ref,source_body,updated_at FROM diary_entries WHERE date=?1 AND project_id=?2 ORDER BY updated_at DESC,id LIMIT ?3 OFFSET ?4").map_err(database_error)?;
+        let entries = q
+            .query_map(params![date, project_id, limit, offset], entry_row)
             .map_err(database_error)?
             .collect::<Result<_, _>>()
             .map_err(database_error)?;
-        Ok(rows)
+        Ok(DayEntries { entries, total })
     }
     pub fn save_entry(&self, input: EntryInput) -> Result<Entry, String> {
         let title = validated_title(&input.title)?;
@@ -209,6 +313,7 @@ impl Storage {
         validate_url(&input.source_url)?;
         if ![
             "note",
+            "design",
             "development",
             "troubleshooting",
             "commit",
@@ -284,17 +389,32 @@ impl Storage {
                 format!("{remote}/commit/{}", commit.hash)
             };
             added+=tx.execute("INSERT INTO diary_entries(id,project_id,date,kind,title,body,source_url,source_ref,source_body,updated_at) VALUES(?1,?2,?3,'commit',?4,?5,?6,?7,?5,?8) ON CONFLICT(source_ref) DO NOTHING",params![record_id(None)?,project_id,commit.date,title,body,url,source_ref,timestamp()]).map_err(database_error)?;
+            // The commit's own time is evidence beside the editable copy. A record
+            // collected before times were kept gains it here; a known time stays.
+            let evidence = vec![crate::timeline::RecordCommit {
+                hash: commit.hash.clone(),
+                committed_at: commit.committed_at.clone(),
+                subject: crate::timeline::commit_subject(&commit.message),
+                url: String::new(),
+            }];
+            tx.execute(
+                "INSERT INTO entry_evidence(entry_id,occurred_at,commits) SELECT id,?2,?3 FROM diary_entries WHERE source_ref=?1
+                 ON CONFLICT(entry_id) DO UPDATE SET occurred_at=excluded.occurred_at,commits=excluded.commits
+                 WHERE entry_evidence.occurred_at IS NULL AND excluded.occurred_at IS NOT NULL",
+                params![source_ref, commit.committed_at, crate::timeline::commits_json(&evidence)?],
+            )
+            .map_err(database_error)?;
         }
         tx.commit().map_err(database_error)?;
         Ok(added)
     }
 }
 
-fn git(path: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(path: &Path, args: &[&str]) -> Result<String, String> {
     git_with_timeout(path, args, std::time::Duration::from_secs(30))
 }
 
-fn git_with_timeout(
+pub(crate) fn git_with_timeout(
     path: &Path,
     args: &[&str],
     timeout: std::time::Duration,
@@ -538,7 +658,7 @@ fn read_git(path: &str) -> Result<(String, String, Vec<GitCommit>), String> {
             "log",
             "--no-show-signature",
             "--max-count=500",
-            "--format=%H%x00%cs%x00%B%x00",
+            "--format=%H%x00%cI%x00%B%x00",
         ],
         remaining()?,
     )?;
@@ -552,9 +672,14 @@ fn read_git(path: &str) -> Result<(String, String, Vec<GitCommit>), String> {
         if !(hash.len() == 40 || hash.len() == 64) || !hash.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err("Git 커밋 정보를 해석하지 못했습니다.".into());
         }
+        let committed_at = fields[1].trim();
+        // The record's date is the commit's date in Korea, like every other time shown.
+        let date = crate::timeline::kst_date(committed_at)
+            .ok_or("Git 커밋 시각을 해석하지 못했습니다.")?;
         commits.push(GitCommit {
-            hash: hash.into(),
-            date: fields[1].into(),
+            hash: hash.to_ascii_lowercase(),
+            date,
+            committed_at: Some(committed_at.into()),
             message: fields[2].into(),
         });
     }
@@ -736,6 +861,7 @@ mod tests {
         let commits = vec![GitCommit {
             hash: "a".repeat(40),
             date: "2026-12-31".into(),
+            committed_at: Some("2026-12-31T10:00:00+09:00".into()),
             message: "원본 커밋\n본문".into(),
         }];
         assert_eq!(
@@ -787,6 +913,12 @@ mod tests {
         assert_eq!(remote, "");
         assert_eq!(commits.len(), 1);
         assert!(commits[0].message.contains("한국어"));
+        let at = commits[0].committed_at.as_deref().unwrap();
+        assert!(crate::timeline::parse_instant(at).is_ok(), "{at}");
+        assert_eq!(
+            crate::timeline::kst_date(at).as_deref(),
+            Some(commits[0].date.as_str())
+        );
         assert!(path.starts_with(std::env::temp_dir()));
         std::fs::remove_dir_all(path).unwrap();
     }
@@ -798,6 +930,7 @@ mod tests {
         let commits = vec![GitCommit {
             hash: "b".repeat(40),
             date: "2026-12-31".into(),
+            committed_at: None,
             message: "원문\n".into(),
         }];
         storage.store_commits(&p.id, "repo", "", &commits).unwrap();
@@ -826,6 +959,133 @@ mod tests {
     }
 
     #[test]
+    fn collected_commit_time_is_evidence_backfilled_once_and_never_overwritten() {
+        let storage = Storage::open(":memory:").unwrap();
+        let p = storage.save_project(project()).unwrap();
+        let hash = "d".repeat(40);
+        let mut commits = vec![GitCommit {
+            hash: hash.clone(),
+            date: "2026-12-31".into(),
+            committed_at: None,
+            message: "제목 줄\n\n본문".into(),
+        }];
+        storage.store_commits(&p.id, "repo", "", &commits).unwrap();
+        let id = storage
+            .list_entries("2026-12-31", "2026-12-31", None, 0)
+            .unwrap()[0]
+            .id
+            .clone();
+        let unknown = storage.entry_timeline(&id).unwrap();
+        assert_eq!(unknown.occurred_at, None);
+        assert_eq!(unknown.commits[0].hash, hash);
+        assert_eq!(unknown.commits[0].subject, "제목 줄");
+        assert_eq!(
+            crate::timeline::record_time("2026-12-31", &unknown),
+            crate::timeline::UNKNOWN
+        );
+        commits[0].committed_at = Some("2026-12-31T23:40:00+09:00".into());
+        assert_eq!(
+            storage.store_commits(&p.id, "repo", "", &commits).unwrap(),
+            0
+        );
+        let known = storage.entry_timeline(&id).unwrap();
+        assert_eq!(
+            crate::timeline::record_time("2026-12-31", &known),
+            "2026-12-31 23:40"
+        );
+        commits[0].committed_at = Some("2020-01-01T00:00:00Z".into());
+        storage.store_commits(&p.id, "repo", "", &commits).unwrap();
+        assert_eq!(storage.entry_timeline(&id).unwrap(), known);
+        // Editing the collected record with a typed time keeps the commit time
+        // as its reference; the typed time is not stored for it.
+        let edit = storage.calendar_entry(&id).unwrap();
+        assert!(!edit.timeline.takes_manual_time());
+        storage
+            .save_calendar_entry_timed(
+                EntryInput {
+                    id: Some(id.clone()),
+                    project_id: Some(p.id.clone()),
+                    date: "2026-12-31".into(),
+                    kind: "commit".into(),
+                    title: "고친 제목".into(),
+                    body: "내 해석".into(),
+                    source_url: String::new(),
+                },
+                edit.display.clone(),
+                crate::timeline::TimeChange::Set("07:00".into()),
+                Some(&edit),
+            )
+            .unwrap();
+        let after = storage.entry_timeline(&id).unwrap();
+        assert_eq!(after.manual_time, None);
+        assert_eq!(
+            crate::timeline::record_time("2026-12-31", &after),
+            "2026-12-31 23:40"
+        );
+    }
+
+    #[test]
+    fn v7_migration_restores_only_exact_hashes_status_and_work_ids() {
+        let path = std::env::temp_dir().join(format!("diary-v6-{}.db", Uuid::new_v4()));
+        let work = "0f5a0a52-8f5c-4a83-9d3b-6e8f0f7c1a11";
+        let hash = "e".repeat(40);
+        {
+            let mut raw = rusqlite::Connection::open(&path).unwrap();
+            crate::storage::migrate_to(&mut raw, 6).unwrap();
+            let payload = serde_json::json!({
+                "schemaVersion": 2, "workId": work, "status": "verified",
+                "detail": format!("요약\n\n작업 커밋 · {hash}")
+            });
+            raw.execute_batch(&format!(
+                "INSERT INTO diary_entries(id,project_id,date,kind,title,body,source_url,source_ref,source_body,updated_at)
+                 VALUES('11111111-1111-4111-8111-111111111111',NULL,'2026-10-01','commit','수집','내 해석','','C:/r#{hash}','원문 제목\n본문','2026-10-01T00:00:00.000Z'),
+                       ('22222222-2222-4222-8222-222222222222',NULL,'2026-10-02','development','자동','표시본','','space-work:{work}','요약','2026-10-02T00:00:00.000Z');
+                 INSERT INTO project_record_receipts VALUES('{work}',2,'{}','22222222-2222-4222-8222-222222222222','{{}}');
+                 INSERT INTO project_record_receipts VALUES('33333333-3333-4333-8333-333333333333',1,'{{}}','44444444-4444-4444-8444-444444444444','{{}}');",
+                payload.to_string().replace('\'', "''")
+            ))
+            .unwrap();
+        }
+        let storage = Storage::open(&path).unwrap();
+        let collected = storage
+            .entry_timeline("11111111-1111-4111-8111-111111111111")
+            .unwrap();
+        assert_eq!(collected.commits[0].hash, hash);
+        assert_eq!(collected.commits[0].subject, "원문 제목");
+        assert_eq!(collected.occurred_at, None, "no time was ever stored");
+        assert_eq!(collected.work_id, None);
+        let delivered = storage
+            .entry_timeline("22222222-2222-4222-8222-222222222222")
+            .unwrap();
+        assert_eq!(delivered.work_id.as_deref(), Some(work));
+        assert_eq!(delivered.status, "verified");
+        assert_eq!(delivered.commits[0].hash, hash);
+        assert_eq!(delivered.commits[0].committed_at, None);
+        assert_eq!((delivered.started_at, delivered.completed_at), (None, None));
+        // A receipt whose diary record the user deleted stays deleted.
+        assert_eq!(
+            storage
+                .entry_timeline("44444444-4444-4444-8444-444444444444")
+                .unwrap(),
+            crate::timeline::EntryTimeline::default()
+        );
+        assert_eq!(
+            storage
+                .get_entry("11111111-1111-4111-8111-111111111111")
+                .unwrap()
+                .body,
+            "내 해석"
+        );
+        drop(storage);
+        for file in std::fs::read_dir(std::env::temp_dir()).unwrap().flatten() {
+            let name = file.file_name().to_string_lossy().to_string();
+            if name.starts_with(path.file_stem().unwrap().to_str().unwrap()) {
+                let _ = std::fs::remove_file(file.path());
+            }
+        }
+    }
+
+    #[test]
     fn oversized_commit_rolls_back_batch_without_silent_source_truncation() {
         let storage = Storage::open(":memory:").unwrap();
         let p = storage.save_project(project()).unwrap();
@@ -833,11 +1093,13 @@ mod tests {
             GitCommit {
                 hash: "a".repeat(40),
                 date: "2026-12-31".into(),
+                committed_at: None,
                 message: "정상 메시지".into(),
             },
             GitCommit {
                 hash: "b".repeat(40),
                 date: "2026-12-31".into(),
+                committed_at: None,
                 message: "가".repeat(100001),
             },
         ];
@@ -846,6 +1108,63 @@ mod tests {
             .list_entries("2026-12-31", "2026-12-31", None, 0)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn a_days_count_matches_every_record_paged_through_at_both_limits() {
+        use std::collections::HashSet;
+        let storage = Storage::open(":memory:").unwrap();
+        let p = storage.save_project(project()).unwrap();
+        let date = "2026-11-19";
+        let mut input = entry(Some(p.id.clone()));
+        input.date = date.into();
+        // 201 crosses both the cards' 50-record step and the list's 200 rows.
+        for n in 0..201 {
+            input.title = format!("기록 {n}");
+            storage.save_entry(input.clone()).unwrap();
+        }
+        let days = storage.calendar_days(date, date).unwrap();
+        assert_eq!(
+            days[0].items[0].count, 201,
+            "one line stands for all of them"
+        );
+
+        // Cards: the 51st and later are reachable step by step, each once.
+        assert_eq!(storage.project_day_entries(date, &p.id).unwrap().len(), 50);
+        let mut seen = HashSet::new();
+        let mut offset = 0;
+        loop {
+            let page = storage
+                .project_day_page(date, &p.id, offset, DAY_PAGE)
+                .unwrap();
+            assert_eq!(page.total, 201);
+            if page.entries.is_empty() {
+                break;
+            }
+            for e in &page.entries {
+                assert!(seen.insert(e.id.clone()), "duplicate {}", e.id);
+            }
+            offset += page.entries.len() as u32;
+        }
+        assert_eq!(seen.len(), 201);
+
+        // Project list: the first 200 rows do not decide the date's count.
+        let first = storage.list_entries(date, date, Some(&p.id), 0).unwrap();
+        assert_eq!(first.len(), 200);
+        let totals = storage.entry_day_totals(date, date, Some(&p.id)).unwrap();
+        assert_eq!(totals.get(date), Some(&201));
+        let rest = storage.list_entries(date, date, Some(&p.id), 200).unwrap();
+        assert_eq!(rest.len(), 1);
+        let listed: HashSet<_> = first.iter().chain(&rest).map(|e| e.id.clone()).collect();
+        assert_eq!(listed, seen, "the same real IDs, none twice");
+        // A hand-written record lists no summary and no time.
+        assert!(first
+            .iter()
+            .all(|e| e.summary.is_empty() && !e.timeline.sourced));
+        assert_eq!(
+            crate::timeline::reference_line(date, &first[0].timeline),
+            "기록 시각 · 미상"
+        );
     }
 
     #[test]

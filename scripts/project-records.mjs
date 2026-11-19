@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { publishCodex, validatePublication, runBounded } from './project-records-codex.mjs';
-import { developmentEvidence, canonicalPath } from './project-records-git.mjs';
+import { developmentEvidence, canonicalPath, ownedCommits } from './project-records-git.mjs';
 import { saveDocument, vaultPreferences } from './document-vault.mjs';
 
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -14,6 +14,39 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const LABELS = { in_progress: '진행 중', verification_pending: '검증 대기', verified: '확인한 범위 검증 완료', completed: '작업 정리 완료', merged: '병합 완료' };
 const normal = value => value.replace(/\r\n/g, '\n').trim();
 const sha = value => createHash('sha256').update(value).digest('hex');
+// Statuses that can carry a confirmed completion time.
+export const COMPLETING = ['verified', 'completed', 'merged'];
+// RFC 3339 with seconds and an explicit offset, as the app parses it.
+export const isInstant = value => typeof value === 'string' && value.length <= 40
+  && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && !Number.isNaN(Date.parse(value));
+export const OWNED_COMMITS_LINE = '작업 커밋 · ';
+// The owned commits `development-diary.mjs finish` lists in a record's detail.
+export function ownedCommitLine(markdown) {
+  const hashes = [];
+  for (const line of String(markdown).split('\n')) {
+    const list = line.trim().startsWith(OWNED_COMMITS_LINE) ? line.trim().slice(OWNED_COMMITS_LINE.length) : null;
+    if (list === null) continue;
+    for (const hash of list.split(',').map(h => h.trim())) if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(hash) && !hashes.includes(hash)) hashes.push(hash);
+  }
+  return hashes.slice(0, 200);
+}
+// The begin receipt of a work: its start time and the owner it was begun by.
+export function beginReceipt(stateDir, workId) {
+  const starts = path.join(stateDir, 'diary-starts');
+  if (!fs.existsSync(starts)) return null;
+  for (const entry of fs.readdirSync(starts, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const directory = path.join(starts, entry.name);
+    let work, start;
+    try {
+      work = readJson(path.join(directory, 'work.json'));
+      start = readJson(path.join(directory, 'start.json'));
+    } catch { continue; }
+    if (work?.workId !== workId) continue;
+    return isInstant(start?.at) ? { at: start.at, owner: typeof start.owner === 'string' ? start.owner.toLowerCase() : null } : null;
+  }
+  return null;
+}
 
 function text(value, name, max) {
   if (typeof value !== 'string' || !value.trim() || value.includes('\0') || [...value].length > max) throw new Error(`${name} 값을 확인해 주세요.`);
@@ -26,7 +59,7 @@ function normalizeSource(input, projectRoot = PROJECT_ROOT) {
   const date = text(input.date, 'date', 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number(date.slice(0, 4)) < 1 || new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date) throw new Error('실제 YYYY-MM-DD 날짜가 필요합니다.');
   if (!Object.hasOwn(LABELS, input.status)) throw new Error('지원하지 않는 작업 상태입니다.');
-  if (!['development', 'troubleshooting', 'portfolio', 'summary'].includes(input.kind)) throw new Error('지원하지 않는 기록 종류입니다.');
+  if (!['design', 'development', 'troubleshooting', 'portfolio', 'summary'].includes(input.kind)) throw new Error('지원하지 않는 기록 종류입니다.');
   const detailedMarkdown = text(input.detailedMarkdown, '상세 기록', 48000);
   if (Buffer.byteLength(detailedMarkdown) > 48000) throw new Error('상세 기록은 UTF-8 48,000바이트 이하로 작업 단위를 나눠 주세요.');
   const paragraphs = detailedMarkdown.split(/\n{2,}/);
@@ -34,8 +67,16 @@ function normalizeSource(input, projectRoot = PROJECT_ROOT) {
   // Extract whole paragraphs, including their caveats. No free-form second
   // summary can invent a cause, change a number, or drop half a paragraph.
   if (!diarySummary.split(/\n{2,}/).every(p => paragraphs.includes(p))) throw new Error('다이어리 요약은 한계를 포함한 원문 문단을 그대로 골라 주세요.');
-  return { workId: input.workId, projectTitle: text(input.projectTitle, '프로젝트 제목', 200), repoPath: canonicalPath(repoPath), date,
+  // Completion is a confirmed moment of a completed status. Saving, editing,
+  // retrying or waiting for verification never creates one.
+  if (input.completedAt != null && (!isInstant(input.completedAt) || !COMPLETING.includes(input.status))) {
+    throw new Error('completedAt은 확인된 완료 상태(verified·completed·merged)의 시간대 있는 RFC 3339 시각이어야 합니다.');
+  }
+  if (input.commits != null && (!Array.isArray(input.commits) || input.commits.length > 200)) throw new Error('commits는 최대 200개의 커밋 해시 목록이어야 합니다.');
+  const source = { workId: input.workId, projectTitle: text(input.projectTitle, '프로젝트 제목', 200), repoPath: canonicalPath(repoPath), date,
     kind: input.kind, title: text(input.title, '기록 제목', 200), status: input.status, detailedMarkdown, diarySummary, parentPageId: PARENT_PAGE_ID };
+  return { source, completedAt: input.completedAt ?? null,
+    commits: input.commits == null ? null : input.commits.map(c => typeof c === 'string' ? c : c?.hash) };
 }
 function atomicJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -125,14 +166,39 @@ function samePlace(a, b) {
   try { return sameResolvedPath(canonicalPath(a), canonicalPath(b)); } catch { return false; }
 }
 
+// Times and commits a record may show, all from evidence: the begin receipt,
+// a confirmed completion, and commits Git confirms this work owns. Keys are
+// added only when known, so a source without them hashes exactly as before.
+function attachTimeline(source, { completedAt, commits }, stateDir) {
+  const start = beginReceipt(stateDir, source.workId);
+  if (start) source.startedAt = start.at;
+  if (completedAt) {
+    if (start && Date.parse(completedAt) < Date.parse(start.at)) throw new Error('완료 시각이 작업 시작 영수증보다 앞설 수 없습니다.');
+    source.completedAt = completedAt;
+  }
+  // Explicit commits must all verify. Without them, the owned-commit line an
+  // earlier finish wrote is exact evidence; only what still verifies is shown.
+  const explicit = commits !== null;
+  const hashes = explicit ? commits : ownedCommitLine(source.detailedMarkdown);
+  if (!hashes.length) return;
+  const owned = ownedCommits(source.repoPath, { workId: source.workId, base: source.gitChanges.base, hashes, owner: start?.owner ?? null });
+  if (owned.transient) throw new Error(`Git으로 작업 커밋을 확인하지 못했습니다 (${owned.detail}). 기록을 만들지 않았습니다. 원인을 해결한 뒤 같은 입력으로 다시 prepare하세요.`);
+  if (owned.invalid) {
+    if (explicit) throw new Error(`관련 커밋을 이 작업이 소유한 실제 커밋으로 확인하지 못했습니다 (${owned.invalid}). 기록을 만들지 않았습니다.`);
+    return;
+  }
+  if (owned.commits.length) source.commits = owned.commits;
+}
+
 export async function prepare(input, { stateDir = DEFAULT_STATE, projectRoot = PROJECT_ROOT } = {}) {
-  const source = normalizeSource(input, projectRoot);
+  const { source, ...timeline } = normalizeSource(input, projectRoot);
   const evidence = developmentEvidence(source.repoPath, input.gitChanges, projectRoot);
   // A temporary Git failure is not a finding that the work has no development
   // changes, so it must not read as "skipped" and end the record.
   if (evidence.transient) throw new Error(`Git으로 개발 변경을 확인하지 못했습니다 (${evidence.detail}). 기록을 만들지 않았습니다. 원인을 해결한 뒤 같은 입력으로 다시 prepare하세요.`);
   if (!evidence.eligible) return { workId: source.workId, skipped: true, reason: evidence.reason };
   source.gitChanges = evidence.gitChanges;
+  attachTimeline(source, timeline, stateDir);
   return locked(stateDir, async () => {
     const file = path.join(stateDir, source.workId, 'state.json');
     const previous = fs.existsSync(file) ? readJson(file) : null;
@@ -160,11 +226,18 @@ export async function prepare(input, { stateDir = DEFAULT_STATE, projectRoot = P
   });
 }
 
-function diaryPayload(job, linked) {
+// Jobs prepared before times were recorded keep sending the v2 payload the app
+// already accepted for them; only a source with evidence sends v3.
+export function diaryPayload(job, linked) {
   const { source, space } = job;
-  return { schemaVersion: 2, workId: source.workId, revision:linked?job.finalRevision:job.localRevision, projectTitle: source.projectTitle, repoPath: source.repoPath, date: source.date,
+  const timeline = {
+    ...(source.startedAt ? { startedAt: source.startedAt } : {}),
+    ...(source.completedAt ? { completedAt: source.completedAt } : {}),
+    ...(source.commits?.length ? { commits: source.commits } : {}),
+  };
+  return { schemaVersion: Object.keys(timeline).length ? 3 : 2, workId: source.workId, revision:linked?job.finalRevision:job.localRevision, projectTitle: source.projectTitle, repoPath: source.repoPath, date: source.date,
     kind: source.kind, title: source.title, summary: source.diarySummary, detail:source.detailedMarkdown,
-    deliveryState:linked?'synced':job.diaryMode==='local'?'local':'pending', spaceUrl:linked?space.pageUrl:'', status: source.status };
+    deliveryState:linked?'synced':job.diaryMode==='local'?'local':'pending', spaceUrl:linked?space.pageUrl:'', status: source.status, ...timeline };
 }
 async function registerNative(options) {
   const resultFile=path.join(options.stateDir,`registration-${randomUUID()}.json`);

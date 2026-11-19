@@ -6,7 +6,7 @@ use std::{
 use timeschedule_core::storage::Storage;
 use timeschedule_desktop::paths::{self, InstanceLock};
 
-const USAGE: &str = "record enqueue --input FILE [--data-dir DIR] [--result FILE]; record drain [--data-dir DIR]; record status --work-id UUID --revision N [--data-dir DIR]";
+const USAGE: &str = "record enqueue --input FILE | drain | status --work-id UUID --revision N | configure-codex-chats --project UUID --enabled true/false | scan-codex-chats [--data-dir DIR] [--result FILE]";
 
 fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
     if args.len() < 2 || args[0] != "record" {
@@ -18,6 +18,8 @@ fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
         "drain" => &[],
         "status" => &["--work-id", "--revision"],
         "configure-sync" => &["--node", "--script", "--state-dir"],
+        "configure-codex-chats" => &["--project", "--enabled"],
+        "scan-codex-chats" => &[],
         _ => return Err(USAGE.into()),
     };
     let mut options = HashMap::new();
@@ -75,13 +77,29 @@ pub fn execute(args: &[String]) -> Result<serde_json::Value, String> {
     let _owner = match InstanceLock::acquire(&dir) {
         Ok(owner) => owner,
         Err(message) => {
+            if command.ends_with("codex-chats") {
+                return Err(message);
+            }
             return Ok(match queued {
                 Some(receipt) => serde_json::to_value(receipt).map_err(|e| e.to_string())?,
                 None => serde_json::json!({ "outcome": "queued", "message": message }),
-            })
+            });
         }
     };
     let store = Storage::open(dir.join("schedule.db"))?;
+    if command == "configure-codex-chats" {
+        let enabled = options["--enabled"]
+            .parse::<bool>()
+            .map_err(|_| "--enabled에 true 또는 false를 지정하세요.")?;
+        store.set_chat_capture(options["--project"], enabled)?;
+        return Ok(serde_json::json!({"outcome":"configured","enabled":enabled}));
+    }
+    if command == "scan-codex-chats" {
+        let report = crate::worker::scan_chats(&store, true)?;
+        return Ok(
+            serde_json::json!({"outcome":if report.failed>0 {"attention"}else{"scanned"},"report":report}),
+        );
+    }
     let report = record_inbox::drain(&dir, &store)?;
     if let Some(input) = input {
         let receipt = record_inbox::receipt(&dir, &input.work_id, input.revision)?;

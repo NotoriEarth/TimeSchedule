@@ -13,6 +13,29 @@ use timeschedule_core::storage::Storage;
 mod server;
 pub(crate) use server::{proof, read_token, CHALLENGE_HEADER};
 
+pub fn write_json_atomic(
+    file: &std::path::Path,
+    value: &impl serde::Serialize,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let bytes = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
+    let temporary = file.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+    let result = (|| {
+        let mut out = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        out.write_all(&bytes)?;
+        out.sync_all()?;
+        drop(out);
+        std::fs::rename(&temporary, file)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 /// Replaces the MCP token: on disk, and in the running server when there is one.
 /// Only the app that holds the data folder's instance lock may do it. A second
 /// TimeSchedule window on the same folder has no server of its own; if it
@@ -43,8 +66,7 @@ impl TokenControl {
 
 /// How starting the local MCP went when the app started.
 pub struct Started {
-    /// `Ok(None)`: switched off by the environment.
-    pub server: Result<Option<LocalMcp>, String>,
+    pub server: Result<LocalMcp, String>,
     /// Why the token file was unusable, when a new token replaced it. Reported
     /// even when the server then failed to start: the old token is gone either
     /// way, and the settings screen and the log must still say so.
@@ -61,14 +83,11 @@ impl LocalMcp {
     pub fn start(store: Arc<Storage>, changed: Arc<AtomicBool>, dir: &std::path::Path) -> Started {
         let mut recovered = None;
         let server = (|| {
-            if std::env::var("TIMESCHEDULE_MCP_DISABLED").as_deref() == Ok("1") {
-                return Ok(None);
-            }
             let port = std::env::var("TIMESCHEDULE_MCP_PORT")
                 .unwrap_or_else(|_| "39281".into())
                 .parse::<u16>()
                 .map_err(|_| "TIMESCHEDULE_MCP_PORT는 0..65535 정수여야 합니다.")?;
-            Self::start_on(store, changed, dir, port, &mut recovered).map(Some)
+            Self::start_on(store, changed, dir, port, &mut recovered)
         })();
         Started { server, recovered }
     }

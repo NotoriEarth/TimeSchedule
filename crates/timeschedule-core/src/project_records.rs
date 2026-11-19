@@ -1,6 +1,7 @@
 use crate::storage::{
     database_error, timestamp, validate_date, validate_text, validated_title, Storage,
 };
+use crate::timeline::{self, RecordCommit};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -24,6 +25,15 @@ pub struct ProjectRecord {
     pub delivery_state: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub detail: String,
+    /// v3: the work's begin receipt, when one exists. Never "now".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    /// v3: the confirmed completion moment of a completed status only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    /// v3: real commits this work owns, verified by the recorder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<RecordCommit>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,14 +48,24 @@ pub struct RecordReceipt {
 
 impl ProjectRecord {
     pub fn validate(&self) -> Result<(), String> {
-        if ![1, 2].contains(&self.schema_version) {
+        if ![1, 2, 3].contains(&self.schema_version) {
             return Err("지원하지 않는 프로젝트 기록 형식입니다.".into());
         }
         if self.schema_version == 1 && (!self.delivery_state.is_empty() || !self.detail.is_empty())
         {
             return Err("오프라인 기록은 v2 형식이 필요합니다.".into());
         }
-        if self.schema_version == 2 {
+        if self.schema_version < 3
+            && (self.started_at.is_some()
+                || self.completed_at.is_some()
+                || !self.commits.is_empty())
+        {
+            return Err("작업 시각과 커밋 근거는 v3 형식이 필요합니다.".into());
+        }
+        if self.schema_version == 3 {
+            self.validate_timeline()?;
+        }
+        if self.schema_version >= 2 {
             if !["local", "pending", "synced"].contains(&self.delivery_state.as_str())
                 || self.detail.trim().is_empty()
                 || self.detail.len() > 48000
@@ -75,7 +95,14 @@ impl ProjectRecord {
         if self.summary.trim().is_empty() {
             return Err("프로젝트 기록 요약을 입력해 주세요.".into());
         }
-        if !["development", "troubleshooting", "portfolio", "summary"].contains(&self.kind.as_str())
+        if ![
+            "design",
+            "development",
+            "troubleshooting",
+            "portfolio",
+            "summary",
+        ]
+        .contains(&self.kind.as_str())
         {
             return Err("외부 프로젝트 기록 종류를 확인해 주세요.".into());
         }
@@ -105,6 +132,28 @@ impl ProjectRecord {
             return Err("검증된 https://chatgpt.com/space/page_… 링크가 필요합니다.".into());
         }
         Ok(())
+    }
+
+    fn validate_timeline(&self) -> Result<(), String> {
+        let started = self
+            .started_at
+            .as_deref()
+            .map(timeline::parse_instant)
+            .transpose()?;
+        let completed = self
+            .completed_at
+            .as_deref()
+            .map(timeline::parse_instant)
+            .transpose()?;
+        if completed.is_some() && !timeline::completes(&self.status) {
+            return Err("완료 시각은 확인된 완료 상태에만 둘 수 있습니다.".into());
+        }
+        if let (Some(started), Some(completed)) = (started, completed) {
+            if completed < started {
+                return Err("완료 시각이 작업 시작보다 앞설 수 없습니다.".into());
+            }
+        }
+        timeline::validate_commits(&self.commits)
     }
 
     fn status_label(&self) -> Result<&'static str, String> {
@@ -139,7 +188,7 @@ struct ManagedSnapshot {
     source_url: String,
 }
 
-fn repo_key(value: &str) -> String {
+pub(crate) fn repo_key(value: &str) -> String {
     let path = std::fs::canonicalize(value).unwrap_or_else(|_| value.into());
     let normalized = path.to_string_lossy().replace('\\', "/");
     let normalized = normalized
@@ -233,7 +282,7 @@ impl Storage {
             .as_ref()
             .map(|row| row.2.clone())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let body = if record.schema_version == 2 {
+        let body = if record.schema_version >= 2 {
             format!(
                 "{}\n\n상태: {}\n\n{}",
                 record.detail.trim(),
@@ -269,6 +318,64 @@ impl Storage {
              body=excluded.body,source_url=excluded.source_url,source_body=excluded.source_body,updated_at=excluded.updated_at",
             params![entry_id, snapshot.project_id, snapshot.date, snapshot.kind, snapshot.title, snapshot.body, snapshot.source_url, source_ref, record.summary, now],
         ).map_err(database_error)?;
+        // Evidence sits beside the editable copy: a later edit never changes it.
+        let known: Vec<RecordCommit> = tx
+            .query_row(
+                "SELECT commits FROM entry_evidence WHERE entry_id=?1",
+                [&entry_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(database_error)?
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_default();
+        if record.schema_version == 3 {
+            // The begin receipt and the first confirmed completion are fixed
+            // once known: a later edit, retry or merge never moves them. Commit
+            // times already confirmed stay with their hashes.
+            let commits = if record.commits.is_empty() {
+                known
+            } else {
+                record
+                    .commits
+                    .iter()
+                    .map(|commit| {
+                        let mut commit = commit.clone();
+                        if let Some(old) = known.iter().find(|k| k.hash == commit.hash) {
+                            if commit.committed_at.is_none() {
+                                commit.committed_at = old.committed_at.clone();
+                            }
+                            if commit.subject.is_empty() {
+                                commit.subject = old.subject.clone();
+                            }
+                        }
+                        commit
+                    })
+                    .collect()
+            };
+            tx.execute(
+                "INSERT INTO entry_evidence(entry_id,work_id,started_at,completed_at,status,commits) VALUES(?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(entry_id) DO UPDATE SET work_id=excluded.work_id,
+                 started_at=COALESCE(entry_evidence.started_at,excluded.started_at),
+                 completed_at=COALESCE(entry_evidence.completed_at,excluded.completed_at),
+                 status=excluded.status,commits=excluded.commits",
+                params![entry_id, record.work_id, record.started_at, record.completed_at, record.status, timeline::commits_json(&commits)?],
+            ).map_err(database_error)?;
+        } else {
+            // Earlier formats carry no times: keep whatever exact evidence
+            // exists. A first v2 delivery keeps the exact owned-commit hashes of
+            // its detail, so the app can confirm their times when it is opened.
+            let named = if known.is_empty() {
+                timeline::owned_commits_in(&record.detail)
+            } else {
+                known
+            };
+            tx.execute(
+                "INSERT INTO entry_evidence(entry_id,work_id,status,commits) VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(entry_id) DO UPDATE SET work_id=excluded.work_id,status=excluded.status,commits=excluded.commits",
+                params![entry_id, record.work_id, record.status, timeline::commits_json(&named)?],
+            ).map_err(database_error)?;
+        }
         tx.execute(
             "INSERT INTO project_record_receipts(work_id,revision,payload,entry_id,managed_snapshot) VALUES(?1,?2,?3,?4,?5)
              ON CONFLICT(work_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload,entry_id=excluded.entry_id,managed_snapshot=excluded.managed_snapshot",
@@ -287,6 +394,7 @@ impl Storage {
 mod tests {
     use super::*;
     use crate::diary::{EntryInput, ProjectInput};
+    use crate::timeline::EntryTimeline;
 
     fn record() -> ProjectRecord {
         ProjectRecord {
@@ -303,7 +411,213 @@ mod tests {
             status: "verification_pending".into(),
             delivery_state: String::new(),
             detail: String::new(),
+            started_at: None,
+            completed_at: None,
+            commits: vec![],
         }
+    }
+
+    fn timed() -> ProjectRecord {
+        ProjectRecord {
+            schema_version: 3,
+            delivery_state: "local".into(),
+            space_url: String::new(),
+            detail: format!("배경과 해결\n\n작업 커밋 · {}", "c".repeat(40)),
+            status: "verified".into(),
+            started_at: Some("2026-10-31T00:10:00.000Z".into()),
+            completed_at: Some("2026-10-31T09:30:00+09:00".into()),
+            commits: vec![RecordCommit {
+                hash: "c".repeat(40),
+                committed_at: Some("2026-10-31T09:20:00+09:00".into()),
+                subject: "기록 시각 저장".into(),
+                url: String::new(),
+            }],
+            ..record()
+        }
+    }
+
+    #[test]
+    fn v3_keeps_begin_completion_and_owned_commits_beside_the_display_copy() {
+        let store = Storage::open(":memory:").unwrap();
+        let input = timed();
+        let receipt = store.apply_project_record(&input).unwrap();
+        let id = receipt.entry_id.unwrap();
+        let t = store.entry_timeline(&id).unwrap();
+        assert_eq!(t.work_id.as_deref(), Some(input.work_id.as_str()));
+        assert_eq!(
+            timeline::kst_minute(t.started_at.as_deref()),
+            "2026-10-31 09:10"
+        );
+        assert_eq!(
+            timeline::kst_minute(t.completed_at.as_deref()),
+            "2026-10-31 09:30"
+        );
+        assert_eq!(t.status, "verified");
+        assert_eq!(t.commits, input.commits);
+        assert!(!t.edited);
+        // The same payload again is unchanged and does not move any time.
+        assert_eq!(
+            store.apply_project_record(&input).unwrap().outcome,
+            "unchanged"
+        );
+        assert_eq!(store.entry_timeline(&id).unwrap(), t);
+        // A person's edit is flagged, preserved, and never rewrites the evidence.
+        let entry = store.get_entry(&id).unwrap();
+        store
+            .save_entry(EntryInput {
+                id: Some(id.clone()),
+                project_id: entry.project_id,
+                date: entry.date,
+                kind: entry.kind,
+                title: "직접 고친 제목".into(),
+                body: entry.body,
+                source_url: entry.source_url,
+            })
+            .unwrap();
+        let edited = store.entry_timeline(&id).unwrap();
+        assert!(edited.edited);
+        assert_eq!(edited.started_at, t.started_at);
+        let mut later = input.clone();
+        later.revision = 2;
+        later.completed_at = Some("2026-11-01T10:00:00+09:00".into());
+        assert_eq!(
+            store.apply_project_record(&later).unwrap().outcome,
+            "conflict"
+        );
+        assert_eq!(
+            store.entry_timeline(&id).unwrap().completed_at,
+            t.completed_at
+        );
+        // Deleting the record removes its evidence with it.
+        store.delete_entry(&id).unwrap();
+        assert_eq!(store.entry_timeline(&id).unwrap(), EntryTimeline::default());
+    }
+
+    #[test]
+    fn v3_rejects_invented_completion_and_foreign_formats() {
+        let mut pending = timed();
+        pending.status = "verification_pending".into();
+        assert!(pending.validate().unwrap_err().contains("완료"));
+        pending.completed_at = None;
+        assert!(
+            pending.validate().is_ok(),
+            "pending work has no completion time"
+        );
+        let mut backwards = timed();
+        backwards.completed_at = Some("2026-10-30T09:00:00+09:00".into());
+        assert!(backwards.validate().is_err());
+        let mut naive = timed();
+        naive.started_at = Some("2026-10-31 09:10".into());
+        assert!(naive.validate().is_err());
+        let mut old = timed();
+        old.schema_version = 2;
+        assert!(old.validate().unwrap_err().contains("v3"));
+        let mut v2 = old.clone();
+        v2.started_at = None;
+        v2.completed_at = None;
+        v2.commits.clear();
+        assert!(v2.validate().is_ok());
+        // The serialized v2 payload is byte-identical to the format before v3,
+        // so receipts accepted earlier still compare as unchanged.
+        let json = serde_json::to_string(&v2).unwrap();
+        for absent in ["startedAt", "completedAt", "commits"] {
+            assert!(!json.contains(absent), "{absent}");
+        }
+        assert!(serde_json::from_str::<ProjectRecord>(
+            &json.replace("\"title\"", "\"unknownField\":1,\"title\"")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn v2_redelivery_keeps_exact_evidence_already_known() {
+        let store = Storage::open(":memory:").unwrap();
+        let id = store
+            .apply_project_record(&timed())
+            .unwrap()
+            .entry_id
+            .unwrap();
+        let mut v2 = timed();
+        v2.schema_version = 2;
+        v2.revision = 2;
+        v2.started_at = None;
+        v2.completed_at = None;
+        v2.commits.clear();
+        assert_eq!(store.apply_project_record(&v2).unwrap().outcome, "saved");
+        let t = store.entry_timeline(&id).unwrap();
+        assert!(t.started_at.is_some());
+        assert_eq!(t.commits.len(), 1);
+    }
+
+    #[test]
+    fn a_folded_list_row_carries_the_chosen_summary_and_begin_time_but_no_body() {
+        let store = Storage::open(":memory:").unwrap();
+        let input = timed();
+        let id = store
+            .apply_project_record(&input)
+            .unwrap()
+            .entry_id
+            .unwrap();
+        let row = store
+            .list_entries("2026-10-31", "2026-10-31", None, 0)
+            .unwrap()
+            .remove(0);
+        assert_eq!(row.id, id);
+        assert_eq!(row.summary, input.summary);
+        assert!(row.timeline.is_automatic() && row.timeline.sourced);
+        assert_eq!(
+            timeline::reference_line(&row.date, &row.timeline),
+            "작업 시작 · 2026-10-31 09:10"
+        );
+        let json = serde_json::to_value(&row).unwrap();
+        assert!(json.get("body").is_none() && json.get("detail").is_none());
+    }
+
+    #[test]
+    fn first_completion_begin_and_commit_times_stay_through_later_deliveries() {
+        let store = Storage::open(":memory:").unwrap();
+        let first = timed();
+        let id = store
+            .apply_project_record(&first)
+            .unwrap()
+            .entry_id
+            .unwrap();
+        // A merge reflected later, with another completion moment and a commit
+        // whose time it did not repeat, moves nothing already confirmed.
+        let mut merged = timed();
+        merged.revision = 2;
+        merged.status = "merged".into();
+        merged.completed_at = Some("2026-11-02T10:00:00+09:00".into());
+        merged.started_at = Some("2026-11-01T00:00:00Z".into());
+        merged.commits[0].committed_at = None;
+        assert_eq!(
+            store.apply_project_record(&merged).unwrap().outcome,
+            "saved"
+        );
+        let t = store.entry_timeline(&id).unwrap();
+        assert_eq!(t.status, "merged");
+        assert_eq!(t.completed_at, first.completed_at);
+        assert_eq!(t.started_at, first.started_at);
+        assert_eq!(t.commits[0].committed_at, first.commits[0].committed_at);
+        // Waiting for verification again shows that status, not a completion.
+        let mut pending = merged.clone();
+        pending.revision = 3;
+        pending.status = "verification_pending".into();
+        pending.completed_at = None;
+        assert_eq!(
+            store.apply_project_record(&pending).unwrap().outcome,
+            "saved"
+        );
+        let t = store.entry_timeline(&id).unwrap();
+        assert_eq!(t.shown_completion(), None);
+        assert_eq!(
+            timeline::completion_line(&t).as_deref(),
+            Some("현재 상태 · 검증 대기")
+        );
+        assert_eq!(
+            t.completed_at, first.completed_at,
+            "the first completion is kept"
+        );
     }
 
     #[test]
@@ -560,7 +874,7 @@ mod tests {
         let path = dir.join("schedule.db");
         {
             let store = Storage::open(&path).unwrap();
-            store.connection().unwrap().execute_batch("DROP TABLE IF EXISTS project_record_receipts; DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; PRAGMA user_version = 2; INSERT INTO notes VALUES ('128b13cb-0cf2-41da-84c4-db20dca65d73','기존 노트','보존할 본문','2026-10-30'); DROP TABLE search_order;").unwrap();
+            store.connection().unwrap().execute_batch("DROP TABLE chat_experience_evidence; DROP TABLE chat_experience_receipts; DROP TABLE codex_chat_sessions; DROP TABLE codex_chat_projects; DROP VIEW project_experiences; DROP TABLE portfolio_answers; DROP TABLE portfolio_editions; DROP TABLE entry_time; DROP TABLE entry_evidence; DROP TABLE IF EXISTS project_record_receipts; DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; PRAGMA user_version = 2; INSERT INTO notes VALUES ('128b13cb-0cf2-41da-84c4-db20dca65d73','기존 노트','보존할 본문','2026-10-30'); DROP TABLE search_order;").unwrap();
         }
         {
             let store = Storage::open(&path).unwrap();

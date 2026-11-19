@@ -82,7 +82,7 @@ export function audit(ctx) {
     const saved = optional(path.join(directory, 'delivery.json'));
     const delivered = job && saved && job.source.gitChanges?.head === saved.source.gitChanges.head
       && job.source.title === saved.source.title && job.source.detailedMarkdown === saved.source.detailedMarkdown
-      && job.source.status === saved.source.status;
+      && job.source.status === saved.source.status && job.source.kind === saved.source.kind;
     const row = { branch: start.branch, workId };
     if (!head) {
       if (!complete(job?.phase)) result.push({ ...row, phase: 'branch_missing' });
@@ -152,6 +152,64 @@ function repeatsEarlierNote(ctx, task, ownedHead, evidenceHead, note) {
   });
 }
 
+const COMPLETING = ['verified', 'completed', 'merged'];
+const STATUSES = ['in_progress', 'verification_pending', ...COMPLETING];
+// What an earlier delivery of this work says about its first completion: the
+// moment, or that it completed before completion times were saved (unknown).
+export function firstCompletion(previous) {
+  if (!previous?.source) return { at: null, unknown: false };
+  if (typeof previous.firstCompletedAt === 'string') return { at: previous.firstCompletedAt, unknown: false };
+  if (previous.completionUnknown === true) return { at: null, unknown: true };
+  if (typeof previous.source.completedAt === 'string') return { at: previous.source.completedAt, unknown: false };
+  return { at: null, unknown: COMPLETING.includes(previous.source.status) };
+}
+// The earlier delivery of this work, or null only when there is none yet.
+// Any other read failure or damaged content is raised with the file left as
+// it is: an unreadable delivery may hold a completion already made, so it is
+// never taken as "no earlier completion".
+export function readPreviousDelivery(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); }
+  catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new Error(`이전 전달 기록을 읽을 수 없어 완료 시각을 정하지 않았습니다. 파일은 그대로 두었습니다: ${file} (${error.code ?? error.message})`, { cause: error });
+  }
+  const damaged = (reason, cause) => new Error(`이전 전달 기록이 손상되어 완료 시각을 정하지 않았습니다. 파일은 그대로 두었습니다: ${file} (${reason})`, cause ? { cause } : undefined);
+  let saved;
+  try { saved = JSON.parse(text.replace(/^﻿/, '')); }
+  catch (error) { throw damaged(error.message, error); }
+  // Valid JSON that lost the earlier source (null, {}, an array, a source
+  // without a known status) cannot say whether the work completed before.
+  const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!isRecord(saved) || !isRecord(saved.source) || !STATUSES.includes(saved.source.status)) {
+    throw damaged('source와 작업 상태가 없습니다');
+  }
+  return saved;
+}
+// The first moment finish confirmed a completed status for this work. Later
+// edits, retries, follow-up commits or a merge keep it. A status that is not
+// complete shows none. A work already complete in a delivery saved before
+// completion times were kept stays unknown: re-running finish never invents it.
+// A failure to read the earlier delivery propagates; it is not "none".
+export function completionTime(readPrevious, ownedHead, status, now = () => new Date().toISOString()) {
+  const previous = readPrevious();
+  if (!COMPLETING.includes(status)) return null;
+  const first = firstCompletion(previous);
+  if (first.unknown) return null;
+  return first.at ?? now();
+}
+// The note's explicit status is the user's word. Waiting for verification or
+// work in progress stays so even when some replayed tests pass; a completed
+// status needs replayed tests that did not fail, or a written verification.
+// Without one, passing tests verify only the checked scope ('verified').
+export function decideStatus(note, final) {
+  const passed = final ? final.exitCode === 0 && final.counts.pass > 0 : null;
+  const explicit = STATUSES.includes(note?.status) ? note.status : null;
+  if (explicit && !COMPLETING.includes(explicit)) return explicit;
+  if (explicit) return passed === false || (passed === null && !note.verification) ? 'verification_pending' : explicit;
+  return passed ? 'verified' : 'verification_pending';
+}
+
 export async function finish(ctx, id, file) {
   const task = taskById(ctx, id), { start, directory } = task;
   const head = branchHead(ctx, task);
@@ -164,6 +222,8 @@ export async function finish(ctx, id, file) {
   const note = file ? read(file) : readNoteForCommit(directory, ownedHead);
   if (!note) throw new Error(`마지막 개발 커밋 ${ownedHead.slice(0, 8)}의 새 설명이 필요합니다. finish ${id} <NOTE.json>으로 작업 원문 JSON 경로를 지정하세요.`);
   const title = requiredText(note.title, 'title'), paragraph = requiredText(note.summary, 'summary');
+  const kind = note.kind ?? 'development';
+  if (!['development', 'design', 'troubleshooting'].includes(kind)) throw new Error('경험 종류는 development, design 또는 troubleshooting입니다.');
   const detail = note.detail ? requiredText(note.detail, 'detail') : '';
   const files = note.tests ?? [];
   if (!Array.isArray(files)) throw new Error('tests에는 실행할 파일 목록을 지정하세요.');
@@ -185,13 +245,22 @@ export async function finish(ctx, id, file) {
   if (note.verification) blocks.push(requiredText(note.verification, 'verification'));
   if (!final && !note.verification) blocks.push('이 작업에는 실행 결과가 첨부되지 않았습니다.');
   blocks.push('작업 커밋 · ' + scan.owned.map(commit => commit.sha).join(', '));
-  const status = final ? (final.exitCode === 0 && final.counts.pass > 0 ? 'verified' : 'verification_pending')
-    : (note.verification && note.status) || 'verification_pending';
+  const status = decideStatus(note, final);
   const date = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(start.at));
-  const source = { workId: id, projectTitle: 'TimeSchedule', repoPath: ctx.primary, date, kind: 'development',
-    title, status, diarySummary: paragraph, detailedMarkdown: blocks.join('\n\n'), gitChanges: changes };
+  // Raises before a new delivery is written unless it is readable or absent.
+  const previous = readPreviousDelivery(path.join(directory, 'delivery.json'));
+  const first = firstCompletion(previous);
+  const completedAt = completionTime(() => previous, ownedHead, status);
+  const source = { workId: id, projectTitle: 'TimeSchedule', repoPath: ctx.primary, date, kind,
+    title, status, diarySummary: paragraph, detailedMarkdown: blocks.join('\n\n'), gitChanges: changes,
+    // Only the real commits this author tagged with this work, never a projection.
+    commits: scan.owned.map(commit => commit.sha), ...(completedAt ? { completedAt } : {}) };
+  // The first completion is carried even through a later pending status, and
+  // an unknown one stays unknown.
+  const firstCompletedAt = completedAt ?? first.at;
   // The complete, deterministic input is durable before the first external write.
-  write(path.join(directory, 'delivery.json'), { source, ownedHead, branchHead: head, unassigned: scan.unassigned, ambiguous: scan.ambiguous });
+  write(path.join(directory, 'delivery.json'), { source, ownedHead, branchHead: head, unassigned: scan.unassigned, ambiguous: scan.ambiguous,
+    ...(firstCompletedAt ? { firstCompletedAt } : {}), ...(first.unknown ? { completionUnknown: true } : {}) });
   return retry(ctx, id);
 }
 

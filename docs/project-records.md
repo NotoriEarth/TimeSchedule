@@ -1,5 +1,9 @@
 # 작업 종료 로컬 기록과 선택적 Space 연결
 
+Windows Codex 채팅을 커밋 없이 이력에 남기려면 네이티브 앱의 **프로젝트 → 프로젝트 선택 → Codex 채팅 자동 수집 켜기**를 사용한다. 앱은 선택한 저장소 경로에서 이뤄진 Codex Desktop 채팅을 로컬 메모로 읽는다. `CODEX_HOME` 또는 Windows 사용자 폴더의 `.codex`에서 세션과 제목을 확인한다. 아래의 커밋 기반 개발 일지 전달 절차는 별도로 동작한다.
+
+앱을 켜거나 트레이에 두면 `sessions/YYYY/MM/DD/rollout-*.jsonl`의 완료된 사용자·AI 메시지와 TAP 검사 출력을 읽는다. 세션 ID마다 이력 한 건을 만들고 `session_index.jsonl`에서 제목을 찾는다. 긴 발화와 출력은 발췌하며 각 항목에 원문 파일의 행 번호를 붙인다. 사용자가 본문을 편집한 뒤 대화가 이어지면 편집본과 최신 수집 원문을 함께 볼 수 있다. 설정을 꺼도 이전 이력은 남는다.
+
 Git에 실제 개발 변경이 있는 작업만 **개발 변경 확인 → 독립 로컬 문서 원문 저장 → 다이어리에 요약·상세 원문 반영** 순서로 처리한다. **Space는 기본 꺼짐**이고 로컬 저장만으로 완료된다. 선택 설정을 명시적으로 켠 경우에만 **Space 반영 → 같은 다이어리 항목에 검증된 링크 연결**을 추가한다. 외부 연결이나 앱 실행 파일에 문제가 있어도 먼저 저장된 원문 파일은 남는다. Space 내용은 PR 작성에 도움이 될 때 선택적으로 재사용하며 PR이 없어도 기록한다. 저장소 경로 확정과 일반 프로젝트·공부 자료의 수동 import는 [개인 문서 저장소](document-vault.md)를 참고한다.
 
 자동 개발 기록 대상은 이 스크립트가 있는 저장소다. 다른 채팅·프로젝트를 자동 탐색하지 않는다. 로컬 문서 저장소에는 별도 import로 다른 프로젝트·공부 자료도 넣을 수 있다. Space를 켠 경우에만 [TimeSchedule 개발 포트폴리오](https://chatgpt.com/space/page_6ae1b18a44f08191ad2a86276972476c)를 대상으로 한다. 일반 import 자료는 게시하지 않는다.
@@ -63,7 +67,9 @@ Node.js는 로컬 문서 저장 명령에 필요하다. 로그인된 Codex CLI�
 }
 ```
 
-`kind`: development / troubleshooting / portfolio / summary. `status`: in_progress / verification_pending / verified / completed / merged. `verified`는 기록에 명시한 검증 범위이며 사용자 승인·병합을 의미하지 않는다. 요약은 상세 원문의 완전한 문단을 선택하고, 생략하면 첫 일반 문단을 쓴다. 제한·미확인을 잘라 성과만 남기지 않는다. 상세 원문은 UTF-8 48,000바이트 이하로 나눈다.
+선택 필드 `commits`(이 작업의 커밋 해시 목록)와 `completedAt`(RFC 3339, 시간대 포함)을 넣을 수 있다. `finish`는 두 값을 자동으로 채운다. `prepare`는 같은 상태 폴더의 `diary-starts`에서 이 workId의 `begin` 영수증을 찾아 그 시각을 작업 시작으로 쓴다. 영수증이 없으면 시작은 미상이며 입력으로 받지 않는다. `completedAt`은 `verified`·`completed`·`merged` 상태에서만 받고 시작보다 앞설 수 없다. `finish`는 그 상태를 확인한 순간을 쓰고, 같은 커밋·상태로 다시 실행하거나 `retry`하면 처음 시각을 유지한다. `commits`의 각 커밋은 Git에서 존재, 작업 시작 커밋 이후, 부모 하나, `Diary-Work-Id` 트레일러가 정확히 이 workId 하나, 영수증이 있으면 그 작성자인지 확인하며 하나라도 아니면 `prepare`가 오류로 끝난다. 일시·제목은 입력이 아니라 Git에서 읽고, 원격 추적 브랜치(origin)에 이미 있고 origin이 자격 증명 없는 https 주소일 때만 커밋 링크를 붙인다. `commits`가 없으면 상세의 `작업 커밋 · ` 줄에 있는 해시 중 확인되는 것만 쓴다. 이 근거가 하나라도 있으면 다이어리에 v3 형식으로, 없으면 이전과 같은 v2 형식으로 전달한다.
+
+`kind`는 design / development / troubleshooting / portfolio / summary 중 하나다. 개발 일지 `finish`의 선택 필드 `kind`에는 design / development / troubleshooting을 쓰며 기본값은 development다. 앱의 프로젝트 화면에서 이 세 종류의 경험으로 Markdown 포트폴리오를 생성한다. `status`는 in_progress / verification_pending / verified / completed / merged 중 하나다. `verified`는 기록에 명시한 검증 범위이며 사용자 승인·병합을 의미하지 않는다. 요약은 상세 원문의 완전한 문단을 선택하고, 생략하면 첫 일반 문단을 쓴다. 제한·미확인을 잘라 성과만 남기지 않는다. 상세 원문은 UTF-8 48,000바이트 이하로 나눈다.
 
 ```powershell
 node scripts/project-records.mjs prepare --input .cache/project-record-input.json

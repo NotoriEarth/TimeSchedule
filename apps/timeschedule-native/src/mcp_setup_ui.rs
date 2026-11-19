@@ -241,11 +241,12 @@ impl State {
     /// Re-reads every row's registration off the UI thread. A newer refresh
     /// supersedes an older one still in flight.
     fn refresh(&mut self, dir: PathBuf, endpoint: Option<String>) -> Task<Message> {
+        self.generation += 1;
         let Some(endpoint) = endpoint else {
             self.checking = false;
+            self.registrations = Default::default();
             return Task::none();
         };
-        self.generation += 1;
         self.checking = true;
         let generation = self.generation;
         Task::perform(
@@ -466,7 +467,7 @@ pub fn token_panel(state: &State) -> Element<'_, Message> {
             Some(|c| c.green),
         ),
         TokenPanel::Reissued { running: false } => (
-            "새 토큰을 저장했습니다. MCP 서버가 꺼져 있으므로 앱을 다시 시작하면 새 토큰으로 시작합니다.".into(),
+            "새 토큰을 저장했습니다. MCP 켜기를 누르면 새 토큰으로 연결됩니다.".into(),
             Some(|c| c.amber),
         ),
         TokenPanel::Failed(error) => (

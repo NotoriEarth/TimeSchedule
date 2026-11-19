@@ -53,6 +53,16 @@ function recoveryFixture(t) {
   return { ctx, workId, commit, directory, draft };
 }
 
+test('finish delivers the selected experience kind and refuses generated portfolio input', async t => {
+  const { ctx, workId, directory, commit, draft } = recoveryFixture(t);
+  commit('src/design.mjs', 'export const storage = "local";', workId);
+  await assert.rejects(finish(ctx, workId, draft('배경', { kind: 'portfolio' })), /경험 종류/);
+  assert.equal(fs.existsSync(path.join(directory, 'delivery.json')), false);
+  const result = await finish(ctx, workId, draft('원문을 먼저 저장한다.', { kind: 'design' }));
+  assert.equal(result.phase, 'local_complete');
+  assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'delivery.json'))).source.kind, 'design');
+});
+
 test('a branch reuses its ID, including from a linked worktree', t => {
   const { root, ctx } = fixture(t);
   const first = begin(ctx);
@@ -221,9 +231,10 @@ test('an interrupted note follows its owned commit across other authors and docu
   commit('src/theirs.mjs', 'export const theirs = 1;', undefined, other);
   const ownedHead = commit('src/mine.mjs', 'export const mine = 1;', workId);
   // Interrupt the first finish after the note is saved, before a delivery is durable.
+  // An unreadable delivery path stops finish without taking it as absent.
   const delivery = path.join(directory, 'delivery.json');
   fs.mkdirSync(delivery);
-  await assert.rejects(finish(ctx, workId, draft('Implemented my change.')), { syscall: 'rename', dest: delivery });
+  await assert.rejects(finish(ctx, workId, draft('Implemented my change.')), /이전 전달 기록/);
   fs.rmdirSync(delivery);
   commit('docs/notes.md', 'Documentation only.', workId);
   const theirs = commit('src/later.mjs', 'export const later = 1;', workId, other);
@@ -234,4 +245,40 @@ test('an interrupted note follows its owned commit across other authors and docu
   const { source } = JSON.parse(fs.readFileSync(delivery, 'utf8'));
   assert.equal(source.diarySummary, 'Implemented my change.');
   assert.deepEqual(source.gitChanges.paths, ['src/mine.mjs']);
+});
+
+test('an unreadable or damaged earlier delivery is kept and never becomes a first completion', async t => {
+  const { ctx, workId, commit, directory, draft } = recoveryFixture(t);
+  const done = { status: 'completed', verification: 'User confirmed value one.' };
+  commit('src/value.mjs', 'export const value = 1;', workId);
+  const original = await finish(ctx, workId, draft('Implemented value one.', done));
+  assert.equal(original.phase, 'local_complete', original.lastError);
+  const delivery = path.join(directory, 'delivery.json');
+  const saved = fs.readFileSync(delivery, 'utf8');
+  const first = JSON.parse(saved).firstCompletedAt;
+  assert.equal(typeof first, 'string');
+  commit('src/value.mjs', 'export const value = 2;', workId);
+
+  // Damaged content: finish stops and the file stays byte for byte.
+  const damaged = saved.slice(0, Math.floor(saved.length / 2));
+  fs.writeFileSync(delivery, damaged);
+  await assert.rejects(finish(ctx, workId, draft('Changed the value to two.', done)), /이전 전달 기록이 손상/);
+  assert.equal(fs.readFileSync(delivery, 'utf8'), damaged);
+
+  // A read error other than a missing file (here a directory in its place).
+  fs.rmSync(delivery);
+  fs.mkdirSync(delivery);
+  await assert.rejects(finish(ctx, workId), error => /이전 전달 기록을 읽을 수 없어/.test(error.message)
+    && error.cause?.code && error.cause.code !== 'ENOENT');
+  assert.equal(fs.statSync(delivery).isDirectory(), true);
+  fs.rmdirSync(delivery);
+
+  // Once readable again, the first completion moment is the original one.
+  fs.writeFileSync(delivery, saved);
+  const resumed = await finish(ctx, workId);
+  assert.equal(resumed.phase, 'local_complete', resumed.lastError);
+  const after = JSON.parse(fs.readFileSync(delivery, 'utf8'));
+  assert.equal(after.firstCompletedAt, first);
+  assert.equal(after.source.completedAt, first);
+  assert.equal(after.source.diarySummary, 'Changed the value to two.');
 });

@@ -100,6 +100,8 @@ impl Page {
 pub enum Field {
     Category(String),
     ShortTitle(String),
+    /// A record's typed time of day, `HH:mm` in KST.
+    Time(String),
     ProjectShortName(String),
     Title(String),
     Date(String),
@@ -138,6 +140,7 @@ pub enum Message {
     Calendar(crate::calendar_ui::Action),
     Category(crate::category_ui::Action),
     McpSetup(crate::mcp_setup_ui::Action),
+    SetMcpEnabled(bool),
     WidgetSetting(crate::widget_settings::Change),
     Jump(crate::month_jump::JumpMessage),
     ResizeWidget,
@@ -149,6 +152,9 @@ pub enum Message {
     WindowClosed(window::Id),
     Tick,
     RecordsDue,
+    SetChatCapture(String, bool),
+    ScanChats,
+    ChatsScanned(Result<timeschedule_core::codex_chats::ScanReport, String>),
     RecordsDrained(Result<crate::record_inbox::DrainReport, String>),
     Navigate(Page),
     Month(i32),
@@ -173,11 +179,20 @@ pub enum Message {
     Load,
     Loaded(u64, Result<Snapshot, String>),
     More,
-    MoreLoaded(u64, Result<Vec<EntrySummary>, String>),
+    MoreLoaded(
+        u64,
+        Result<(Vec<EntrySummary>, HashMap<String, u32>), String>,
+    ),
     ToggleEntry(String),
-    EntryLoaded(u64, String, Result<Entry, String>),
+    EntryLoaded(
+        u64,
+        String,
+        Result<(Entry, timeschedule_core::timeline::EntryTimeline), String>,
+    ),
 
     Source(String),
+    /// Open an automatic record's original `record.md` by its work ID.
+    OpenOriginal(String),
     SourceDone(Result<(), String>),
     Field(Field),
     DatePicker(crate::date_choices::Part),
@@ -209,6 +224,8 @@ pub enum Message {
     SearchDone(u64, Result<Vec<SearchHit>, String>),
     Import,
     Imported(Result<ImportResult, String>),
+    Portfolio(crate::portfolio_ui::Action),
+    ChatReview(crate::chat_review_ui::Action),
     Draft(bool),
     Drafted(u64, u64, Result<Form, String>),
     Native(NativeAction),
@@ -241,10 +258,17 @@ pub struct App {
     _mcp: Option<crate::mcp::LocalMcp>,
     mcp_changed: Arc<std::sync::atomic::AtomicBool>,
     pub mcp_status: String,
+    mcp_enabled: Option<bool>,
     pub mcp_setup: crate::mcp_setup_ui::State,
     pub data_dir: PathBuf,
     pub preferences: Preferences,
     pub snapshot: Snapshot,
+    pub chat_review: crate::chat_review_ui::State,
+    pub portfolio_writer: fn(&str) -> Result<String, String>,
+    pub portfolio_selection:
+        std::collections::BTreeMap<String, Option<std::collections::BTreeSet<String>>>,
+    pub portfolio_editor: Option<crate::portfolio_ui::AnswerEdit>,
+    pub portfolio_feedback: Option<(String, String)>,
     pub page: Page,
     pub month: NaiveDate,
     pub selected: NaiveDate,
@@ -256,6 +280,8 @@ pub struct App {
 
     record_sync: crate::record_sync::Runner,
     pub bodies: HashMap<String, Entry>,
+    /// Times and evidence of the records unfolded in the lists, by ID.
+    pub timelines: HashMap<String, timeschedule_core::timeline::EntryTimeline>,
     pub entry_errors: HashMap<String, String>,
     pub editor: Option<Editor>,
     pub editor_generation: u64,
@@ -277,6 +303,7 @@ pub struct App {
     _instance: Option<InstanceLock>,
     ticks: u32,
     records_due: bool,
+    chat_scanning: bool,
     records_processing: bool,
     pub manager_visible: bool,
     prefs_saving: bool,
@@ -341,32 +368,6 @@ impl App {
             None
         };
         let mcp_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut mcp_recovered = None;
-        let (mcp, mcp_status) = if let Some(store) = store.clone() {
-            let started = crate::mcp::LocalMcp::start(store, mcp_changed.clone(), &data_dir);
-            mcp_recovered = started.recovered;
-            match started.server {
-                Ok(Some(server)) => {
-                    let status = server.status.clone();
-                    (Some(server), status)
-                }
-                Ok(None) => (None, "꺼짐 · TIMESCHEDULE_MCP_DISABLED=1".into()),
-                Err(error) => (None, format!("시작하지 못함 · {error}")),
-            }
-        } else {
-            (None, "꺼짐 · 데이터 저장소를 사용할 수 없습니다.".into())
-        };
-        // The settings screen reissues the token through the running server.
-        let mcp_setup = crate::mcp_setup_ui::State {
-            token_control: crate::mcp::TokenControl::for_app(mcp.as_ref(), instance.is_some()),
-            // Shown even if the server then failed to start: the old token is gone.
-            token: if mcp_recovered.is_some() {
-                crate::mcp_setup_ui::TokenPanel::Recovered
-            } else {
-                Default::default()
-            },
-            ..Default::default()
-        };
         let tray = match NativeTray::new() {
             Ok(t) => Some(t),
             Err(e) => {
@@ -400,13 +401,19 @@ impl App {
             quick_loading: false,
             editor_in_quick: false,
             store,
-            _mcp: mcp,
+            _mcp: None,
             mcp_changed,
-            mcp_status,
-            mcp_setup,
+            mcp_status: "꺼짐 · 데이터 폴더를 사용할 수 없습니다.".into(),
+            mcp_enabled: None,
+            mcp_setup: Default::default(),
             data_dir,
             preferences: prefs,
             snapshot: Snapshot::default(),
+            chat_review: Default::default(),
+            portfolio_writer: timeschedule_core::terra::generate,
+            portfolio_feedback: None,
+            portfolio_selection: Default::default(),
+            portfolio_editor: None,
             page: Page::Month,
             month,
             selected: today,
@@ -418,6 +425,7 @@ impl App {
 
             record_sync: crate::record_sync::Runner::default(),
             bodies: HashMap::new(),
+            timelines: HashMap::new(),
             entry_errors: HashMap::new(),
             editor: None,
             editor_generation: 0,
@@ -439,6 +447,7 @@ impl App {
             _instance: instance,
             ticks: 0,
             records_due: false,
+            chat_scanning: false,
             records_processing: false,
             manager_visible: true,
             prefs_saving: false,
@@ -453,9 +462,11 @@ impl App {
             app.store.is_some(),
             app.error
         ));
-        if let Some(reason) = mcp_recovered {
-            // The reason only: the unusable file's content is not kept anywhere.
-            app.log(&format!("mcp token file unusable ({reason}); reissued"));
+        if app._instance.is_some() {
+            match crate::mcp_power::Power::initialize(&app.data_dir) {
+                Ok(power) => app.apply_mcp_power(power.enabled),
+                Err(error) => app.mcp_status = error,
+            }
         }
         let widget = app.open_widget();
         let load = app.refresh();
@@ -466,6 +477,7 @@ impl App {
                 widget,
                 load,
                 Task::done(Message::RecordsDue),
+                Task::done(Message::ScanChats),
             ]),
         )
     }
@@ -485,6 +497,43 @@ impl App {
             }
         }
     }
+    pub fn can_set_mcp(&self, enabled: bool) -> bool {
+        self._instance.is_some()
+            && !self.mcp_setup.busy
+            && if enabled {
+                self.store.is_some() && self.mcp_endpoint().is_none()
+            } else {
+                self.mcp_enabled != Some(false)
+            }
+    }
+
+    fn apply_mcp_power(&mut self, enabled: bool) {
+        self._mcp.take();
+        self.mcp_enabled = Some(enabled);
+        self.mcp_status = if !enabled {
+            "꺼짐".into()
+        } else if let Some(store) = self.store.clone() {
+            let started =
+                crate::mcp::LocalMcp::start(store, self.mcp_changed.clone(), &self.data_dir);
+            if let Some(reason) = started.recovered {
+                self.log(&format!("mcp token file unusable ({reason}); reissued"));
+                self.mcp_setup.token = crate::mcp_setup_ui::TokenPanel::Recovered;
+            }
+            match started.server {
+                Ok(server) => {
+                    let status = server.status.clone();
+                    self._mcp = Some(server);
+                    status
+                }
+                Err(error) => format!("시작하지 못함 · {error}"),
+            }
+        } else {
+            "시작하지 못함 · 데이터 저장소를 사용할 수 없습니다.".into()
+        };
+        self.mcp_setup.token_control =
+            crate::mcp::TokenControl::for_app(self._mcp.as_ref(), self._instance.is_some());
+    }
+
     /// The running MCP server's endpoint, used to judge whether each AI app's
     /// registration points at it.
     pub fn mcp_endpoint(&self) -> Option<String> {
@@ -593,6 +642,7 @@ impl App {
         let generation = self.view_generation;
         self.expanded.clear();
         self.bodies.clear();
+        self.timelines.clear();
         self.entry_errors.clear();
         self.paging = false;
         // The previous snapshot may remain visible while loading, but it cannot
@@ -836,7 +886,12 @@ impl App {
             self.quit_when_idle = true;
             return self.save_preferences();
         }
-        if self.busy || self.prefs_saving || self.native_busy || self.mcp_setup.busy {
+        if self.busy
+            || self.prefs_saving
+            || self.native_busy
+            || self.mcp_setup.busy
+            || self.chat_scanning
+        {
             self.quit_when_idle = true;
             self.notice = "진행 중인 저장·Git·설정 작업을 마친 뒤 종료합니다.".into();
             return Task::none();
@@ -932,12 +987,14 @@ impl App {
                     | Message::EscapeWindow(_)
                     | Message::Calendar(crate::calendar_ui::Action::QuickPage(..))
                     | Message::Calendar(crate::calendar_ui::Action::GroupLoaded(..))
+                    | Message::Calendar(crate::calendar_ui::Action::GroupMoreLoaded(..))
                     | Message::QuickReady(_)
                     | Message::PopupPositioned(..)
                     | Message::Jump(crate::month_jump::JumpMessage::Ready(_))
                     | Message::Tick
                     | Message::RecordsDue
                     | Message::RecordsDrained(_)
+                    | Message::ChatsScanned(_)
                     | Message::NativeDone(..)
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Finished(_))
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Loaded(..))
@@ -956,6 +1013,14 @@ impl App {
                     | Message::MutationDone(_)
                     | Message::Imported(_)
                     | Message::Drafted(..)
+                    | Message::ChatReview(
+                        crate::chat_review_ui::Action::Read(..)
+                            | crate::chat_review_ui::Action::Finished(..)
+                    )
+                    | Message::Portfolio(
+                        crate::portfolio_ui::Action::Answered(..)
+                            | crate::portfolio_ui::Action::Exported(..)
+                    )
                     | Message::EntryLoaded(..)
                     | Message::FormLoaded(..)
                     | Message::Composition(..)
@@ -973,6 +1038,67 @@ impl App {
                 return self
                     .mcp_setup
                     .update(action, self.data_dir.clone(), endpoint);
+            }
+            Message::SetMcpEnabled(enabled) => {
+                if !self.can_set_mcp(enabled) {
+                    return Task::none();
+                }
+                if let Err(error) = crate::mcp_power::Power::set(&self.data_dir, enabled) {
+                    self.error = error;
+                    return Task::none();
+                }
+                self.mcp_setup.preview = None;
+                self.mcp_setup.status.clear();
+                self.mcp_setup.token = Default::default();
+                self.apply_mcp_power(enabled);
+                let endpoint = self.mcp_endpoint();
+                return self.mcp_setup.update(
+                    crate::mcp_setup_ui::Action::Refresh,
+                    self.data_dir.clone(),
+                    endpoint,
+                );
+            }
+            Message::SetChatCapture(id, enabled) => {
+                if let Some(store) = self
+                    .store
+                    .as_ref()
+                    .filter(|_| self._instance.is_some() && self.project.as_ref() == Some(&id))
+                {
+                    match store.set_chat_capture(&id, enabled) {
+                        Ok(()) => {
+                            return Task::batch([self.refresh(), Task::done(Message::ScanChats)])
+                        }
+                        Err(e) => self.error = e,
+                    }
+                }
+            }
+            Message::ScanChats => {
+                if let Some(store) = self.store.clone().filter(|_| {
+                    self._instance.is_some() && !self.chat_scanning && !self.quit_when_idle
+                }) {
+                    self.chat_scanning = true;
+                    return worker::job(
+                        store,
+                        |s| worker::scan_chats(s, false),
+                        Message::ChatsScanned,
+                    );
+                }
+            }
+            Message::ChatsScanned(result) => {
+                self.chat_scanning = false;
+                match result {
+                    Ok(r) => {
+                        if r.failed > 0 {
+                            self.error=format!("Codex 채팅 파일 {}개를 읽지 못했습니다. 다음 확인 때 재시도합니다.",r.failed);
+                        }
+                        if r.saved > 0 {
+                            self.notice =
+                                format!("Codex 채팅 {}건을 프로젝트 이력에 반영했습니다.", r.saved);
+                            return self.refresh();
+                        }
+                    }
+                    Err(e) => self.error = format!("Codex 채팅 수집 실패 · {e}"),
+                }
             }
             Message::RecordsDue => {
                 self.records_due = true;
@@ -1113,6 +1239,7 @@ impl App {
                     && !self.prefs_saving
                     && !self.native_busy
                     && !self.mcp_setup.busy
+                    && !self.chat_scanning
                 {
                     self.quit_when_idle = false;
                     return self.request_close(CloseIntent::Application);
@@ -1141,7 +1268,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|server| !server.is_running())
                 {
-                    self.mcp_status = "중지됨 · 앱을 다시 시작하면 연결을 재시도합니다.".into();
+                    self.mcp_status = "중지됨 · MCP 켜기로 다시 시작하세요.".into();
                 }
                 if self
                     .mcp_changed
@@ -1154,6 +1281,7 @@ impl App {
                 }
                 if self.ticks % 120 == 0 {
                     self.records_due = true;
+                    tasks.push(Task::done(Message::ScanChats));
                 }
                 if self.records_due {
                     tasks.push(self.poll_record_inbox());
@@ -1248,6 +1376,8 @@ impl App {
                 return self.place_popup(self.quick_anchor(), id);
             }
             Message::Project(id) if self.editor.is_none() => {
+                self.portfolio_feedback = None;
+                self.chat_review = Default::default();
                 self.project = id;
                 self.page = Page::Projects;
                 self.search.clear();
@@ -1347,18 +1477,22 @@ impl App {
                 let offset = self.snapshot.entries.len() as u32;
                 return worker::job(
                     store,
-                    move |s| {
-                        s.list_entries(&scope.from, &scope.to, scope.project.as_deref(), offset)
-                    },
+                    move |s| worker::entry_page(s, &scope, offset),
                     move |r| Message::MoreLoaded(g, r),
                 );
             }
             Message::MoreLoaded(g, result) if g == self.view_generation && self.paging => {
                 self.paging = false;
                 match result {
-                    Ok(rows) => {
+                    Ok((rows, totals)) => {
                         self.more = rows.len() == 200;
-                        self.snapshot.entries.extend(rows)
+                        // A record moved between pages is listed once.
+                        let known: HashSet<String> =
+                            self.snapshot.entries.iter().map(|e| e.id.clone()).collect();
+                        self.snapshot
+                            .entries
+                            .extend(rows.into_iter().filter(|e| !known.contains(&e.id)));
+                        self.snapshot.entry_totals.extend(totals);
                     }
                     Err(e) => self.error = e,
                 }
@@ -1373,14 +1507,19 @@ impl App {
                 };
                 let g = self.view_generation;
                 let key = id.clone();
+                let dir = self.data_dir.clone();
                 return worker::job(
                     store,
-                    move |s| s.get_entry(&id),
+                    move |s| {
+                        worker::complete_evidence(s, &dir, std::slice::from_ref(&id));
+                        Ok((s.get_entry(&id)?, s.entry_timeline(&id)?))
+                    },
                     move |r| Message::EntryLoaded(g, key.clone(), r),
                 );
             }
             Message::EntryLoaded(g, id, result) if g == self.view_generation => match result {
-                Ok(entry) => {
+                Ok((entry, timeline)) => {
+                    self.timelines.insert(id.clone(), timeline);
                     self.bodies.insert(id, entry);
                 }
                 Err(e) => {
@@ -1398,6 +1537,19 @@ impl App {
                     },
                     Message::SourceDone,
                 )
+            }
+            Message::OpenOriginal(work_id) => {
+                let dir = self.data_dir.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::record_original::open(&dir, &work_id)
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::SourceDone,
+                );
             }
             Message::SourceDone(Err(e)) => self.error = e,
             Message::DatePicker(part) => {
@@ -1496,6 +1648,7 @@ impl App {
                         Field::Title(v) => e.form.title = v,
                         Field::Category(v) => e.form.category_id = v,
                         Field::ShortTitle(v) => e.form.short_title = v,
+                        Field::Time(v) => e.form.time = v.chars().take(5).collect(),
                         Field::ProjectShortName(v) => e.form.project_short_name = v,
                         Field::Date(v) => e.form.date = v,
                         Field::Project(v) => e.form.project_id = v,
@@ -1696,6 +1849,8 @@ impl App {
                     Err(e) => self.error = e,
                 }
             }
+            Message::ChatReview(action) => return crate::chat_review_ui::update(self, action),
+            Message::Portfolio(action) => return crate::portfolio_ui::update(self, action),
             Message::Draft(portfolio) if !self.busy && self.editor.is_none() => {
                 let Some(store) = self.store.clone() else {
                     return Task::none();
@@ -1875,10 +2030,16 @@ mod tests {
             _mcp: None,
             mcp_changed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_status: String::new(),
+            mcp_enabled: None,
             mcp_setup: Default::default(),
             data_dir: PathBuf::new(),
             preferences: Preferences::default(),
             snapshot: Snapshot::default(),
+            chat_review: Default::default(),
+            portfolio_writer: timeschedule_core::terra::generate,
+            portfolio_feedback: None,
+            portfolio_selection: Default::default(),
+            portfolio_editor: None,
             page: Page::Month,
             month: date.with_day(1).unwrap(),
             selected: date,
@@ -1890,6 +2051,7 @@ mod tests {
 
             record_sync: crate::record_sync::Runner::default(),
             bodies: HashMap::new(),
+            timelines: HashMap::new(),
             entry_errors: HashMap::new(),
             editor: None,
             editor_generation: 0,
@@ -1911,6 +2073,7 @@ mod tests {
             _instance: None,
             ticks: 0,
             records_due: false,
+            chat_scanning: false,
             records_processing: false,
             manager_visible: true,
             prefs_saving: false,
