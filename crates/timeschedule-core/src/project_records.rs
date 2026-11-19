@@ -188,7 +188,7 @@ struct ManagedSnapshot {
     source_url: String,
 }
 
-fn repo_key(value: &str) -> String {
+pub(crate) fn repo_key(value: &str) -> String {
     let path = std::fs::canonicalize(value).unwrap_or_else(|_| value.into());
     let normalized = path.to_string_lossy().replace('\\', "/");
     let normalized = normalized
@@ -874,7 +874,7 @@ mod tests {
         let path = dir.join("schedule.db");
         {
             let store = Storage::open(&path).unwrap();
-            store.connection().unwrap().execute_batch("DROP VIEW project_experiences; DROP TABLE portfolio_answers; DROP TABLE portfolio_editions; DROP TABLE entry_time; DROP TABLE entry_evidence; DROP TABLE IF EXISTS project_record_receipts; DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; PRAGMA user_version = 2; INSERT INTO notes VALUES ('128b13cb-0cf2-41da-84c4-db20dca65d73','기존 노트','보존할 본문','2026-10-30'); DROP TABLE search_order;").unwrap();
+            store.connection().unwrap().execute_batch("DROP TABLE codex_chat_sessions; DROP TABLE codex_chat_projects; DROP VIEW project_experiences; DROP TABLE portfolio_answers; DROP TABLE portfolio_editions; DROP TABLE entry_time; DROP TABLE entry_evidence; DROP TABLE IF EXISTS project_record_receipts; DROP TABLE entry_display; DROP TABLE project_display; DROP TABLE task_details; DROP TABLE calendar_categories; DROP INDEX tasks_date; PRAGMA user_version = 2; INSERT INTO notes VALUES ('128b13cb-0cf2-41da-84c4-db20dca65d73','기존 노트','보존할 본문','2026-10-30'); DROP TABLE search_order;").unwrap();
         }
         {
             let store = Storage::open(&path).unwrap();
