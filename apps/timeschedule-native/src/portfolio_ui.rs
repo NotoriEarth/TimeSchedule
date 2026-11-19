@@ -4,7 +4,7 @@ use crate::{
     worker,
 };
 use iced::{
-    widget::{button, column, row, text, text_input},
+    widget::{button, checkbox, column, row, scrollable, text, text_input},
     Element, Task,
 };
 use std::path::PathBuf;
@@ -23,6 +23,8 @@ pub enum Action {
     Input(String),
     Save,
     Defer,
+    SelectMode(bool),
+    Toggle(String, bool),
     Export,
     Open,
     Answered(String, Result<(), String>),
@@ -31,6 +33,23 @@ pub enum Action {
 
 fn message(a: Action) -> Message {
     Message::Portfolio(a)
+}
+
+fn selection<'a>(
+    app: &'a App,
+    p: &'a PortfolioPanel,
+) -> Option<&'a std::collections::BTreeSet<String>> {
+    app.portfolio_selection
+        .get(&p.project_id)
+        .unwrap_or(&p.last_selection)
+        .as_ref()
+}
+
+fn needs_answer(p: &PortfolioPanel, ids: Option<&std::collections::BTreeSet<String>>) -> bool {
+    p.needs_answer
+        && p.choices
+            .iter()
+            .any(|e| e.needs_answer && ids.is_none_or(|ids| ids.contains(&e.id)))
 }
 
 pub fn panel<'a>(app: &'a App, p: &'a PortfolioPanel) -> Element<'a, Message> {
@@ -51,12 +70,37 @@ pub fn panel<'a>(app: &'a App, p: &'a PortfolioPanel) -> Element<'a, Message> {
     if app.busy || app.loading {
         return section.into();
     }
+    let selected = selection(app, p);
+    if let Some(ids) = selected {
+        section = section.push(
+            row![
+                text(format!("선택한 경험 {}건", ids.len())),
+                control("전체 경험 사용", message(Action::SelectMode(false)))
+            ]
+            .spacing(8),
+        );
+        let mut choices = column![].spacing(5);
+        for e in &p.choices {
+            let id = e.id.clone();
+            choices = choices.push(
+                checkbox(ids.contains(&id))
+                    .label(format!("{} · {}", e.date, e.title))
+                    .on_toggle(move |checked| message(Action::Toggle(id.clone(), checked))),
+            );
+        }
+        section = section.push(scrollable(choices).height(110));
+        if ids.is_empty() {
+            return section.into();
+        }
+    } else {
+        section = section.push(control("경험 선택", message(Action::SelectMode(true))));
+    }
     let input = app
         .portfolio_editor
         .as_ref()
         .filter(|edit| edit.project == p.project_id)
         .map(|edit| edit.value.as_str());
-    if p.needs_answer || input.is_some() {
+    if needs_answer(p, selected) || input.is_some() {
         let value = input.unwrap_or_default();
         let field = text_input("직접 맡은 역할", value).on_input(|s| message(Action::Input(s)));
         let save = button(text("답변 저장").size(13))
@@ -137,6 +181,22 @@ pub fn update(app: &mut App, a: Action) -> Task<Message> {
                 return Task::none();
             };
             match action {
+                Action::SelectMode(subset) => {
+                    app.portfolio_selection
+                        .insert(id, subset.then(Default::default));
+                }
+                Action::Toggle(entry, checked) => {
+                    if let Some(mut ids) = selection(app, state).cloned() {
+                        if state.choices.iter().any(|e| e.id == entry) {
+                            if checked {
+                                ids.insert(entry);
+                            } else {
+                                ids.remove(&entry);
+                            }
+                            app.portfolio_selection.insert(id, Some(ids));
+                        }
+                    }
+                }
                 Action::Cancel => app.portfolio_editor = None,
                 Action::Open => {
                     if let Some(file) = &state.last_file {
@@ -199,12 +259,13 @@ pub fn update(app: &mut App, a: Action) -> Task<Message> {
                         move |r| message(Action::Answered(key.clone(), r)),
                     );
                 }
-                Action::Export if !state.needs_answer => {
+                Action::Export if !needs_answer(state, selection(app, state)) => {
+                    let selected = selection(app, state).cloned();
                     app.busy = true;
                     let root = app.data_dir.clone();
                     return worker::job(
                         store,
-                        move |s| s.export_portfolio(&id, &root),
+                        move |s| s.export_portfolio_selection(&id, &root, selected.as_ref()),
                         |r| message(Action::Exported(r)),
                     );
                 }

@@ -1,6 +1,7 @@
 use crate::storage::{database_error, validate_id, validate_text, Storage};
 use crate::timeline::{status_label, RecordCommit};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -32,10 +33,32 @@ pub(crate) fn migrate(c: &Connection) -> Result<(), String> {
     ).map_err(database_error)
 }
 
+pub(crate) fn migrate_v10(c: &Connection) -> Result<(), String> {
+    c.execute_batch("ALTER TABLE portfolio_editions RENAME TO portfolio_v9;
+        CREATE TABLE portfolio_editions(
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          revision INTEGER NOT NULL, folder TEXT NOT NULL, markdown TEXT NOT NULL, evidence TEXT NOT NULL,
+          published INTEGER NOT NULL, selection TEXT, last_used INTEGER NOT NULL,
+          PRIMARY KEY(project_id,revision));
+        INSERT INTO portfolio_editions SELECT *,NULL,revision FROM portfolio_v9;
+        DROP TABLE portfolio_v9;
+        PRAGMA user_version=10;").map_err(database_error)
+}
+
+#[derive(Clone, Debug)]
+pub struct ExperienceChoice {
+    pub id: String,
+    pub title: String,
+    pub date: String,
+    pub needs_answer: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct PortfolioPanel {
     pub project_id: String,
     pub experiences: usize,
+    pub choices: Vec<ExperienceChoice>,
+    pub last_selection: Option<BTreeSet<String>>,
     /// Empty means the user explicitly deferred individual attribution.
     pub answer: Option<String>,
     pub needs_answer: bool,
@@ -57,32 +80,38 @@ impl Storage {
         validate_id(project)?;
         let c = self.connection()?;
         let answer = answer(&c, project)?;
-        let experiences = c
-            .query_row(
-                "SELECT count(*) FROM project_experiences WHERE project_id=?1",
-                [project],
-                |r| r.get::<_, usize>(0),
+        let mut q = c
+            .prepare(
+                "SELECT x.id,x.title,x.date, CASE WHEN ?2 THEN x.experience_text ELSE '' END
+            FROM project_experiences x JOIN diary_entries e ON x.id=e.id
+            WHERE x.project_id=?1 ORDER BY x.date DESC,e.updated_at DESC,x.id",
             )
             .map_err(database_error)?;
-        let mut needs_answer = false;
-        if answer.is_none() && experiences > 0 {
-            let mut q = c
-                .prepare("SELECT experience_text FROM project_experiences WHERE project_id=?1")
-                .map_err(database_error)?;
-            let mut rows = q.query([project]).map_err(database_error)?;
-            while let Some(row) = rows.next().map_err(database_error)? {
-                let body: String = row.get(0).map_err(database_error)?;
-                if markdown::needs_role(&body) {
-                    needs_answer = true;
-                    break;
-                }
-            }
-        }
-        let last: Option<(i64,String)> = c.query_row(
-            "SELECT revision,folder FROM portfolio_editions WHERE project_id=?1 AND published=1",
-            [project], |r| Ok((r.get(0)?,r.get(1)?)))
+        let choices = q
+            .query_map(params![project, answer.is_none()], |r| {
+                Ok(ExperienceChoice {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    date: r.get(2)?,
+                    needs_answer: answer.is_none() && markdown::needs_role(&r.get::<_, String>(3)?),
+                })
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        let experiences = choices.len();
+        let needs_answer = choices.iter().any(|e| e.needs_answer);
+        let last: Option<(i64,String,Option<String>)> = c.query_row(
+            "SELECT revision,folder,selection FROM portfolio_editions WHERE project_id=?1 AND published=1 ORDER BY last_used DESC LIMIT 1",
+            [project], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?)))
             .optional().map_err(database_error)?;
-        let last_file = if let Some((revision, folder)) = last {
+        let last_selection = last
+            .as_ref()
+            .and_then(|(_, _, s)| s.as_deref())
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| format!("저장한 경험 선택을 읽지 못했습니다. {e}"))?;
+        let last_file = if let Some((revision, folder, _)) = last {
             validate_id(&folder)?;
             Some(
                 Path::new("portfolios")
@@ -96,6 +125,8 @@ impl Storage {
         Ok(PortfolioPanel {
             project_id: project.into(),
             experiences,
+            choices,
+            last_selection,
             answer,
             needs_answer,
             last_file,
@@ -126,27 +157,39 @@ impl Storage {
     /// Reserve one edition for a consistent snapshot. Identical requests, including
     /// retry after a filesystem failure, reuse the reservation.
     pub fn export_portfolio(&self, project: &str, root: &Path) -> Result<PathBuf, String> {
+        self.export_portfolio_selection(project, root, None)
+    }
+
+    pub fn export_portfolio_selection(
+        &self,
+        project: &str,
+        root: &Path,
+        selected: Option<&BTreeSet<String>>,
+    ) -> Result<PathBuf, String> {
+        if selected.is_some_and(BTreeSet::is_empty) {
+            return Err("경험을 한 건 이상 선택하세요.".into());
+        }
+        let selection = selected
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| e.to_string())?;
         validate_id(project)?;
         let (revision, folder, markdown, evidence, published) = {
             let mut c = self.connection()?;
             let tx = c
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
-            let (markdown, evidence) = render(&tx, project)?;
-            let previous = tx.query_row("SELECT revision,folder,markdown=?2 AND evidence=?3,published FROM portfolio_editions WHERE project_id=?1",
-                params![project,markdown,evidence], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,bool>(2)?,r.get::<_,bool>(3)?)))
+            let (markdown, evidence) = render(&tx, project, selected)?;
+            let previous = tx.query_row("SELECT revision,folder,published FROM portfolio_editions WHERE project_id=?1 AND markdown=?2 AND evidence=?3 AND selection IS ?4 ORDER BY revision DESC LIMIT 1",
+                params![project,markdown,evidence,selection], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,bool>(2)?)))
                 .optional().map_err(database_error)?;
-            let (revision, folder, published) = match previous {
-                Some((revision, folder, true, published)) => (revision, folder, published),
-                other => {
-                    let revision = other.map_or(1, |(r, ..)| r + 1);
-                    let folder = Uuid::new_v4().to_string();
-                    tx.execute("INSERT INTO portfolio_editions VALUES(?1,?2,?3,?4,?5,0)
-                      ON CONFLICT(project_id) DO UPDATE SET revision=excluded.revision,folder=excluded.folder,
-                      markdown=excluded.markdown,evidence=excluded.evidence,published=0",
-                      params![project,revision,folder,markdown,evidence]).map_err(database_error)?;
-                    (revision, folder, false)
-                }
+            let (revision, folder, published) = if let Some(existing) = previous {
+                existing
+            } else {
+                let revision:i64=tx.query_row("SELECT COALESCE(MAX(revision),0)+1 FROM portfolio_editions WHERE project_id=?1",[project],|r|r.get(0)).map_err(database_error)?;
+                let folder = Uuid::new_v4().to_string();
+                tx.execute("INSERT INTO portfolio_editions(project_id,revision,folder,markdown,evidence,published,selection,last_used) VALUES(?1,?2,?3,?4,?5,0,?6,0)",params![project,revision,folder,markdown,evidence,selection]).map_err(database_error)?;
+                (revision, folder, false)
             };
             tx.commit().map_err(database_error)?;
             (revision, folder, markdown, evidence, published)
@@ -160,19 +203,21 @@ impl Storage {
             &evidence,
             published,
         )?;
-        if !published {
-            self.connection()?
+        self.connection()?
                 .execute(
-                    "UPDATE portfolio_editions SET published=1 WHERE project_id=?1 AND folder=?2",
+                    "UPDATE portfolio_editions SET published=1,last_used=(SELECT COALESCE(MAX(last_used),0)+1 FROM portfolio_editions WHERE project_id=?1) WHERE project_id=?1 AND folder=?2",
                     params![project, folder],
                 )
                 .map_err(database_error)?;
-        }
         Ok(file)
     }
 }
 
-fn render(c: &Connection, project: &str) -> Result<(String, String), String> {
+fn render(
+    c: &Connection,
+    project: &str,
+    selected: Option<&BTreeSet<String>>,
+) -> Result<(String, String), String> {
     let (name, description): (String, String) = c
         .query_row(
             "SELECT title,description FROM projects WHERE id=?1",
@@ -212,6 +257,9 @@ fn render(c: &Connection, project: &str) -> Result<(String, String), String> {
     while let Some(r) = rows.next().map_err(database_error)? {
         let get = |idx| r.get::<_, String>(idx).map_err(database_error);
         let id = get(0)?;
+        if selected.is_some_and(|ids| !ids.contains(&id)) {
+            continue;
+        }
         validate_id(&id)?;
         let (kind, title, date, body, url) = (get(1)?, get(2)?, get(3)?, get(4)?, get(5)?);
         let text = body.as_str();
@@ -297,6 +345,9 @@ fn render(c: &Connection, project: &str) -> Result<(String, String), String> {
         }
         sources.push('\n');
         count += 1;
+    }
+    if selected.is_some_and(|ids| ids.len() != count) {
+        return Err("선택한 경험이 변경되었습니다. 목록을 다시 확인하세요.".into());
     }
     if count == 0 {
         return Err("이 프로젝트에 설계·개발·트러블슈팅 기록이 없습니다.".into());

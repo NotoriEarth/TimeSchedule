@@ -226,3 +226,107 @@ fn incomplete_exports_retry_and_a_deleted_user_file_is_preserved() {
     assert!(s.export_portfolio(&id, &root).is_err());
     assert!(!file.exists());
 }
+
+#[test]
+fn selected_editions_reopen_edits_after_switching_subsets_and_restart() {
+    use std::collections::BTreeSet;
+    let dir = Dir::new();
+    let path = dir.0.join("schedule.db");
+    let db = Storage::open(&path).unwrap();
+    let project = db
+        .save_project(ProjectInput {
+            id: None,
+            title: "TimeSchedule".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap()
+        .id;
+    let design = db
+        .save_entry(manual(&project, "design", "설계 본문"))
+        .unwrap()
+        .id;
+    let fix = db
+        .save_entry(manual(&project, "troubleshooting", "검사 본문"))
+        .unwrap()
+        .id;
+    let skip = db
+        .save_entry(manual(&project, "development", "제외 본문"))
+        .unwrap()
+        .id;
+    let selected = BTreeSet::from([design, fix]);
+    db.save_portfolio_answer(&project, None, "").unwrap();
+    let first = db
+        .export_portfolio_selection(&project, &dir.0, Some(&selected))
+        .unwrap();
+    for f in [&first, &first.with_file_name("evidence.md")] {
+        let data = fs::read_to_string(f).unwrap();
+        assert!(
+            data.contains("설계 본문") && data.contains("검사 본문") && !data.contains("제외 본문")
+        );
+    }
+    fs::write(&first, "직접 수정한 문장").unwrap();
+    let other = db
+        .export_portfolio_selection(&project, &dir.0, Some(&BTreeSet::from([skip])))
+        .unwrap();
+    assert_ne!(first, other);
+    drop(db);
+    let db = Storage::open(path).unwrap();
+    assert_eq!(
+        first,
+        db.export_portfolio_selection(&project, &dir.0, Some(&selected))
+            .unwrap()
+    );
+    let panel = db.portfolio_panel(&project).unwrap();
+    assert_eq!(panel.last_selection, Some(selected));
+    assert_eq!(panel.answer.as_deref(), Some(""));
+    assert_eq!(fs::read_to_string(first).unwrap(), "직접 수정한 문장");
+    for invalid in [
+        BTreeSet::new(),
+        BTreeSet::from([Uuid::new_v4().to_string()]),
+    ] {
+        assert!(db
+            .export_portfolio_selection(&project, &dir.0, Some(&invalid))
+            .is_err());
+    }
+}
+
+#[test]
+fn existing_v9_edition_and_role_survive_upgrade() {
+    let dir = Dir::new();
+    let path = dir.0.join("schedule.db");
+    let s = Storage::open(&path).unwrap();
+    let r = s
+        .apply_project_record(&record(&dir.0, "design", "설계 내용"))
+        .unwrap();
+    let project = s
+        .get_entry(&r.entry_id.unwrap())
+        .unwrap()
+        .project_id
+        .unwrap();
+    s.save_portfolio_answer(&project, None, "").unwrap();
+    let file = s.export_portfolio(&project, &dir.0).unwrap();
+    fs::write(&file, "이전 버전에서 편집한 문장").unwrap();
+    drop(s);
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.execute_batch("ALTER TABLE portfolio_editions RENAME TO current_editions;
+      CREATE TABLE portfolio_editions(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      revision INTEGER NOT NULL,folder TEXT NOT NULL,markdown TEXT NOT NULL,evidence TEXT NOT NULL,published INTEGER NOT NULL DEFAULT 0);
+      INSERT INTO portfolio_editions SELECT project_id,revision,folder,markdown,evidence,published FROM current_editions;
+      DROP TABLE current_editions; PRAGMA user_version=9;").unwrap();
+    drop(c);
+    let upgraded = Storage::open(&path).unwrap();
+    assert_eq!(upgraded.export_portfolio(&project, &dir.0).unwrap(), file);
+    assert_eq!(
+        fs::read_to_string(file).unwrap(),
+        "이전 버전에서 편집한 문장"
+    );
+    assert_eq!(
+        upgraded
+            .portfolio_panel(&project)
+            .unwrap()
+            .answer
+            .as_deref(),
+        Some("")
+    );
+}
