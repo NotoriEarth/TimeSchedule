@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::model::MODEL;
+pub const MODEL: &str = "gpt-6.1-terra";
 
 fn executable() -> Result<PathBuf, String> {
     let name = if cfg!(windows) { "codex.exe" } else { "codex" };
@@ -36,10 +36,7 @@ fn executable() -> Result<PathBuf, String> {
     Err("Codex CLI를 찾을 수 없습니다. Codex를 설치하고 로그인해 주세요.".into())
 }
 
-pub(super) fn infer(request: &serde_json::Value) -> Result<String, String> {
-    let prompt = request["messages"][0]["content"]
-        .as_str()
-        .ok_or("Terra 입력이 비었습니다.")?;
+pub fn generate(prompt: &str) -> Result<String, String> {
     let mut cmd = Command::new(executable()?);
     #[cfg(windows)]
     {

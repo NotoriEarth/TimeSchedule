@@ -264,6 +264,7 @@ pub struct App {
     pub preferences: Preferences,
     pub snapshot: Snapshot,
     pub chat_review: crate::chat_review_ui::State,
+    pub portfolio_writer: fn(&str) -> Result<String, String>,
     pub portfolio_selection:
         std::collections::BTreeMap<String, Option<std::collections::BTreeSet<String>>>,
     pub portfolio_editor: Option<crate::portfolio_ui::AnswerEdit>,
@@ -408,6 +409,7 @@ impl App {
             preferences: prefs,
             snapshot: Snapshot::default(),
             chat_review: Default::default(),
+            portfolio_writer: timeschedule_core::terra::generate,
             portfolio_selection: Default::default(),
             portfolio_editor: None,
             page: Page::Month,
@@ -2031,6 +2033,7 @@ mod tests {
             preferences: Preferences::default(),
             snapshot: Snapshot::default(),
             chat_review: Default::default(),
+            portfolio_writer: timeschedule_core::terra::generate,
             portfolio_selection: Default::default(),
             portfolio_editor: None,
             page: Page::Month,

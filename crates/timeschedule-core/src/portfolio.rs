@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 mod markdown;
+mod writing;
 
 pub(crate) fn migrate(c: &Connection) -> Result<(), String> {
     c.execute_batch(
@@ -166,58 +167,166 @@ impl Storage {
         root: &Path,
         selected: Option<&BTreeSet<String>>,
     ) -> Result<PathBuf, String> {
+        self.export_edition(project, root, selected, None)
+    }
+
+    pub fn export_portfolio_with_writer(
+        &self,
+        project: &str,
+        root: &Path,
+        selected: Option<&BTreeSet<String>>,
+        writer: impl Fn(&str) -> Result<String, String>,
+    ) -> Result<PathBuf, String> {
+        self.export_edition(project, root, selected, Some(&writer))
+    }
+
+    fn export_edition(
+        &self,
+        project: &str,
+        root: &Path,
+        selected: Option<&BTreeSet<String>>,
+        writer: Option<&dyn Fn(&str) -> Result<String, String>>,
+    ) -> Result<PathBuf, String> {
         if selected.is_some_and(BTreeSet::is_empty) {
             return Err("경험을 한 건 이상 선택하세요.".into());
         }
+        validate_id(project)?;
         let selection = selected
             .map(serde_json::to_string)
             .transpose()
             .map_err(|e| e.to_string())?;
-        validate_id(project)?;
-        let (revision, folder, markdown, evidence, published) = {
+        let mut c = self.connection()?;
+        let read = c.transaction().map_err(database_error)?;
+        let snapshot = render(&read, project, selected)?;
+        let key = writer.as_ref().map(|_| {
+            serde_json::json!([crate::terra::MODEL, snapshot.role, snapshot.template]).to_string()
+        });
+        let lookup = |c: &Connection, source: Option<&str>| -> Result<Option<Edition>, String> {
+            c.query_row(
+                "SELECT revision,folder,markdown,published FROM portfolio_editions
+                WHERE project_id=?1 AND selection IS ?2 AND evidence=?3 AND terra_source IS ?4
+                AND (?4 IS NOT NULL OR markdown=?5) ORDER BY revision DESC LIMIT 1",
+                params![
+                    project,
+                    selection,
+                    snapshot.evidence,
+                    source,
+                    snapshot.template
+                ],
+                |r| {
+                    Ok(Edition {
+                        revision: r.get(0)?,
+                        folder: r.get(1)?,
+                        markdown: r.get(2)?,
+                        published: r.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(database_error)
+        };
+        let cached = lookup(&read, key.as_deref())?;
+        let legacy = if writer.is_some() && cached.is_none() {
+            lookup(&read, None)?
+        } else {
+            None
+        };
+        read.commit().map_err(database_error)?;
+        drop(c);
+        let edition = if let Some(existing) = cached {
+            existing
+        } else {
+            let edited = || -> Result<Option<String>, String> {
+                let Some(old) = legacy.as_ref().filter(|e| e.published) else {
+                    return Ok(None);
+                };
+                validate_id(&old.folder)?;
+                let path = root
+                    .join("portfolios")
+                    .join(project)
+                    .join(old.directory())
+                    .join("portfolio.md");
+                let body = std::fs::read_to_string(path)
+                    .map_err(|e| format!("이전 편집본을 확인할 수 없습니다. {e}"))?;
+                Ok((body.replace("\r\n", "\n") != old.markdown).then_some(body))
+            };
+            let prior = edited()?;
+            let markdown = match writer {
+                Some(infer) => writing::compose(&snapshot, prior.as_deref(), infer)?,
+                None => snapshot.template.clone(),
+            };
             let mut c = self.connection()?;
             let tx = c
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(database_error)?;
-            let (markdown, evidence) = render(&tx, project, selected)?;
-            let previous = tx.query_row("SELECT revision,folder,published FROM portfolio_editions WHERE project_id=?1 AND markdown=?2 AND evidence=?3 AND selection IS ?4 ORDER BY revision DESC LIMIT 1",
-                params![project,markdown,evidence,selection], |r| Ok((r.get::<_,i64>(0)?,r.get::<_,String>(1)?,r.get::<_,bool>(2)?)))
-                .optional().map_err(database_error)?;
-            let (revision, folder, published) = if let Some(existing) = previous {
+            // A different request or a user edit may have completed during inference.
+            if render(&tx, project, selected)? != snapshot || edited()? != prior {
+                return Err(
+                    "검토 중 경험·답변 또는 편집본이 바뀌었습니다. 다시 생성하세요.".into(),
+                );
+            }
+            let edition = if let Some(existing) = lookup(&tx, key.as_deref())? {
                 existing
             } else {
-                let revision:i64=tx.query_row("SELECT COALESCE(MAX(revision),0)+1 FROM portfolio_editions WHERE project_id=?1",[project],|r|r.get(0)).map_err(database_error)?;
+                let revision=tx.query_row("SELECT COALESCE(MAX(revision),0)+1 FROM portfolio_editions WHERE project_id=?1",[project],|r|r.get(0)).map_err(database_error)?;
                 let folder = Uuid::new_v4().to_string();
-                tx.execute("INSERT INTO portfolio_editions(project_id,revision,folder,markdown,evidence,published,selection,last_used) VALUES(?1,?2,?3,?4,?5,0,?6,0)",params![project,revision,folder,markdown,evidence,selection]).map_err(database_error)?;
-                (revision, folder, false)
+                tx.execute("INSERT INTO portfolio_editions(project_id,revision,folder,markdown,evidence,published,selection,last_used,terra_source)
+                    VALUES(?1,?2,?3,?4,?5,0,?6,0,?7)",params![project,revision,folder,markdown,snapshot.evidence,selection,key]).map_err(database_error)?;
+                Edition {
+                    revision,
+                    folder,
+                    markdown,
+                    published: false,
+                }
             };
             tx.commit().map_err(database_error)?;
-            (revision, folder, markdown, evidence, published)
+            edition
         };
-        validate_id(&folder)?;
+        validate_id(&edition.folder)?;
         let file = publish(
             root,
             project,
-            &format!("v{revision}-{folder}"),
-            &markdown,
-            &evidence,
-            published,
+            &edition.directory(),
+            &edition.markdown,
+            &snapshot.evidence,
+            edition.published,
         )?;
-        self.connection()?
-                .execute(
-                    "UPDATE portfolio_editions SET published=1,last_used=(SELECT COALESCE(MAX(last_used),0)+1 FROM portfolio_editions WHERE project_id=?1) WHERE project_id=?1 AND folder=?2",
-                    params![project, folder],
-                )
-                .map_err(database_error)?;
+        self.connection()?.execute("UPDATE portfolio_editions SET published=1,last_used=(SELECT COALESCE(MAX(last_used),0)+1 FROM portfolio_editions WHERE project_id=?1) WHERE project_id=?1 AND folder=?2",
+            params![project,edition.folder]).map_err(database_error)?;
         Ok(file)
     }
+}
+struct Edition {
+    revision: i64,
+    folder: String,
+    markdown: String,
+    published: bool,
+}
+impl Edition {
+    fn directory(&self) -> String {
+        format!("v{}-{}", self.revision, self.folder)
+    }
+}
+#[derive(PartialEq)]
+struct Snapshot {
+    name: String,
+    role: Option<String>,
+    cases: Vec<Case>,
+    template: String,
+    evidence: String,
+}
+#[derive(serde::Serialize, PartialEq)]
+struct Case {
+    id: String,
+    title: String,
+    body: String,
 }
 
 fn render(
     c: &Connection,
     project: &str,
     selected: Option<&BTreeSet<String>>,
-) -> Result<(String, String), String> {
+) -> Result<Snapshot, String> {
     let (name, description): (String, String) = c
         .query_row(
             "SELECT title,description FROM projects WHERE id=?1",
@@ -253,7 +362,7 @@ fn render(
         )
         .map_err(database_error)?;
     let mut rows = q.query([project]).map_err(database_error)?;
-    let mut count = 0;
+    let mut cases = Vec::new();
     while let Some(r) = rows.next().map_err(database_error)? {
         let get = |idx| r.get::<_, String>(idx).map_err(database_error);
         let id = get(0)?;
@@ -344,15 +453,21 @@ fn render(
             }
         }
         sources.push('\n');
-        count += 1;
+        cases.push(Case { id, title, body });
     }
-    if selected.is_some_and(|ids| ids.len() != count) {
+    if selected.is_some_and(|ids| ids.len() != cases.len()) {
         return Err("선택한 경험이 변경되었습니다. 목록을 다시 확인하세요.".into());
     }
-    if count == 0 {
+    if cases.is_empty() {
         return Err("이 프로젝트에 설계·개발·트러블슈팅 기록이 없습니다.".into());
     }
-    Ok((doc, sources))
+    Ok(Snapshot {
+        name,
+        role,
+        cases,
+        template: doc,
+        evidence: sources,
+    })
 }
 
 // Publish the pair together. A completed directory is never rewritten, so both

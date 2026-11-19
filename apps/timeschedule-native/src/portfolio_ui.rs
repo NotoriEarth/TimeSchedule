@@ -124,7 +124,7 @@ pub fn panel<'a>(app: &'a App, p: &'a PortfolioPanel) -> Element<'a, Message> {
                 }))
                 .push(control("답변 수정", message(Action::Edit)));
         }
-        section = section.push(control(
+        section = section.push(quiet("선택한 경험과 역할 답변을 Codex Terra에 보내 작성합니다. 같은 입력은 편집한 판본을 유지합니다.")).push(control(
             "백엔드 포트폴리오 · Markdown 생성",
             message(Action::Export),
         ));
@@ -263,9 +263,13 @@ pub fn update(app: &mut App, a: Action) -> Task<Message> {
                     let selected = selection(app, state).cloned();
                     app.busy = true;
                     let root = app.data_dir.clone();
+                    let writer = app.portfolio_writer;
+                    app.notice = "포트폴리오를 준비하고 있습니다.".into();
                     return worker::job(
                         store,
-                        move |s| s.export_portfolio_selection(&id, &root, selected.as_ref()),
+                        move |s| {
+                            s.export_portfolio_with_writer(&id, &root, selected.as_ref(), writer)
+                        },
                         |r| message(Action::Exported(r)),
                     );
                 }
