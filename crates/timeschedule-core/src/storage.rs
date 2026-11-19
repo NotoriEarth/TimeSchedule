@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 const MAX_TITLE_LENGTH: usize = 200;
 const MAX_TEXT_LENGTH: usize = 20_000;
 
@@ -591,6 +591,18 @@ pub(crate) fn migrate_to(connection: &mut Connection, target: i64) -> Result<(),
         // Reparse pre-upgrade transcripts through the normal edit-preserving scan.
         transaction
             .execute_batch("UPDATE codex_chat_sessions SET file_size=-1; PRAGMA user_version=13;")
+            .map_err(database_error)?;
+    }
+    if version < 14 && target >= 14 {
+        transaction
+            .execute_batch(
+                "CREATE TABLE chat_experience_evidence(
+          entry_id TEXT NOT NULL REFERENCES diary_entries(id) ON DELETE CASCADE,
+          chat_id TEXT NOT NULL, line INTEGER NOT NULL, role TEXT NOT NULL, quote TEXT NOT NULL,
+          UNIQUE(entry_id,chat_id,line,role,quote));
+          ALTER TABLE portfolio_editions ADD COLUMN carried_edit TEXT;
+          PRAGMA user_version=14;",
+            )
             .map_err(database_error)?;
     }
     transaction.commit().map_err(database_error)

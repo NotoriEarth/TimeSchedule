@@ -150,7 +150,7 @@ fn imports_only_enabled_repo_desktop_turns_and_keeps_identity_edits_and_deletion
             [&entry.id],
         )
         .unwrap();
-        c.execute_batch("PRAGMA user_version=12").unwrap();
+        c.execute_batch("DROP TABLE chat_experience_evidence; ALTER TABLE portfolio_editions DROP COLUMN carried_edit; PRAGMA user_version=12").unwrap();
     }
     let store = Storage::open(&db).unwrap();
     assert_eq!(store.scan_codex_chats(&home.0, false).unwrap().saved, 1);

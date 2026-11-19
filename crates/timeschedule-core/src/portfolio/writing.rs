@@ -14,7 +14,7 @@ pub(super) fn compose(
     infer: impl FnOnce(&str) -> Result<String, String>,
 ) -> Result<String, String> {
     let style = if prior.is_some() {
-        "기존 편집 본문에 덧붙일 직무 요약으로, 경험별로 핵심을 한 문장씩 쓴다."
+        "기존 편집 본문에 덧붙일 현재의 검토 결과를 쓴다. confirmed의 후속 확인이 있으면 이전 검증 범위와 구분해 장애 관찰과 후속 검사의 의미를 각각 설명한다."
     } else {
         "경험별로 상황, 기술 판단 또는 해결 과정, 확인된 결과와 검증 범위를 짧은 한두 문단으로 작성한다."
     };
@@ -58,7 +58,7 @@ pub(super) fn compose(
         }
     }
     if prior.is_some() {
-        generated.push_str("## 백엔드 경험 요약\n\n");
+        generated.push_str("## 최신 근거로 확인한 백엔드 경험\n\n");
     }
     for case in &snapshot.cases {
         let paras = by_id
@@ -75,6 +75,19 @@ pub(super) fn compose(
                 case.id
             )
             .unwrap();
+        }
+        if !case.confirmed.is_empty() {
+            for q in &case.confirmed {
+                writeln!(
+                    generated,
+                    "- [{} · 원문 {}행](evidence.md#{})",
+                    plain(&q.role),
+                    q.line,
+                    q.anchor
+                )
+                .unwrap();
+            }
+            generated.push('\n');
         }
     }
     if let Some(prior) = prior {

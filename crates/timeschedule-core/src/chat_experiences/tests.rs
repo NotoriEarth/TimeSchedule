@@ -103,13 +103,14 @@ fn legacy_citation_reuses_same_entry_and_ignores_unchosen_role() {
             source_url: String::new(),
         })
         .unwrap();
-    for _ in 0..2 {
+    for pass in 0..2 {
         let review = db.review_chat(&p, &chat).unwrap();
         let result = db
             .confirm_chat_candidates(&review, &[Kind::Design])
             .unwrap();
         assert_eq!((result.added, result.kept), (0, 1));
-        assert_eq!(db.get_entry(&e.id).unwrap(), e);
+        assert_eq!(result.evidence_added > 0, pass == 0);
+        assert!(db.get_entry(&e.id).unwrap().body.starts_with(&body));
     }
     assert_eq!(db.portfolio_panel(&p).unwrap().answer.as_deref(), Some(""));
 }
@@ -201,4 +202,71 @@ fn invalid_model_output_or_provider_error_never_creates_an_experience() {
     .unwrap()
     .is_empty());
     assert_eq!(db.portfolio_panel(&p).unwrap().experiences, 0);
+}
+
+#[test]
+fn confirmed_new_observations_refresh_selected_portfolio_once() {
+    let (db, project, chat_id) = fixture();
+    let review = |test: usize| {
+        db.review_chat_with_inference(&project,&chat_id,|_|Ok(serde_json::json!({
+        "design":null,"troubleshooting":{"title":"종료 검증","problem":6,"solution":8,"reason":0,"test":test,"limit":0}
+    }).to_string())).unwrap()
+    };
+    let save = |r: &Review| {
+        db.confirm_chat_candidates(r, &[Kind::Troubleshooting])
+            .unwrap()
+    };
+    assert_eq!(save(&review(0)).added, 1);
+    let entry = db.portfolio_panel(&project).unwrap().choices[0].id.clone();
+    let selected = std::collections::BTreeSet::from([entry.clone()]);
+    db.save_portfolio_answer(&project, None, "").unwrap();
+    let root = std::env::temp_dir().join(uuid::Uuid::new_v4().to_string());
+    let export = |writer: &dyn Fn(&str) -> Result<String, String>| {
+        db.export_portfolio_with_writer(&project, &root, Some(&selected), writer)
+            .unwrap()
+    };
+    let reply = serde_json::json!([{"id":entry,"paragraphs":["검토 결과"]}]).to_string();
+    let old = export(&|_| Ok(reply.clone()));
+    std::fs::write(&old, "직접 편집한 문장").unwrap();
+    let r = review(7);
+    assert_eq!(save(&r).evidence_added, 1);
+    assert_eq!(save(&r).evidence_added, 0);
+    assert_eq!(
+        db.get_entry(&entry)
+            .unwrap()
+            .body
+            .matches("검사 출력 · 원문 26행")
+            .count(),
+        1
+    );
+    let updated = export(&|prompt| {
+        assert!(prompt.contains("# fail 1"));
+        Ok(reply.clone())
+    });
+    assert_ne!(old, updated);
+    let body = std::fs::read_to_string(&updated).unwrap();
+    assert!(
+        body.contains("직접 편집한 문장")
+            && body.contains("개인 기여: 보류")
+            && body.contains("검사 출력 · 원문 26행](evidence.md#quote-")
+    );
+    assert_eq!(
+        export(&|_| panic!("unchanged inputs called writer")),
+        updated
+    );
+    assert_eq!(std::fs::read_to_string(old).unwrap(), "직접 편집한 문장");
+    // A user's subsequent removal of the quote must survive a repeat confirmation.
+    db.connection()
+        .unwrap()
+        .execute("UPDATE diary_entries SET body='편집' WHERE id=?1", [&entry])
+        .unwrap();
+    assert_eq!(save(&r).evidence_added, 0);
+    let next = export(&|prompt| {
+        assert!(!prompt.contains("# fail 1"));
+        Ok(reply.clone())
+    });
+    assert!(std::fs::read_to_string(next)
+        .unwrap()
+        .contains("직접 편집한 문장"));
+    std::fs::remove_dir_all(root).unwrap();
 }

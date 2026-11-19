@@ -203,7 +203,7 @@ impl Storage {
         });
         let lookup = |c: &Connection, source: Option<&str>| -> Result<Option<Edition>, String> {
             c.query_row(
-                "SELECT revision,folder,markdown,published FROM portfolio_editions
+                "SELECT revision,folder,markdown,published,carried_edit FROM portfolio_editions
                 WHERE project_id=?1 AND selection IS ?2 AND evidence=?3 AND terra_source IS ?4
                 AND (?4 IS NOT NULL OR markdown=?5) ORDER BY revision DESC LIMIT 1",
                 params![
@@ -219,6 +219,7 @@ impl Storage {
                         folder: r.get(1)?,
                         markdown: r.get(2)?,
                         published: r.get(3)?,
+                        carried_edit: r.get(4)?,
                     })
                 },
             )
@@ -226,8 +227,42 @@ impl Storage {
             .map_err(database_error)
         };
         let cached = lookup(&read, key.as_deref())?;
-        let legacy = if writer.is_some() && cached.is_none() {
-            lookup(&read, None)?
+        let previous = if writer.is_some() && cached.is_none() {
+            // Keep edits within the same experience set and role, even as evidence changes.
+            let prior = read
+                .query_row(
+                    "SELECT revision,folder,markdown,published,carried_edit,evidence
+                FROM portfolio_editions WHERE project_id=?1 AND selection IS ?2 AND published=1
+                AND terra_source IS NOT NULL AND json_extract(terra_source,'$[1]') IS ?3
+                ORDER BY last_used DESC LIMIT 1",
+                    params![project, selection, snapshot.role],
+                    |r| {
+                        Ok((
+                            Edition {
+                                revision: r.get(0)?,
+                                folder: r.get(1)?,
+                                markdown: r.get(2)?,
+                                published: r.get(3)?,
+                                carried_edit: r.get(4)?,
+                            },
+                            r.get::<_, String>(5)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(database_error)?;
+            let entries = |s: &str| {
+                s.lines()
+                    .filter(|l| l.starts_with("<a id=\"entry-"))
+                    .map(str::to_owned)
+                    .collect::<BTreeSet<_>>()
+            };
+            match prior {
+                Some((edition, evidence)) if entries(&evidence) == entries(&snapshot.evidence) => {
+                    Some(edition)
+                }
+                _ => lookup(&read, None)?,
+            }
         } else {
             None
         };
@@ -237,7 +272,7 @@ impl Storage {
             existing
         } else {
             let edited = || -> Result<Option<String>, String> {
-                let Some(old) = legacy.as_ref().filter(|e| e.published) else {
+                let Some(old) = previous.as_ref().filter(|e| e.published) else {
                     return Ok(None);
                 };
                 validate_id(&old.folder)?;
@@ -248,7 +283,14 @@ impl Storage {
                     .join("portfolio.md");
                 let body = std::fs::read_to_string(path)
                     .map_err(|e| format!("이전 편집본을 확인할 수 없습니다. {e}"))?;
-                Ok((body.replace("\r\n", "\n") != old.markdown).then_some(body))
+                if body.replace("\r\n", "\n") != old.markdown.replace("\r\n", "\n") {
+                    return Ok(Some(body));
+                }
+                Ok(old.carried_edit.clone().or_else(|| {
+                    old.markdown
+                        .split_once("\n\n## 백엔드 경험 요약\n\n")
+                        .map(|(prefix, _)| prefix.to_owned())
+                }))
             };
             let prior = edited()?;
             let markdown = match writer {
@@ -270,13 +312,14 @@ impl Storage {
             } else {
                 let revision=tx.query_row("SELECT COALESCE(MAX(revision),0)+1 FROM portfolio_editions WHERE project_id=?1",[project],|r|r.get(0)).map_err(database_error)?;
                 let folder = Uuid::new_v4().to_string();
-                tx.execute("INSERT INTO portfolio_editions(project_id,revision,folder,markdown,evidence,published,selection,last_used,terra_source)
-                    VALUES(?1,?2,?3,?4,?5,0,?6,0,?7)",params![project,revision,folder,markdown,snapshot.evidence,selection,key]).map_err(database_error)?;
+                tx.execute("INSERT INTO portfolio_editions(project_id,revision,folder,markdown,evidence,published,selection,last_used,terra_source,carried_edit)
+                    VALUES(?1,?2,?3,?4,?5,0,?6,0,?7,?8)",params![project,revision,folder,markdown,snapshot.evidence,selection,key,prior]).map_err(database_error)?;
                 Edition {
                     revision,
                     folder,
                     markdown,
                     published: false,
+                    carried_edit: prior,
                 }
             };
             tx.commit().map_err(database_error)?;
@@ -301,6 +344,7 @@ struct Edition {
     folder: String,
     markdown: String,
     published: bool,
+    carried_edit: Option<String>,
 }
 impl Edition {
     fn directory(&self) -> String {
@@ -320,6 +364,15 @@ struct Case {
     id: String,
     title: String,
     body: String,
+    confirmed: Vec<ConfirmedQuote>,
+}
+
+#[derive(serde::Serialize, PartialEq)]
+struct ConfirmedQuote {
+    anchor: String,
+    line: usize,
+    role: String,
+    quote: String,
 }
 
 fn render(
@@ -453,7 +506,36 @@ fn render(
             }
         }
         sources.push('\n');
-        cases.push(Case { id, title, body });
+        let mut query=c.prepare("SELECT rowid,line,role,quote FROM chat_experience_evidence WHERE entry_id=?1 ORDER BY line,rowid").map_err(database_error)?;
+        let mut confirmed = Vec::new();
+        let quotes = query
+            .query_map([&id], |r| {
+                Ok(ConfirmedQuote {
+                    anchor: format!("quote-{}-{}", id, r.get::<_, i64>(0)?),
+                    line: r.get(1)?,
+                    role: r.get(2)?,
+                    quote: r.get(3)?,
+                })
+            })
+            .map_err(database_error)?;
+        for quote in quotes {
+            let quote = quote.map_err(database_error)?;
+            // An edit removing a quotation takes precedence over the deduplication receipt.
+            if body.contains(&format!(
+                "{} ({} · 원문 {}행)",
+                quote.quote, quote.role, quote.line
+            )) {
+                let heading = format!("{} · 원문 {}행", quote.role, quote.line);
+                markdown::source(&mut sources, &quote.anchor, &heading, &quote.quote);
+                confirmed.push(quote);
+            }
+        }
+        cases.push(Case {
+            id,
+            title,
+            body,
+            confirmed,
+        });
     }
     if selected.is_some_and(|ids| ids.len() != cases.len()) {
         return Err("선택한 경험이 변경되었습니다. 목록을 다시 확인하세요.".into());

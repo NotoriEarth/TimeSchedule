@@ -43,6 +43,20 @@ pub struct Candidate {
     pub kind: Kind,
     pub title: String,
     pub body: String,
+    citations: Vec<Citation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Citation {
+    field: &'static str,
+    line: usize,
+    role: String,
+    quote: String,
+}
+impl Citation {
+    fn attributed(&self) -> String {
+        format!("{} ({} · 원문 {}행)", self.quote, self.role, self.line)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +81,65 @@ impl Review {
 pub struct Saved {
     pub added: usize,
     pub kept: usize,
+    pub evidence_added: usize,
+}
+
+fn extend_evidence(
+    c: &Connection,
+    entry: &str,
+    review: &Review,
+    item: &Candidate,
+) -> Result<usize, String> {
+    let record: Option<(String, String)> = c
+        .query_row(
+            "SELECT body,source_body FROM diary_entries WHERE id=?1 AND project_id=?2 AND kind=?3",
+            params![entry, review.project, item.kind.key()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(database_error)?;
+    let Some((mut body, original)) = record else {
+        return Ok(0);
+    };
+    let mut added = 0;
+    for citation in &item.citations {
+        let text = citation.attributed();
+        let already_quoted = |s: &str| {
+            s.contains(&text)
+                || (citation.field == "원문 발췌"
+                    && s.contains(&format!("{} · 원문 {}행\n", citation.role, citation.line))
+                    && s.contains(&citation.quote))
+        };
+        if already_quoted(&body) || already_quoted(&original) {
+            continue;
+        }
+        let inserted = c
+            .execute(
+                "INSERT INTO chat_experience_evidence(entry_id,chat_id,line,role,quote)
+            VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
+                params![
+                    entry,
+                    review.chat.id,
+                    citation.line,
+                    citation.role,
+                    citation.quote
+                ],
+            )
+            .map_err(database_error)?;
+        if inserted != 0 {
+            body.push_str(&format!("\n\n추가 확인 근거 · {}: {text}", citation.field));
+            added += 1;
+        }
+    }
+    if added > 0 {
+        crate::storage::validate_text(&body, "기록 본문", 100000)?;
+        c.execute(
+            "UPDATE diary_entries SET body=?2,updated_at=?3 WHERE id=?1",
+            params![entry, body, timestamp()],
+        )
+        .map_err(database_error)?;
+    }
+    Ok(added)
 }
 
 pub(crate) fn migrate(c: &Connection) -> Result<(), String> {
@@ -164,8 +237,9 @@ impl Storage {
                 .find(|x| x.kind == kind)
                 .ok_or("검토 목록에 없는 후보입니다.")?;
             let key = params![review.project, review.chat.id, kind.key()];
-            let known:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM chat_experience_receipts WHERE project_id=?1 AND chat_id=?2 AND kind=?3)",key,|r|r.get(0)).map_err(database_error)?;
-            if known {
+            let known:Option<String>=tx.query_row("SELECT entry_id FROM chat_experience_receipts WHERE project_id=?1 AND chat_id=?2 AND kind=?3",key,|r|r.get(0)).optional().map_err(database_error)?;
+            if let Some(entry) = known {
+                saved.evidence_added += extend_evidence(&tx, &entry, review, item)?;
                 saved.kept += 1;
                 continue;
             }
@@ -188,6 +262,7 @@ impl Storage {
             }
             let entry = match matches.as_slice() {
                 [id] => {
+                    saved.evidence_added += extend_evidence(&tx, id, review, item)?;
                     saved.kept += 1;
                     id.clone()
                 }
