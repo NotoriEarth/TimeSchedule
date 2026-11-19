@@ -3,6 +3,7 @@ use timeschedule_core::{
     calendar::{EntryDisplay, EntryEdit, TaskDetails, TaskEdit, RECORD_CATEGORY},
     diary::{Entry, EntryInput, Project, ProjectInput},
     storage::{CalendarEvent, EventInput, Note, NoteInput, Task, TaskInput},
+    timeline::TimeChange,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +45,8 @@ pub struct Form {
     pub event_version: Option<String>,
     pub category_id: String,
     pub short_title: String,
+    /// A record's typed time of day (`HH:mm`, KST). Blank means unknown.
+    pub time: String,
     pub project_short_name: String,
     pub entry_version: Option<EntryEdit>,
     pub task_version: Option<TaskEdit>,
@@ -69,6 +72,7 @@ impl Form {
             event_version: None,
             category_id: RECORD_CATEGORY.into(),
             short_title: String::new(),
+            time: String::new(),
             project_short_name: String::new(),
             entry_version: None,
             task_version: None,
@@ -155,7 +159,7 @@ impl Form {
                 )
                 .map(|_| ()),
             Kind::Entry => store
-                .save_calendar_entry(
+                .save_calendar_entry_timed(
                     EntryInput {
                         id: self.id.clone(),
                         project_id: self.project_id.clone(),
@@ -169,6 +173,7 @@ impl Form {
                         category_id: self.category_id.clone(),
                         short_title: self.short_title.clone(),
                     },
+                    self.time_change()?,
                     self.entry_version.as_ref(),
                 )
                 .map(|_| ()),
@@ -211,6 +216,25 @@ impl Form {
                     self.task_version.as_ref(),
                 )
                 .map(|_| ()),
+        }
+    }
+    /// A new record, or a read one written by hand, takes a typed time. A
+    /// collected Git or automatic record keeps its source time instead.
+    pub fn takes_manual_time(&self) -> bool {
+        self.id.is_none()
+            || self
+                .entry_version
+                .as_ref()
+                .is_some_and(|v| v.timeline.takes_manual_time())
+    }
+    /// A form that never read the stored record cannot know its time, so it
+    /// keeps it; so does a sourced record. A read hand-written or new one
+    /// saves what the field says.
+    fn time_change(&self) -> Result<TimeChange, String> {
+        if self.takes_manual_time() {
+            TimeChange::from_field(&self.time)
+        } else {
+            Ok(TimeChange::Keep)
         }
     }
     pub fn delete(&self, store: &timeschedule_core::storage::Storage) -> Result<(), String> {

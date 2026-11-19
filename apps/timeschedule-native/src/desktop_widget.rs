@@ -45,8 +45,35 @@ fn date_label(
     }
 }
 
+/// The heading counts every schedule, task and record, not the grouped lines.
+fn today_summary(
+    today: chrono::NaiveDate,
+    day: &timeschedule_core::calendar::CalendarDay,
+) -> String {
+    format!(
+        "{} · 일정·기록 {}개",
+        today.format("%Y년 %m월 %d일"),
+        day.represented
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn heading_counts_each_item_not_grouped_lines() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 19).unwrap();
+        let day = timeschedule_core::calendar::CalendarDay {
+            date: "2026-11-19".into(),
+            total: 1,
+            represented: 3,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::today_summary(today, &day),
+            "2026년 11월 19일 · 일정·기록 3개"
+        );
+    }
+
     #[test]
     fn enlarged_month_boundary_label_uses_measured_width() {
         let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
@@ -126,14 +153,10 @@ fn content(app: &App, width: f32) -> iced::widget::Column<'_, Message> {
     let today = Local::now().date_naive();
     let heading_size = if width < 420.0 { 20 } else { 24 };
     let heading = column![
-        text(format!(
-            "{} · 일정·기록 {}개",
-            today.format("%Y년 %m월 %d일"),
-            app.snapshot.today.total
-        ))
-        .size(11)
-        .font(font)
-        .color(p.muted),
+        text(today_summary(today, &app.snapshot.today))
+            .size(11)
+            .font(font)
+            .color(p.muted),
         row![
             button(
                 text(format!("{}년", app.widget_month.year()))

@@ -42,6 +42,16 @@ impl Config {
         Ok(())
     }
 }
+/// The record state folder the record script registered with this app.
+pub fn registered_state_dir(dir: &Path) -> Result<PathBuf, String> {
+    let file = dir.join("project-record-sync.json");
+    if !file.exists() {
+        return Err("자동 기록 전달이 아직 등록되지 않아 원본 위치를 알 수 없습니다.".into());
+    }
+    let config: Config = serde_json::from_slice(&read_small(&file)?).map_err(|e| e.to_string())?;
+    config.validate()?;
+    Ok(config.state_dir)
+}
 pub fn register(dir: &Path, node: &Path, script: &Path, state_dir: &Path) -> Result<(), String> {
     let config = Config {
         node: node.into(),

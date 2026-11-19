@@ -2,6 +2,7 @@
 use crate::{
     diary::{entry_row, validate_url, Entry, EntryInput},
     storage::*,
+    timeline::{EntryTimeline, TimeChange},
 };
 use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
@@ -46,8 +47,13 @@ pub struct CalendarItem {
 #[derive(Debug, Clone, Default)]
 pub struct CalendarDay {
     pub date: String,
+    /// Calendar lines of the day: one project's records share one line.
+    /// Layout, the 16-line preview and paging use this.
     pub total: u32,
     pub completed: u32,
+    /// Every schedule, task and record the lines stand for, each counted once,
+    /// including those outside the preview. Shown to people as the day's total.
+    pub represented: u32,
     pub items: Vec<CalendarItem>,
 }
 #[derive(Debug, Clone, Default)]
@@ -74,6 +80,8 @@ impl Default for EntryDisplay {
 pub struct EntryEdit {
     pub entry: Entry,
     pub display: EntryDisplay,
+    /// Typed time and source evidence; part of the version a save compares.
+    pub timeline: EntryTimeline,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDetails {
@@ -159,6 +167,7 @@ fn entry_edit(c: &Connection, id: &str) -> Result<EntryEdit, String> {
     Ok(EntryEdit {
         entry,
         display: display(c, id)?,
+        timeline: crate::timeline::read_timeline(c, id)?,
     })
 }
 fn task_edit(c: &Connection, id: &str) -> Result<TaskEdit, String> {
@@ -287,10 +296,21 @@ impl Storage {
         validate_id(id)?;
         task_edit(&*self.connection()?, id)
     }
+    /// Saves a record and keeps whatever time of day it already had.
     pub fn save_calendar_entry(
         &self,
         input: EntryInput,
+        meta: EntryDisplay,
+        expected: Option<&EntryEdit>,
+    ) -> Result<EntryEdit, String> {
+        self.save_calendar_entry_timed(input, meta, TimeChange::Keep, expected)
+    }
+    /// Saves a record with the time of day a person typed, or none (unknown).
+    pub fn save_calendar_entry_timed(
+        &self,
+        input: EntryInput,
         mut meta: EntryDisplay,
+        time: TimeChange,
         expected: Option<&EntryEdit>,
     ) -> Result<EntryEdit, String> {
         let title = validated_title(&input.title)?;
@@ -335,6 +355,14 @@ impl Storage {
         let updated = next_event_timestamp(previous.as_ref().map(|v| v.entry.updated_at.as_str()));
         tx.execute(if updating {"UPDATE diary_entries SET project_id=?2,date=?3,kind=?4,title=?5,body=?6,source_url=?7,updated_at=?8 WHERE id=?1"}else{"INSERT INTO diary_entries(id,project_id,date,kind,title,body,source_url,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)"},params![id,input.project_id,input.date,input.kind,title,input.body,input.source_url,updated]).map_err(database_error)?;
         tx.execute("INSERT INTO entry_display VALUES(?1,?2,?3) ON CONFLICT(entry_id) DO UPDATE SET category_id=excluded.category_id,short_title=excluded.short_title",params![id,meta.category_id,meta.short_title]).map_err(database_error)?;
+        // A typed time belongs only to a hand-written record. Editing a collected
+        // Git or automatic record keeps its source time as the reference.
+        let manual = previous
+            .as_ref()
+            .map_or(true, |p| p.timeline.takes_manual_time());
+        if manual {
+            crate::timeline::write_manual_time(&tx, &id, &time)?;
+        }
         let saved = entry_edit(&tx, &id)?;
         tx.commit().map_err(database_error)?;
         Ok(saved)
@@ -472,7 +500,8 @@ fn item(r: &Row<'_>) -> rusqlite::Result<CalendarItem> {
     })
 }
 fn counts(c: &Connection, from: &str, to: &str) -> Result<BTreeMap<String, CalendarDay>, String> {
-    let mut q=c.prepare("SELECT date,count(*),sum(completed) FROM (SELECT date,completed FROM events WHERE date BETWEEN ?1 AND ?2 UNION ALL SELECT date,completed FROM tasks WHERE date BETWEEN ?1 AND ?2 UNION ALL SELECT date,0 FROM diary_entries WHERE date BETWEEN ?1 AND ?2 GROUP BY date,COALESCE(project_id,id)) GROUP BY date").map_err(database_error)?;
+    // Each row is one calendar line; `members` is how many items that line stands for.
+    let mut q=c.prepare("SELECT date,count(*),sum(completed),sum(members) FROM (SELECT date,completed,1 AS members FROM events WHERE date BETWEEN ?1 AND ?2 UNION ALL SELECT date,completed,1 FROM tasks WHERE date BETWEEN ?1 AND ?2 UNION ALL SELECT date,0,count(*) FROM diary_entries WHERE date BETWEEN ?1 AND ?2 GROUP BY date,COALESCE(project_id,id)) GROUP BY date").map_err(database_error)?;
     let rows = q
         .query_map(params![from, to], |r| {
             let date: String = r.get(0)?;
@@ -482,6 +511,7 @@ fn counts(c: &Connection, from: &str, to: &str) -> Result<BTreeMap<String, Calen
                     date,
                     total: r.get(1)?,
                     completed: r.get(2)?,
+                    represented: r.get(3)?,
                     items: vec![],
                 },
             ))

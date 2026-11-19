@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const MAX_TITLE_LENGTH: usize = 200;
 const MAX_TEXT_LENGTH: usize = 20_000;
 
@@ -568,6 +568,9 @@ pub(crate) fn migrate_to(connection: &mut Connection, target: i64) -> Result<(),
     }
     if version < 6 && target >= 6 {
         crate::search::migrate_v6(&transaction)?;
+    }
+    if version < 7 && target >= 7 {
+        crate::timeline::migrate_v7(&transaction)?;
     }
     transaction.commit().map_err(database_error)
 }

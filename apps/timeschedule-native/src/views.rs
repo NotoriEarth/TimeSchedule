@@ -338,37 +338,66 @@ fn day(app: &App, date: NaiveDate) -> Element<'_, Message> {
     .into()
 }
 pub(crate) fn entry_card<'a>(app: &'a App, entry: &'a EntrySummary) -> Element<'a, Message> {
+    use timeschedule_core::timeline::reference_line;
     let expanded = app.expanded.contains(&entry.id);
-    let mut c = column![button(
-        column![
-            quiet(kind_label(&entry.kind)),
-            text(format!(
-                "{} {}",
-                if expanded { "−" } else { "+" },
-                entry.title
-            ))
-            .size(13)
-        ]
-        .spacing(3)
-    )
-    .width(Length::Fill)
-    .style(theme::text_button)
-    .on_press(Message::ToggleEntry(entry.id.clone()))]
+    // A timeline read when the card was opened (which may have completed a
+    // past record's start or commits) outlives folding it again; the list's
+    // own copy is only the fallback before the first opening.
+    let loaded = app.timelines.get(&entry.id);
+    let current = loaded.unwrap_or(&entry.timeline);
+    let mut head = column![
+        quiet(kind_label(&entry.kind)),
+        text(format!(
+            "{} {}",
+            if expanded { "−" } else { "+" },
+            entry.title
+        ))
+        .size(13)
+    ]
+    .spacing(3);
+    // Folded: the start (or source/typed time) and the summary chosen from the
+    // original. Unfolded, the full text replaces the summary: never both.
+    if !expanded {
+        head = head.push(quiet(reference_line(&entry.date, current)));
+        if !entry.summary.is_empty() {
+            head = head.push(text(&entry.summary).size(12));
+        }
+    }
+    let mut c = column![button(head)
+        .width(Length::Fill)
+        .style(theme::text_button)
+        .on_press(Message::ToggleEntry(entry.id.clone()))]
     .spacing(8);
     if expanded {
         if let Some(full) = app.bodies.get(&entry.id) {
-            c = c.push(text(&full.body).size(13));
+            let timeline_ref = current;
+            // Reading order: start, the record, completion or status, then
+            // commits and the original.
+            c = c
+                .push(crate::calendar_ui::reference_view(&full.date, timeline_ref))
+                .push(text(&full.body).size(13));
+            if let Some(tail) = loaded.and_then(crate::calendar_ui::timeline_tail) {
+                c = c.push(tail);
+            }
             if !full.source_url.is_empty() {
                 c = c.push(control(
                     "출처 링크 열기 ↗",
                     Message::Source(full.source_url.clone()),
                 ));
             }
-            if let Some(reference) = &full.source_ref {
+            // A collected record's unchangeable source. An automatic record's
+            // summary is already in its text and its original opens above.
+            if let Some(reference) = full
+                .source_ref
+                .as_ref()
+                .filter(|_| !timeline_ref.is_automatic())
+            {
                 c = c
                     .push(quiet("수집 원본 · 변경되지 않는 근거"))
-                    .push(text(reference).size(11))
-                    .push(text(&full.source_body).size(12));
+                    .push(text(reference).size(11));
+                if full.source_body.trim() != full.body.trim() {
+                    c = c.push(text(&full.source_body).size(12));
+                }
             }
             c = c.push(control(
                 "기록 수정",
@@ -377,7 +406,9 @@ pub(crate) fn entry_card<'a>(app: &'a App, entry: &'a EntrySummary) -> Element<'
         } else if let Some(error) = app.entry_errors.get(&entry.id) {
             c = c.push(text(error).size(12));
         } else {
-            c = c.push(quiet("원문 불러오는 중…"));
+            c = c
+                .push(quiet(reference_line(&entry.date, current)))
+                .push(quiet("원문 불러오는 중…"));
         }
     }
     container(c)
@@ -420,6 +451,28 @@ pub(crate) fn more(app: &App) -> Element<'_, Message> {
     } else {
         b.into()
     }
+}
+/// Every record of a date in the current list's scope, never fewer than the
+/// rows already listed.
+pub(crate) fn date_total(app: &App, date: &str, shown: u32) -> u32 {
+    app.snapshot
+        .entry_totals
+        .get(date)
+        .copied()
+        .unwrap_or(shown)
+        .max(shown)
+}
+/// Consecutive records of one date, in the list's own newest-first order.
+pub(crate) fn date_groups(entries: &[EntrySummary]) -> Vec<(&str, &[EntrySummary])> {
+    let mut groups: Vec<(&str, &[EntrySummary])> = Vec::new();
+    let mut start = 0;
+    for index in 1..=entries.len() {
+        if index == entries.len() || entries[index].date != entries[start].date {
+            groups.push((entries[start].date.as_str(), &entries[start..index]));
+            start = index;
+        }
+    }
+    groups
 }
 pub(crate) fn records(app: &App) -> Element<'_, Message> {
     let mut c = column![quiet(
@@ -485,8 +538,21 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
         ));
         c = c.push(paper(panel));
     }
-    for e in &app.snapshot.entries {
-        c = c.push(column![quiet(&e.date), entry_card(app, e)].spacing(4));
+    // The same diary records, newest date first, one heading per date. The
+    // count is every record of that date; a date the loaded rows only begin
+    // says how many are shown and that more follow.
+    for (date, entries) in date_groups(&app.snapshot.entries) {
+        let shown = entries.len() as u32;
+        let total = date_total(app, date, shown);
+        let mut heading = format!("{date} · {total}건");
+        if shown < total {
+            heading.push_str(&format!(" · {shown}건 표시 · 더 불러오면 이어집니다"));
+        }
+        let mut day = column![quiet(heading)].spacing(4);
+        for e in entries {
+            day = day.push(entry_card(app, e));
+        }
+        c = c.push(day);
     }
     if app.more {
         c = c.push(more(app));
@@ -771,6 +837,15 @@ pub(crate) fn editor_view(app: &App) -> Element<'_, Message> {
             &form.short_title,
             Field::ShortTitle,
         ));
+        // Only a hand-written record takes a typed time; a collected Git or
+        // automatic record keeps its source time.
+        if form.takes_manual_time() {
+            fields = fields.push(input(
+                "기록 시각 (한국시간 24시간제 HH:mm, 비우면 미상)",
+                &form.time,
+                Field::Time,
+            ));
+        }
     }
     if form.kind == Kind::Project {
         fields = fields.push(input(

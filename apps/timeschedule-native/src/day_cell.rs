@@ -30,7 +30,7 @@ struct Line<'a> {
     title_width: f32,
     first: String,
     second: Option<String>,
-    /// `+2` when the line stands for three records of one project.
+    /// `+ 3` when the line stands for three records of one project.
     more: Option<String>,
 }
 
@@ -158,17 +158,18 @@ pub fn view<'a>(
     cell.into()
 }
 
+/// A project's records show the project, never a record title, here and in
+/// the overflow line.
 fn display_title(item: &CalendarItem) -> &str {
-    if item.short_title.is_empty() {
-        &item.title
-    } else {
-        &item.short_title
-    }
+    calendar_ui::cell_title(item)
 }
 
-/// Time for a timed schedule item, project for a record; none otherwise.
+/// Time for a timed schedule item, project for a record without its own
+/// project line; none otherwise.
 fn prefix(item: &CalendarItem) -> Option<(&str, f32)> {
-    if item.source == CalendarSource::Entry {
+    if calendar_ui::project_line_name(item).is_some() {
+        None
+    } else if item.source == CalendarSource::Entry {
         [&item.project_short_name, &item.project_title]
             .into_iter()
             .find(|s| !s.is_empty())
@@ -209,8 +210,13 @@ fn line<'a>(item: &'a CalendarItem, width: f32, style: &Style) -> Line<'a> {
     }
 }
 
-/// Give a cut title a second line. False when nothing fits on the first.
+/// Give a cut title a second line. False when nothing fits on the first, and
+/// always for a project's line: its name and count stay on one line at any
+/// cell height, cut with `…` in a narrow cell.
 fn wrap(line: &mut Line<'_>, width: f32, style: &Style) -> bool {
+    if calendar_ui::project_line_name(line.item).is_some() {
+        return false;
+    }
     let (first, rest) =
         text_layout::split_first_line(&line.title, line.title_width, style.size, style.bold);
     if first.is_empty() || rest.is_empty() {
@@ -249,14 +255,20 @@ fn line_view<'a>(
         };
         first = first.push(label(p, style.font, color));
     }
-    first = first.push(label(l.first, style.bold, style.colors.text));
+    // A project's line is its name in the category's colour.
+    let ink_text = if calendar_ui::project_line_name(l.item).is_some() {
+        ink
+    } else {
+        style.colors.text
+    };
+    first = first.push(label(l.first, style.bold, ink_text));
     if let Some(more) = l.more {
         first = first.push(label(more, style.font, style.colors.muted));
     }
     let mut body = column![first];
     let height = style.line * if l.second.is_some() { 2.0 } else { 1.0 };
     if let Some(second) = l.second {
-        body = body.push(label(second, style.bold, style.colors.text));
+        body = body.push(label(second, style.bold, ink_text));
     }
     let content = row![
         container(space().width(BAR).height(Length::Fill))
