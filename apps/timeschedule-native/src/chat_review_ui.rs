@@ -32,12 +32,12 @@ pub fn panel<'a>(app: &'a App, project: &str) -> Element<'a, Message> {
         .review
         .as_ref()
         .filter(|r| r.project() == project);
-    let mut panel = column![text("채팅에서 경험 검토 · 로컬 모델").size(16)].spacing(6);
+    let mut panel = column![text("채팅에서 경험 검토 · Terra").size(16)].spacing(6);
     if app.busy || app.loading {
         return panel.push(quiet("불러오는 중…")).into();
     }
     panel = panel.push(quiet(
-        "채팅을 선택하면 이 PC의 Ollama gemma4가 원문 근거를 검토합니다.",
+        "채팅을 선택하면 해당 채팅의 발췌를 로그인한 Codex의 GPT-6.1 Terra에 보내 후보를 검토합니다.",
     ));
     let selected = review.map(|r| r.chat().clone());
     panel = panel.push(
@@ -122,7 +122,7 @@ pub fn update(app: &mut App, action: Action) -> Task<Message> {
             }
             app.chat_review = State::default();
             app.busy = true;
-            app.notice = "로컬 모델이 선택한 채팅을 읽고 있습니다.".into();
+            app.notice = "Terra가 선택한 채팅을 읽고 있습니다.".into();
             let id = project.clone();
             return worker::job(
                 store,
