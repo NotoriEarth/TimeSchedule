@@ -1,6 +1,6 @@
 # TimeSchedule 버전 이력
 
-현재 대표 앱은 **Rust/Iced 네이티브 0.30.1**이며 실행 파일은 `artifacts/TimeSchedule.exe`이다.
+현재 대표 앱은 **Rust/Iced 네이티브 0.31.1**이며 실행 파일은 `artifacts/TimeSchedule.exe`이다.
 
 ## 버전 규칙
 
@@ -10,7 +10,11 @@
 - **부 버전**: 사용자가 체감하는 기능 묶음이나 큰 화면·구조 개선에서 올리고 수정 숫자는 0으로 돌린다.
 - **수정 버전**: 기존 기능의 버그·작은 동작·배포 문제를 고칠 때 올린다.
 - 커밋·문서 정리만으로 매번 올리지 않는다. 같은 미출시 작업에 대한 후속 수정은 그 버전에 포함한다.
-- 다음 작은 수정은 `0.30.2`, 다음 주요 기능 묶음은 `0.31.0`이다. 버전 변경 시 `apps/timeschedule-native/Cargo.toml`, `Cargo.lock`, 이 이력과 README를 함께 갱신한다. 앱 표시·Windows 속성·빌드 출력 정보는 Cargo 버전을 사용한다.
+- 버전 변경 시 `apps/timeschedule-native/Cargo.toml`, `Cargo.lock`, 이 이력과 README를 함께 갱신한다. 앱 표시·Windows 속성·빌드 출력 정보는 Cargo 버전을 사용한다.
+
+## 0.31.1 · 포트폴리오 원문 행 링크
+
+- 처음 저장한 경험에서도 인용의 행 번호와 발화 유형을 연결된 채팅에서 확인해 Markdown 근거 링크를 만든다. 이전 판본에서 편집한 문장과 원문 링크는 다음 판본에서도 유지한다.
 
 ## 0.31.0 · Claude Code CLI 채팅 이력
 

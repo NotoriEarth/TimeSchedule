@@ -89,6 +89,22 @@ pub(super) fn compose(
             }
             generated.push('\n');
         }
+        let mut wrote_line = false;
+        for link in &case.source_lines {
+            if case
+                .confirmed
+                .iter()
+                .any(|q| q.line == link.line && q.role == link.role)
+                || prior.is_some_and(|p| p.contains(&format!("]({})", link.target())))
+            {
+                continue;
+            }
+            writeln!(generated, "{}", link.markdown()).unwrap();
+            wrote_line = true;
+        }
+        if wrote_line {
+            generated.push('\n');
+        }
     }
     if let Some(prior) = prior {
         // Carry the entire edited edition forward, including wording and formatting.

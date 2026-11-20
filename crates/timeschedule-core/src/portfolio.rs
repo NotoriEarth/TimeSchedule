@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 mod markdown;
+mod source_lines;
 mod writing;
 
 #[derive(Clone, Debug)]
@@ -401,6 +402,9 @@ struct Case {
     title: String,
     body: String,
     confirmed: Vec<ConfirmedQuote>,
+    // These excerpts belong in the local evidence file. Terra already receives the experience.
+    #[serde(skip)]
+    source_lines: Vec<source_lines::LineLink>,
 }
 
 #[derive(serde::Serialize, PartialEq)]
@@ -452,6 +456,7 @@ fn render(
         .map_err(database_error)?;
     let mut rows = q.query([project]).map_err(database_error)?;
     let mut cases = Vec::new();
+    let mut written_lines = BTreeSet::new();
     while let Some(r) = rows.next().map_err(database_error)? {
         let get = |idx| r.get::<_, String>(idx).map_err(database_error);
         let id = get(0)?;
@@ -566,11 +571,17 @@ fn render(
                 confirmed.push(quote);
             }
         }
+        let source_lines =
+            source_lines::render(c, project, &id, text, &mut sources, &mut written_lines)?;
+        for link in &source_lines {
+            writeln!(doc, "{}", link.markdown()).unwrap();
+        }
         cases.push(Case {
             id,
             title,
             body,
             confirmed,
+            source_lines,
         });
     }
     if selected.is_some_and(|ids| ids.len() != cases.len()) {

@@ -4,6 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::fmt;
 
 mod extract;
+pub(crate) use extract::blocks;
 mod model;
 pub use crate::terra::MODEL;
 
