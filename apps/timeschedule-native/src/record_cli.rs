@@ -6,7 +6,7 @@ use std::{
 use timeschedule_core::storage::Storage;
 use timeschedule_desktop::paths::{self, InstanceLock};
 
-const USAGE: &str = "record enqueue --input FILE | drain | status --work-id UUID --revision N | configure-codex-chats --project UUID --enabled true/false | scan-codex-chats [--data-dir DIR] [--result FILE]";
+const USAGE: &str = "record enqueue --input FILE | drain | status --work-id UUID --revision N | configure-local-chats --project UUID --enabled true/false | scan-local-chats [--data-dir DIR] [--result FILE]";
 
 fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
     if args.len() < 2 || args[0] != "record" {
@@ -18,8 +18,8 @@ fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
         "drain" => &[],
         "status" => &["--work-id", "--revision"],
         "configure-sync" => &["--node", "--script", "--state-dir"],
-        "configure-codex-chats" => &["--project", "--enabled"],
-        "scan-codex-chats" => &[],
+        "configure-codex-chats" | "configure-local-chats" => &["--project", "--enabled"],
+        "scan-codex-chats" | "scan-local-chats" => &[],
         _ => return Err(USAGE.into()),
     };
     let mut options = HashMap::new();
@@ -77,7 +77,7 @@ pub fn execute(args: &[String]) -> Result<serde_json::Value, String> {
     let _owner = match InstanceLock::acquire(&dir) {
         Ok(owner) => owner,
         Err(message) => {
-            if command.ends_with("codex-chats") {
+            if command.ends_with("-chats") {
                 return Err(message);
             }
             return Ok(match queued {
@@ -87,15 +87,23 @@ pub fn execute(args: &[String]) -> Result<serde_json::Value, String> {
         }
     };
     let store = Storage::open(dir.join("schedule.db"))?;
-    if command == "configure-codex-chats" {
+    if matches!(command, "configure-codex-chats" | "configure-local-chats") {
         let enabled = options["--enabled"]
             .parse::<bool>()
             .map_err(|_| "--enabled에 true 또는 false를 지정하세요.")?;
-        store.set_chat_capture(options["--project"], enabled)?;
+        store.set_capture_sources(
+            options["--project"],
+            enabled,
+            command == "configure-local-chats",
+        )?;
         return Ok(serde_json::json!({"outcome":"configured","enabled":enabled}));
     }
-    if command == "scan-codex-chats" {
-        let report = crate::worker::scan_chats(&store, true)?;
+    if matches!(command, "scan-codex-chats" | "scan-local-chats") {
+        let report = if command == "scan-codex-chats" {
+            store.scan_codex_chats(&crate::worker::codex_home()?, true)?
+        } else {
+            crate::worker::scan_chats(&store, true)?
+        };
         return Ok(
             serde_json::json!({"outcome":if report.failed>0 {"attention"}else{"scanned"},"report":report}),
         );

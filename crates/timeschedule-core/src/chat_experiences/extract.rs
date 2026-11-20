@@ -91,6 +91,7 @@ fn extract_turn(
     turn: &[Block<'_>],
     kind: Kind,
     origin: &str,
+    provenance: &str,
 ) -> Option<Candidate> {
     let request = *turn.first()?;
     let intent = match kind {
@@ -224,13 +225,7 @@ fn extract_turn(
             writeln!(body, "검증 범위와 한계: {}", citation(*b, l)).unwrap();
         }
     }
-    writeln!(
-        body,
-        "\n## 원문 발췌\n\nWindows Codex 채팅 「{}」 · 기록 {}",
-        chat.title.trim_start_matches("Codex 채팅 · "),
-        chat.id
-    )
-    .unwrap();
+    writeln!(body, "\n## 원문 발췌\n\n{provenance}").unwrap();
     writeln!(body, "{origin}").unwrap();
     let mut citations = Vec::new();
     for b in turn.iter().filter(|b| {
@@ -262,11 +257,7 @@ fn extract_turn(
     }
     Some(Candidate {
         kind,
-        title: format!(
-            "{} · {}",
-            chat.title.trim_start_matches("Codex 채팅 · "),
-            kind.label()
-        ),
+        title: format!("{} · {}", chat.short_title(), kind.label()),
         body,
         citations,
     })
@@ -298,6 +289,7 @@ pub(super) fn candidates(chat: &ChatChoice, source: &str) -> Vec<Candidate> {
                         .nth(1)
                         .filter(|s| s.starts_with("원문: "))
                         .unwrap_or(""),
+                    &chat.provenance(source),
                 )
             })
         })

@@ -542,9 +542,9 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
         if watching || !p.repo_path.is_empty() {
             panel = panel.push(control(
                 if watching {
-                    "Codex 채팅 자동 수집 끄기"
+                    "채팅 자동 수집 끄기"
                 } else {
-                    "Codex 채팅 자동 수집 켜기"
+                    "Codex·Claude Code 채팅 자동 수집 켜기"
                 },
                 Message::SetChatCapture(p.id.clone(), !watching),
             ));

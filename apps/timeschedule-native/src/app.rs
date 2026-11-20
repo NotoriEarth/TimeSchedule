@@ -154,7 +154,7 @@ pub enum Message {
     RecordsDue,
     SetChatCapture(String, bool),
     ScanChats,
-    ChatsScanned(Result<timeschedule_core::codex_chats::ScanReport, String>),
+    ChatsScanned(Result<timeschedule_core::chat_history::ScanReport, String>),
     RecordsDrained(Result<crate::record_inbox::DrainReport, String>),
     Navigate(Page),
     Month(i32),
@@ -1089,15 +1089,18 @@ impl App {
                 match result {
                     Ok(r) => {
                         if r.failed > 0 {
-                            self.error=format!("Codex 채팅 파일 {}개를 읽지 못했습니다. 다음 확인 때 재시도합니다.",r.failed);
+                            self.error = format!(
+                                "로컬 채팅 파일 {}개를 읽지 못했습니다. 다음 확인 때 재시도합니다.",
+                                r.failed
+                            );
                         }
                         if r.saved > 0 {
                             self.notice =
-                                format!("Codex 채팅 {}건을 프로젝트 이력에 반영했습니다.", r.saved);
+                                format!("로컬 채팅 {}건을 프로젝트 이력에 반영했습니다.", r.saved);
                             return self.refresh();
                         }
                     }
-                    Err(e) => self.error = format!("Codex 채팅 수집 실패 · {e}"),
+                    Err(e) => self.error = format!("로컬 채팅 수집 실패 · {e}"),
                 }
             }
             Message::RecordsDue => {

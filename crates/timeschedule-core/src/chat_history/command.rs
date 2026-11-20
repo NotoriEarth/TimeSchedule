@@ -1,17 +1,18 @@
-use serde_json::Value;
-
 // A completed shell command can exit successfully while reporting a stopped service.
 // Keep bounded, recognizable output lines. Never copy a command, environment dump or
 // an arbitrary successful command's stdout into the model input.
-pub(super) fn evidence(item: &Value) -> Option<String> {
-    let out = item["aggregated_output"].as_str().unwrap_or("");
-    let code = item["exit_code"].as_i64();
+pub(super) fn evidence(
+    out: &str,
+    code: Option<i64>,
+    tool_error: bool,
+    git_work_tree: bool,
+) -> Option<String> {
     let code_label = code.map_or_else(|| "미상".to_owned(), |n| n.to_string());
     let mut result = format!("종료 코드 {code_label}");
     if out.starts_with("TAP version ") && out.lines().any(|s| s.starts_with("# tests ")) {
         return Some(format!("{result}\n{out}"));
     }
-    let failed = code.is_some_and(|n| n != 0);
+    let failed = tool_error || code.is_some_and(|n| n != 0);
     let mut lines = Vec::new();
     for line in out.lines().map(str::trim) {
         if line.is_empty() || line.len() > 400 || line.chars().any(char::is_control) {
@@ -67,7 +68,8 @@ pub(super) fn evidence(item: &Value) -> Option<String> {
         ]
         .iter()
         .any(|term| lower.contains(term));
-        if (status || failed && diagnostic) && !lines.contains(&line) {
+        let git_status = git_work_tree && matches!(line, "true" | "false");
+        if (status || git_status || failed && diagnostic) && !lines.contains(&line) {
             lines.push(line);
             if lines.len() == 3 {
                 break;

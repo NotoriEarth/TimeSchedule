@@ -313,7 +313,7 @@ fn existing_v9_edition_and_role_survive_upgrade() {
       CREATE TABLE portfolio_editions(project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
       revision INTEGER NOT NULL,folder TEXT NOT NULL,markdown TEXT NOT NULL,evidence TEXT NOT NULL,published INTEGER NOT NULL DEFAULT 0);
       INSERT INTO portfolio_editions SELECT project_id,revision,folder,markdown,evidence,published FROM current_editions;
-      DROP TABLE current_editions; DROP TABLE chat_experience_evidence; DROP TABLE chat_experience_receipts; PRAGMA user_version=9;").unwrap();
+      DROP TABLE current_editions; ALTER TABLE codex_chat_projects DROP COLUMN include_claude; DROP TABLE chat_experience_evidence; DROP TABLE chat_experience_receipts; PRAGMA user_version=9;").unwrap();
     drop(c);
     let upgraded = Storage::open(&path).unwrap();
     assert_eq!(upgraded.export_portfolio(&project, &dir.0).unwrap(), file);
