@@ -2,13 +2,13 @@ use super::{Candidate, ChatChoice, Kind};
 use std::fmt::Write;
 
 #[derive(Clone, Copy)]
-pub(super) struct Block<'a> {
-    pub(super) role: &'a str,
-    pub(super) line: usize,
-    pub(super) text: &'a str,
+pub(crate) struct Block<'a> {
+    pub(crate) role: &'a str,
+    pub(crate) line: usize,
+    pub(crate) text: &'a str,
 }
 
-pub(super) fn blocks(body: &str) -> Vec<Block<'_>> {
+pub(crate) fn blocks(body: &str) -> Vec<Block<'_>> {
     let mut result = Vec::new();
     let mut start = 0;
     let mut current = None;

@@ -1,6 +1,84 @@
 use super::*;
 use crate::diary::{EntryInput, ProjectInput};
 
+#[test]
+fn export_links_initial_and_inline_citations_and_preserves_an_edited_edition() {
+    let (db, project, chat) = fixture();
+    let session = uuid::Uuid::new_v4().to_string();
+    let root = std::env::temp_dir().join(format!("ts-links-{session}"));
+    let review = db.review_chat(&project, &chat).unwrap();
+    db.confirm_chat_candidates(&review, &[Kind::Design, Kind::Troubleshooting])
+        .unwrap();
+    db.save_portfolio_answer(&project, None, "").unwrap();
+    let choices = db.portfolio_panel(&project).unwrap().choices;
+    let selected = choices.iter().map(|c| c.id.clone()).collect();
+    let answer = serde_json::to_string(
+        &choices
+            .iter()
+            .map(|c| serde_json::json!({"id":c.id,"paragraphs":["작성한 문장"]}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    {
+        let c = db.connection().unwrap();
+        c.execute(
+            "UPDATE codex_chat_sessions SET session_id=?1 WHERE entry_id=?2",
+            params![format!("manual:claude-desktop:{session}"), chat],
+        )
+        .unwrap();
+        c.execute("UPDATE diary_entries SET body='검토 (AI · 원문 21행), (검사 출력 · 원문 26행), (AI · 원문 26행), (AI · 원문 999행)' WHERE id IN (SELECT entry_id FROM chat_experience_receipts)",[]).unwrap();
+        // Reproduce an old edition with no generated line anchors.
+        c.execute(
+            "UPDATE diary_entries SET source_body='' WHERE id=?1",
+            [&chat],
+        )
+        .unwrap();
+    }
+    let export = |writer: &dyn Fn(&str) -> Result<String, String>| {
+        db.export_portfolio_with_writer(&project, &root, Some(&selected), writer)
+            .unwrap()
+    };
+    let old = export(&|_| Ok(answer.clone()));
+    let anchor = format!("source-{session}-L21");
+    let edited = format!("직접 수정한 문장 [21행](evidence.md#{anchor})\n\n개인 기여: 보류");
+    std::fs::write(&old, &edited).unwrap();
+    db.connection()
+        .unwrap()
+        .execute(
+            "UPDATE diary_entries SET source_body=?1 WHERE id=?2",
+            params![BODY, chat],
+        )
+        .unwrap();
+    let template = db
+        .export_portfolio_selection(&project, &root, Some(&selected))
+        .unwrap();
+    let fresh = std::fs::read_to_string(template).unwrap();
+    assert!(fresh.contains(&format!("](evidence.md#{anchor})")));
+    assert!(fresh.contains(&format!("](evidence.md#source-{session}-L26)")));
+    assert!(!fresh.contains(&format!(
+        "[AI · 원문 26행](evidence.md#source-{session}-L26)"
+    )));
+    let new = export(&|_| Ok(answer.clone()));
+    assert_ne!(new, old);
+    let doc = std::fs::read_to_string(&new).unwrap();
+    let evidence = std::fs::read_to_string(new.with_file_name("evidence.md")).unwrap();
+    assert!(doc.starts_with(&edited));
+    assert_eq!(doc.matches(&format!("](evidence.md#{anchor})")).count(), 1);
+    assert_eq!(evidence.matches(&format!("id=\"{anchor}\"")).count(), 1);
+    assert_eq!(
+        evidence
+            .matches(&format!("id=\"source-{session}-L26\""))
+            .count(),
+        1
+    );
+    assert!(doc.contains(&format!("](evidence.md#source-{session}-L26)")));
+    assert!(!evidence.contains(&format!("id=\"source-{session}-L999\"")));
+    assert!(evidence.contains("환경이 다르기 때문에 저장값을 읽습니다."));
+    assert_eq!(export(&|_| panic!("unchanged inputs called Terra")), new);
+    assert_eq!(std::fs::read_to_string(old).unwrap(), edited);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 const BODY:&str="Windows Codex · session\n원문: example.jsonl\n\n## 사용자 · 원문 14행\n두 프로세스의 설정 설계를 설명해줘.\n\n## AI · 원문 16행\n이전 설계는 환경변수를 사용합니다.\n\n## 사용자 · 원문 18행\n방금 답변을 수정해줘. 개인 기여는 보류.\n\n## AI · 원문 21행\n앱과 중계는 같은 설정을 공유합니다.\n환경이 다르기 때문에 저장값을 읽습니다.\n\n## 사용자 · 원문 25행\n종료 오류를 확인해줘.\n\n## 검사 출력 · 원문 26행\n종료 코드 1\nTAP version 13\n# tests 1\n# pass 0\n# fail 1\n\n## AI · 원문 28행\n테스트에서 재현했다. 수정 결과는 미확인이다.";
 fn fixture() -> (Storage, String, String) {
     let db = Storage::open(":memory:").unwrap();
