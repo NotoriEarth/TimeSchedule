@@ -44,7 +44,7 @@ pub fn panel<'a>(app: &'a App, project: &str) -> Element<'a, Message> {
         pick_list(app.snapshot.reviewable_chats.as_slice(), selected, |chat| {
             msg(Action::Choose(chat))
         })
-        .placeholder("수집된 Codex 채팅 선택"),
+        .placeholder("수집된 채팅 선택"),
     );
     if let Some(r) = review {
         panel = panel.push(crate::views::control(

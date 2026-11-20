@@ -29,7 +29,7 @@
 | 수정 요청에서 가리킬 대상 | 0.30.1 화면에서 찾는 법 | 코드에서 찾는 법 |
 | --- | --- | --- |
 | 자료 발췌 초안 | ‘근거 요약’ 옆의 ‘자료 발췌 초안’ 버튼. 기록 편집기의 종류 목록에는 ‘포트폴리오 초안’이라는 이름이 남아 있다. | `views::projects`, `Message::Draft(true)`, `views::KIND_LABELS` |
-| Codex 채팅 자동 수집 | 저장소가 연결된 프로젝트에서 ‘Codex 채팅 자동 수집 켜기’ 또는 ‘Codex 채팅 자동 수집 끄기’ | `views::projects`, `Message::SetChatCapture` |
+| 로컬 채팅 자동 수집 | 저장소가 연결된 프로젝트에서 ‘Codex·Claude Code 채팅 자동 수집 켜기’ 또는 ‘채팅 자동 수집 끄기’ | `views::projects`, `Message::SetChatCapture` |
 | 채팅에서 경험 검토 | 수집된 채팅이 있으면 ‘채팅에서 경험 검토 · Terra’에서 채팅을 선택한다. 설계·트러블슈팅 후보에 체크한 뒤 ‘확인한 후보만 이력에 저장’을 누른다. | `chat_review_ui::panel` |
 | 경험 선택과 Markdown 생성 | ‘포트폴리오 경험’에서 ‘경험 선택’으로 기록을 고른다. ‘백엔드 포트폴리오 · Markdown 생성’ 버튼 옆에 ‘기존 v2 재사용 완료’처럼 실제 판본 번호가 표시된다. | `portfolio_ui::panel`, `portfolio_ui::Action::Export` |
 

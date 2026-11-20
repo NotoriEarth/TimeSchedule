@@ -290,7 +290,7 @@ fn migration_keeps_backup_and_category_settings_survive_restart() {
     let backups = std::fs::read_dir(&dir)
         .unwrap()
         .map(|p| p.unwrap().path())
-        .filter(|p| p.to_string_lossy().contains("pre-v14-"))
+        .filter(|p| p.to_string_lossy().contains("pre-v15-"))
         .collect::<Vec<_>>();
     assert_eq!(backups.len(), 1);
     {
@@ -642,7 +642,7 @@ fn category_schema_v5_preserves_v4_data() {
         assert_eq!(
             raw.query_row::<i64, _, _>("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap(),
-            14
+            15
         );
         let query_plan: String = raw.query_row("EXPLAIN QUERY PLAN SELECT entry_id FROM entry_display WHERE category_id=?1 ORDER BY entry_id", [&source.id], |r| r.get(3)).unwrap();
         assert!(
@@ -652,7 +652,7 @@ fn category_schema_v5_preserves_v4_data() {
         let backups = std::fs::read_dir(&dir)
             .unwrap()
             .map(|v| v.unwrap().path())
-            .filter(|p| p.to_string_lossy().contains("pre-v14-"))
+            .filter(|p| p.to_string_lossy().contains("pre-v15-"))
             .collect::<Vec<_>>();
         assert_eq!(backups.len(), 1);
         let backup = rusqlite::Connection::open(&backups[0]).unwrap();

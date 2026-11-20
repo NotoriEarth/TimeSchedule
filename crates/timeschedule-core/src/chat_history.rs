@@ -1,4 +1,4 @@
-//! Local, opt-in project history from Windows Codex Desktop session files.
+//! Local, opt-in project history from local Codex Desktop and Claude Code session files.
 use crate::{
     project_records::repo_key,
     storage::{database_error, timestamp, Storage},
@@ -8,12 +8,38 @@ use serde::Serialize;
 use std::{
     collections::HashMap,
     fs,
-    io::{self, BufRead, BufReader},
+    io::{self, BufRead, BufReader, Seek},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
+mod claude;
+mod codex;
 mod command;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Provider {
+    Codex,
+    Claude,
+}
+impl Provider {
+    fn session_key(self, id: &str) -> String {
+        match self {
+            Self::Codex => id.to_owned(),
+            Self::Claude => format!("claude:{id}"),
+        }
+    }
+    fn source_ref(self, project: &str, key: &str) -> String {
+        match self {
+            Self::Codex => format!("codex-chat:{project}:{key}"),
+            Self::Claude => format!(
+                "claude-code-chat:{project}:{}",
+                key.trim_start_matches("claude:")
+            ),
+        }
+    }
+}
+
 mod transcript;
 use transcript::Transcript;
 
@@ -47,6 +73,15 @@ impl Storage {
     }
 
     pub fn set_chat_capture(&self, project: &str, enabled: bool) -> Result<(), String> {
+        self.set_capture_sources(project, enabled, true)
+    }
+
+    pub fn set_capture_sources(
+        &self,
+        project: &str,
+        enabled: bool,
+        include_claude: bool,
+    ) -> Result<(), String> {
         let c = self.connection()?;
         if enabled {
             let path: String = c
@@ -60,9 +95,9 @@ impl Storage {
                 return Err("먼저 프로젝트에 로컬 저장소 폴더를 연결하세요.".into());
             }
             c.execute(
-                "INSERT INTO codex_chat_projects(project_id,repo_key) VALUES(?1,?2)
-                 ON CONFLICT(project_id) DO UPDATE SET repo_key=excluded.repo_key",
-                params![project, repo_key(&path)],
+                "INSERT INTO codex_chat_projects(project_id,repo_key,include_claude) VALUES(?1,?2,?3)
+                 ON CONFLICT(project_id) DO UPDATE SET repo_key=excluded.repo_key,include_claude=excluded.include_claude",
+                params![project, repo_key(&path),include_claude],
             )
             .map_err(database_error)?;
         } else {
@@ -76,11 +111,20 @@ impl Storage {
     }
 
     pub fn scan_codex_chats(&self, home: &Path, reread: bool) -> Result<ScanReport, String> {
+        self.scan_local_chats(home, None, reread)
+    }
+
+    pub fn scan_local_chats(
+        &self,
+        home: &Path,
+        claude_home: Option<&Path>,
+        reread: bool,
+    ) -> Result<ScanReport, String> {
         let mut report = ScanReport::default();
-        let enabled: HashMap<String, String> = {
+        let enabled: HashMap<String, (String, bool)> = {
             let c = self.connection()?;
             let mut q = c.prepare(
-                "SELECT p.id,p.repo_path,w.repo_key FROM codex_chat_projects w JOIN projects p ON p.id=w.project_id"
+                "SELECT p.id,p.repo_path,w.repo_key,w.include_claude FROM codex_chat_projects w JOIN projects p ON p.id=w.project_id"
             ).map_err(database_error)?;
             let mut enabled = HashMap::new();
             let rows = q
@@ -89,12 +133,13 @@ impl Storage {
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
+                        r.get::<_, bool>(3)?,
                     ))
                 })
                 .map_err(database_error)?;
             for row in rows {
-                let (id, path, key) = row.map_err(database_error)?;
-                if repo_key(&path) == key && enabled.insert(key, id).is_some() {
+                let (id, path, key, claude) = row.map_err(database_error)?;
+                if repo_key(&path) == key && enabled.insert(key, (id, claude)).is_some() {
                     return Err(
                         "같은 저장소에 채팅 수집 프로젝트가 두 개 연결되어 있습니다.".into(),
                     );
@@ -105,24 +150,37 @@ impl Storage {
         if enabled.is_empty() {
             return Ok(report);
         }
-        let root = home.join("sessions");
-        let titles = read_titles(&home.join("session_index.jsonl")).map_err(|e| e.to_string())?;
-        let files = rollouts(&root, 0).map_err(|e| e.to_string())?;
-        for file in files {
-            match self.read_chat(&file, &enabled, &titles, reread) {
-                Ok(Some(true)) => report.saved += 1,
-                Ok(Some(false)) => report.unchanged += 1,
-                Ok(None) => {}
-                Err(_) => report.failed += 1, // Other sessions can still be imported; retry next scan.
+        let codex = read_titles(&home.join("session_index.jsonl"))
+            .and_then(|titles| Ok((rollouts(&home.join("sessions"), 0)?, titles)));
+        let mut scan = |provider, files: io::Result<(Vec<PathBuf>, HashMap<String, String>)>| {
+            let Ok((files, titles)) = files else {
+                report.failed += 1;
+                return;
+            };
+            for file in files {
+                match self.read_chat(provider, &file, &enabled, &titles, reread) {
+                    Ok(Some(true)) => report.saved += 1,
+                    Ok(Some(false)) => report.unchanged += 1,
+                    Ok(None) => {}
+                    Err(_) => report.failed += 1,
+                }
             }
+        };
+        scan(Provider::Codex, codex);
+        if let Some(dir) = claude_home.filter(|_| enabled.values().any(|(_, claude)| *claude)) {
+            scan(
+                Provider::Claude,
+                claude::files(&dir.join("projects")).map(|files| (files, HashMap::new())),
+            );
         }
         Ok(report)
     }
 
     fn read_chat(
         &self,
+        provider: Provider,
         file: &Path,
-        enabled: &HashMap<String, String>,
+        enabled: &HashMap<String, (String, bool)>,
         titles: &HashMap<String, String>,
         reread: bool,
     ) -> Result<Option<bool>, String> {
@@ -135,39 +193,51 @@ impl Storage {
             .map_err(|e| e.to_string())?
             .as_nanos() as i64;
         let mut reader = BufReader::new(handle);
-        let Some(header) = transcript::header(&mut reader)? else {
+        let header = match provider {
+            Provider::Codex => codex::header(&mut reader)?,
+            Provider::Claude => claude::header(&mut reader)?,
+        };
+        let Some(header) = header else {
             return Ok(None);
         };
         let key = repo_key(&header.cwd);
-        let Some(project) = enabled.get(&key) else {
+        let Some((project, include_claude)) = enabled.get(&key) else {
             return Ok(None);
         };
-        let suffix = format!("-{}", header.id);
-        if !file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .is_some_and(|s| s.ends_with(&suffix))
-        {
+        let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let matches = match provider {
+            Provider::Codex => stem.ends_with(&format!("-{}", header.id)),
+            Provider::Claude => *include_claude && stem == header.id,
+        };
+        if !matches {
             return Ok(None);
         }
         let index_title = titles.get(&header.id).map(String::as_str).unwrap_or("");
         if !reread && self.connection()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM codex_chat_sessions WHERE project_id=?1 AND session_id=?2
              AND file_size=?3 AND modified=?4 AND index_title=?5)",
-            params![project,header.id,size,modified,index_title], |r| r.get::<_,bool>(0)
+            params![project,provider.session_key(&header.id),size,modified,index_title], |r| r.get::<_,bool>(0)
         ).map_err(database_error)? {
             return Ok(Some(false));
         }
-        let Some(chat) = transcript::read(&mut reader, header, file, index_title)? else {
+        let chat = match provider {
+            Provider::Codex => codex::read(&mut reader, header, file, index_title)?,
+            Provider::Claude => {
+                reader.rewind().map_err(|e| e.to_string())?;
+                claude::read(&mut reader, header, file)?
+            }
+        };
+        let Some(chat) = chat else {
             return Ok(None);
         };
         // An actively written file is scanned again if it grew during the read.
-        self.store_chat(project, &key, chat, size, modified, index_title)
+        self.store_chat(provider, project, &key, chat, size, modified, index_title)
             .map(Some)
     }
 
     fn store_chat(
         &self,
+        provider: Provider,
         project: &str,
         key: &str,
         chat: Transcript,
@@ -176,13 +246,15 @@ impl Storage {
         index_title: &str,
     ) -> Result<bool, String> {
         let mut c = self.connection()?;
-        let tx = c.transaction().map_err(database_error)?;
+        let tx = c
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(database_error)?;
         // The user may have disabled capture or selected a different repository during I/O.
         let path: Option<String> = tx
             .query_row(
                 "SELECT p.repo_path FROM codex_chat_projects w JOIN projects p ON p.id=w.project_id
-             WHERE w.project_id=?1 AND w.repo_key=?2",
-                params![project, key],
+             WHERE w.project_id=?1 AND w.repo_key=?2 AND (?3=0 OR w.include_claude)",
+                params![project, key, provider == Provider::Claude],
                 |r| r.get(0),
             )
             .optional()
@@ -211,7 +283,7 @@ impl Storage {
             tx.execute(
                 "INSERT INTO diary_entries(id,project_id,date,kind,title,body,source_ref,source_body,updated_at)
                  VALUES(?1,?2,?3,'note',?4,?5,?6,?5,?7)",
-                params![entry,project,chat.date,chat.title,chat.body,format!("codex-chat:{project}:{}",chat.id),timestamp()],
+                params![entry,project,chat.date,chat.title,chat.body,provider.source_ref(project,&chat.id),timestamp()],
             ).map_err(database_error)?;
             (entry, true)
         };

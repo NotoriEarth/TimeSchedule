@@ -314,17 +314,25 @@ pub fn draft(
     form.body = body;
     Ok(form)
 }
-pub fn scan_chats(
-    store: &Storage,
-    reread: bool,
-) -> Result<timeschedule_core::codex_chats::ScanReport, String> {
-    let home = std::env::var_os("CODEX_HOME")
+pub(crate) fn codex_home() -> Result<std::path::PathBuf, String> {
+    std::env::var_os("CODEX_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
             std::env::var_os("USERPROFILE").map(|p| std::path::PathBuf::from(p).join(".codex"))
         })
-        .ok_or("Codex 사용자 폴더를 찾을 수 없습니다.")?;
-    store.scan_codex_chats(&home, reread)
+        .ok_or_else(|| "Codex 사용자 폴더를 찾을 수 없습니다.".into())
+}
+pub fn scan_chats(
+    store: &Storage,
+    reread: bool,
+) -> Result<timeschedule_core::chat_history::ScanReport, String> {
+    let home = codex_home()?;
+    let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|p| std::path::PathBuf::from(p).join(".claude"))
+        });
+    store.scan_local_chats(&home, claude_home.as_deref(), reread)
 }
 
 pub fn job<T: Send + 'static, M: Send + 'static>(

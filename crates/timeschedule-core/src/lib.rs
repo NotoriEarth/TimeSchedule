@@ -1,6 +1,7 @@
 pub mod calendar;
 pub mod chat_experiences;
-pub mod codex_chats;
+pub mod chat_history;
+pub use chat_history as codex_chats;
 pub mod dates;
 pub mod diary;
 pub mod evidence;

@@ -192,11 +192,7 @@ pub(super) fn review(
                 quote: r.text.into(),
             });
         }
-        body.push_str(&format!(
-            "\nWindows Codex 채팅 「{}」 · 기록 {}\n모델: {MODEL}\n",
-            chat.title.trim_start_matches("Codex 채팅 · "),
-            chat.id
-        ));
+        writeln!(body, "\n{}\n모델: {MODEL}", chat.provenance(source)).unwrap();
         if let Some(origin) = source.lines().nth(1).filter(|l| l.starts_with("원문: ")) {
             writeln!(body, "{origin}").unwrap();
         }

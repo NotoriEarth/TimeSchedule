@@ -12,6 +12,26 @@ pub struct ChatChoice {
     pub id: String,
     pub title: String,
 }
+impl ChatChoice {
+    fn short_title(&self) -> &str {
+        self.title
+            .strip_prefix("Codex 채팅 · ")
+            .or_else(|| self.title.strip_prefix("Claude Code 채팅 · "))
+            .unwrap_or(&self.title)
+    }
+    fn provenance(&self, source: &str) -> String {
+        let provider = if source.starts_with("Claude Code · ") {
+            "Claude Code"
+        } else {
+            "Windows Codex"
+        };
+        format!(
+            "{provider} 채팅 「{}」 · 기록 {}",
+            self.short_title(),
+            self.id
+        )
+    }
+}
 impl fmt::Display for ChatChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.title)
@@ -255,7 +275,8 @@ impl Storage {
             for row in rows {
                 let (id, body) = row.map_err(database_error)?;
                 if body.lines().any(|l| {
-                    l.starts_with("Windows Codex 채팅 「") && l.trim_end().ends_with(&marker)
+                    (l.starts_with("Windows Codex 채팅 「") || l.starts_with("Claude Code 채팅 「"))
+                        && l.trim_end().ends_with(&marker)
                 }) {
                     matches.push(id);
                 }
