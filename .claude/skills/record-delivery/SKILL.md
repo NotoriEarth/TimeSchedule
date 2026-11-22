@@ -17,7 +17,7 @@ A development record can be captured several times for one piece of work. Each c
 | `no-false-conflict` | No capture ends in `conflict` when the user edited nothing. | A record is stuck until someone repairs it by hand. |
 | `no-false-exclusion` | No capture is `excluded` while its commits exist in Git. | A record is dropped for good because Git was briefly unavailable. |
 | `no-capture-lost` | A capture that is still waiting never loses its job file. | A record disappears without having been delivered. |
-| `delivered-in-the-end` | From any state, three more syncs that run every job, with Git answering, leave no capture waiting. | A record stays undelivered although nothing is wrong any more. |
+| `delivered-in-the-end` | From any state, more syncs with Git answering leave no capture waiting: three syncs that run every job, or one sync per capture plus two that run one job each, as the app does. | A record stays undelivered although nothing is wrong any more. |
 | `newest-shown-in-the-end` | After those syncs the diary shows the newest capture. | The diary settles on outdated content. |
 
 ## Run it
@@ -28,7 +28,7 @@ From the repository root. It needs Node and Git, which the repository's tests al
 node .claude\skills\record-delivery\check.mjs
 ```
 
-About a minute and a half. Options: `--depth N` for longer step sequences (4 takes about seven minutes, 5 longer), `--captures N` for more captures of the work, `--json FILE` for the result as JSON.
+About three minutes. Options: `--depth N` for longer step sequences (4 takes about fifteen minutes), `--captures N` for more captures of the work, `--json FILE` for the result as JSON, `--until P1,P2` to stop as soon as those properties have been violated.
 
 Read the last lines:
 
@@ -52,7 +52,8 @@ A counterexample is a list of steps in the words of the code:
 - `prepare the next capture of the work` calls `prepare` with new content for the same work ID.
 - `sync(space on|off, one job|all jobs, Git ...)` calls `sync` once with `spaceEnabled`, with `maxJobs: 1` (how the app runs it) or without, and `retryNow: true`. `Git answers` is a normal run. `Git fails for every capture` hides the repository's `.git` for that run. `Git fails for capture N only` points only that capture's job at a missing folder for that run. `Git not checked: run budget spent` passes `gitCheckBudgetMs: 0`.
 - `long Git outage` is twelve failing syncs in a row, enough to pause a capture.
-- `then 3 syncs of all jobs with Git answering` is the settling run that the two end properties look at.
+- `publishing to Space fails` is a sync with Space on in which the diary gets its delivery and the page cannot be published.
+- `then 3 syncs of all jobs, with Git answering` and `then 4 syncs of one job each, as the app runs them` are the settling runs that the two end properties look at.
 
 Decide whether it is a bug or a modeling error before changing anything:
 
@@ -86,7 +87,7 @@ Update the check in the same change, then rerun both commands in this file.
 node .claude\skills\record-delivery\selftest.mjs
 ```
 
-About a minute and a half. It copies `scripts/` to a scratch folder six times, breaks one rule in each copy, and expects `check.mjs` to report the property that rule protects. Between them the six breaks make every property in the table fail once, except `no-rollback-after-space-turned-off`, which the current code already violates. `CAUGHT` on every line and exit code `0` is the pass. `MISSED` means the checker no longer sees that kind of break. `STALE` means the code a case edits has changed and the case must be updated. Run it whenever `check.mjs` or `selftest.mjs` changes, and after a change to `sync` that makes a case stale.
+About two minutes. It copies `scripts/` to a scratch folder seven times, breaks one rule in each copy, and expects `check.mjs` to report the property that rule protects. Between them the seven breaks make every property in the table fail once, except `no-rollback-after-space-turned-off`, which the current code already violates. `CAUGHT` on every line and exit code `0` is the pass. `MISSED` means the checker no longer sees that kind of break. `STALE` means the code a case edits has changed and the case must be updated. Run it whenever `check.mjs` or `selftest.mjs` changes, and after a change to `sync` that makes a case stale.
 
 ## Coverage
 
@@ -99,7 +100,8 @@ Run for real, as written in the repository:
 Stood in for, by code in `check.mjs`:
 
 - The app's receiving rule `apply_project_record` (`crates/timeschedule-core/src/project_records.rs`), as `receive`: an older revision is stale, the same revision with the same payload is unchanged and with a different one a conflict, a newer one is saved.
-- Publishing to Space: always succeeds.
+- The app's inbox refusing other content under a revision it has received (`record_inbox.rs` `enqueue`): the importer throws, as the command line does.
+- Publishing to Space: succeeds, or fails before anything is written in the steps that say so.
 
 Sync commit: `f826227`. Move it forward only after rerunning `check.mjs` and `selftest.mjs` at the new commit and confirming that the lists above still describe the code. Change it in this file in both places it appears.
 
@@ -110,9 +112,8 @@ A pass covers the sequences inside the bound, not the system.
 - One work item, two captures, sequences of up to three steps by default.
 - Every sync runs with `retryNow`, so behavior that depends on a retry time not being due yet is not explored.
 - `receive` does not repeat the app's validation of a record's fields. A payload the app would reject counts as delivered.
-- The settling run uses syncs that process every job. The app processes one job per run and needs one run per waiting capture.
-- The app is always reachable and applies a delivery at once. The `queued` answer and the app's own inbox (`record_inbox.rs`) are not explored.
+- The app answers at once. Its `queued` answer, a drain of its inbox later and in file-name order, and an error returned after a record was queued are not explored.
 - The user never edits or deletes the diary entry.
 - No crash in the middle of `prepare` or `sync`, and no two syncs at once.
-- Publishing to Space never fails.
+- Publishing to Space fails only before anything is written; a publication that may have been made is not explored.
 - Git fails for a whole run or for one capture's check, not at a single Git command.

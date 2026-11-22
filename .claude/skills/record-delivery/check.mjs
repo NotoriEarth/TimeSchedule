@@ -3,7 +3,7 @@
 // that the diary never loses or rolls back a record. See SKILL.md beside it.
 //
 //   node .claude/skills/record-delivery/check.mjs [--captures N] [--depth N] [--json FILE]
-//                                                 [--stop-at-first] [--root DIR]
+//                                                 [--stop-at-first] [--until PROPERTY,...] [--root DIR]
 //
 // Exit 0: no property is violated within the bound, apart from the findings
 //         already recorded in known-findings.json (they are printed again).
@@ -29,6 +29,7 @@ const CAPTURES = Number(option('--captures', 2));   // revisions of one work ite
 const DEPTH = Number(option('--depth', 3));          // steps on one path
 const JSON_OUT = option('--json', null);
 const STOP_AT_FIRST = process.argv.includes('--stop-at-first');
+const UNTIL = option('--until', null);                // stop once all of these properties were violated
 const SETTLE = 3;                                     // syncs allowed for a backlog to drain
 const WORK_ID = '11111111-2222-4333-8444-555555555555';
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -117,6 +118,10 @@ async function main() {
     for (const space of [false, true]) for (const jobs of [1, Infinity]) for (const git of gits) {
       steps.push({ name: `sync(space ${space ? 'on' : 'off'}, ${jobs === 1 ? 'one job, as the app runs it' : 'all jobs'}, ${gitWords(git)})`, space, jobs, git, repeat: 1 });
     }
+    // Space cannot be reached: the diary gets its delivery and the page is not published.
+    for (const jobs of [1, Infinity]) {
+      steps.push({ name: `sync(space on, ${jobs === 1 ? 'one job, as the app runs it' : 'all jobs'}, Git answers, publishing to Space fails)`, space: true, jobs, git: 'up', publish: 'fails', repeat: 1 });
+    }
     // A shortcut to the paused state, which otherwise needs twelve steps of the path.
     if (jobFiles().some(({ job }) => UNFINISHED(job) && job.phase !== 'git_paused')) {
       for (const space of [false, true]) steps.push({ name: `long Git outage: ${GIT_RETRY_LIMIT} failing syncs (space ${space ? 'on' : 'off'})`, space, jobs: Infinity, git: 'down', repeat: GIT_RETRY_LIMIT });
@@ -130,12 +135,18 @@ async function main() {
       const hash = sha(JSON.stringify(record)), sent = world.sent[record.revision];
       const resent = sent !== undefined && sent !== hash;
       if (sent === undefined) world.sent[record.revision] = hash;
+      // The app's inbox (record_inbox.rs `enqueue`) refuses other content under a
+      // revision it has received, before the receiving rule is consulted.
+      if (resent) {
+        events.push({ delivered: record.revision, capture: captureOf(record), state: record.deliveryState, outcome: 'error', shownBefore: before, stateBefore, resent });
+        throw new Error('the inbox already holds other content under this revision');
+      }
       const receipt = receive(world.diary, record);
       events.push({ delivered: record.revision, capture: captureOf(record), state: record.deliveryState, outcome: receipt.outcome, shownBefore: before, stateBefore, resent });
       return receipt;
     };
     const options = { stateDir: live.state, vaultRoot: live.vault, projectRoot: fixture.repo, spaceEnabled: step.space, retryNow: true,
-      importer, publisher: async job => published(job), ...(step.jobs === 1 ? { maxJobs: 1 } : {}), ...(step.git === 'unchecked' ? { gitCheckBudgetMs: 0 } : {}) };
+      importer, publisher: async job => { if (step.publish === 'fails') throw new Error('Space cannot be reached'); return published(job); }, ...(step.jobs === 1 ? { maxJobs: 1 } : {}), ...(step.git === 'unchecked' ? { gitCheckBudgetMs: 0 } : {}) };
     let spelling = null;
     if (step.git === 'down') fs.renameSync(dotGit, away);
     if (typeof step.git === 'number') spelling = setRepoOf(step.git, nowhere);
@@ -205,13 +216,15 @@ async function main() {
   }
   // Checked from every state: once Git answers and syncs that run every job
   // keep coming, the newest capture is what the diary shows and nothing waits.
-  async function settleViolations(world, space) {
+  const settleRuns = jobs => jobs === 1 ? CAPTURES + 2 : SETTLE;
+  const settleWords = (space, jobs) => `${settleRuns(jobs)} syncs of ${jobs === 1 ? 'one job each, as the app runs them' : 'all jobs'}, with Git answering, space ${space ? 'on' : 'off'}`;
+  async function settleViolations(world, space, jobs) {
     const events = [], before = summary(world);
-    for (let i = 0; i < SETTLE; i++) await runSync({ space, jobs: Infinity, git: 'up', repeat: 1 }, world, events);
+    await runSync({ space, jobs, git: 'up', repeat: settleRuns(jobs) }, world, events);
     const end = summary(world), found = stepViolations(before, end, events);
     if (world.captures > 0) {
       const waiting = end.jobs.filter(j => !['complete', 'local_complete'].includes(j.phase));
-      const tail = `after ${SETTLE} more syncs of all jobs with Git answering (space ${space ? 'on' : 'off'})`;
+      const tail = `after ${settleWords(space, jobs)}`;
       if (waiting.length) found.push({ property: 'delivered-in-the-end', text: `${tail}, ${waiting.map(j => `capture ${j.capture} is still "${j.phase}"`).join(', ')}` });
       if (end.diary.capture !== world.captures) found.push({ property: 'newest-shown-in-the-end', text: `${tail}, the diary shows ${end.diary.capture === null ? 'nothing' : `capture ${end.diary.capture}`} but the newest capture is ${world.captures}` });
     }
@@ -234,6 +247,7 @@ async function main() {
   };
   const cloneWorld = world => ({ captures: world.captures, sent: { ...world.sent }, diary: { ...world.diary } });
   const fresh = () => [...findings.keys()].some(property => !isKnown(property));
+  const enough = () => UNTIL ? UNTIL.split(',').every(property => findings.has(property)) : STOP_AT_FIRST && fresh();
 
   let transitions = 0, complete = true;
   const first = { captures: 0, sent: {}, diary: { revision: null, payload: null, capture: null, state: null } };
@@ -257,15 +271,15 @@ async function main() {
           nodes.push({ world, depth: node.depth + 1, parent: id, step: step.name });
           save(String(nodes.length - 1));
         }
-        if (STOP_AT_FIRST && fresh()) { complete = false; break explore; }
+        if (enough()) { complete = false; break explore; }
       }
     }
     // From this state, for both Space settings: does the backlog drain?
-    for (const space of [false, true]) {
+    for (const space of [false, true]) for (const jobs of [Infinity, 1]) {
       restore(String(id));
-      for (const violation of await settleViolations(cloneWorld(node.world), space)) report(violation, id, [`then ${SETTLE} syncs of all jobs with Git answering, space ${space ? 'on' : 'off'}`]);
+      for (const violation of await settleViolations(cloneWorld(node.world), space, jobs)) report(violation, id, [`then ${settleWords(space, jobs)}`]);
     }
-    if (STOP_AT_FIRST && fresh()) { complete = false; break; }
+    if (enough()) { complete = false; break; }
   }
 
   const result = { bound: { captures: CAPTURES, depth: DEPTH }, complete, states: nodes.length, transitions, seconds: Math.round((Date.now() - started) / 1000),
@@ -280,8 +294,8 @@ async function main() {
   }
   // Only a search that ran to its bound can say that something did not happen.
   if (complete) {
-    for (const known of KNOWN.filter(k => !result.findings.some(f => f.property === k.property))) {
-      console.log(`\nNOT REPRODUCED within this bound: the recorded finding ${known.property}. If the code was fixed and the default bound was used, remove it from known-findings.json.`);
+    for (const known of KNOWN.filter(k => DEPTH >= (k.depth ?? 0) && !result.findings.some(f => f.property === k.property))) {
+      console.log(`\nNOT REPRODUCED within this bound: the recorded finding ${known.property}. If the code was fixed, remove it from known-findings.json.`);
     }
   }
   for (const finding of unrecorded) {
