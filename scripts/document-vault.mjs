@@ -79,7 +79,7 @@ function initialize(root) {
   for (const folder of ['projects', 'studies', '.sync']) fs.mkdirSync(safePath(root, folder), { recursive: true });
   fs.mkdirSync(safePath(root, '.sync', 'catalog'), { recursive: true });
   const guide = safePath(root, 'README.md');
-  if (!fs.existsSync(guide)) atomicWrite(guide, '# TimeScheduleData 개인 문서 저장소\n\nprojects는 프로젝트, studies는 공부 자료입니다. 각 기록의 record.md가 읽을 수 있는 원문이고 metadata.json은 분류·ID·수정 정보입니다. history에는 가져온 수정본이 남습니다. attachments에 첨부 파일을 보관할 수 있습니다.\n\nTimeSchedule 프로젝트 폴더에서 `node scripts/document-vault.mjs status`로 위치와 상태를 확인하고, `import --input FILE`로 JSON 문서를 가져옵니다. record.md를 직접 편집한 뒤 `node scripts/document-vault.mjs adopt --id UUID`로 수정본을 확정할 수 있습니다. adopt 이후 문서는 수동 관리되어 자동 갱신이 덮어쓰지 않습니다. 입력 예제와 전체 사용법은 프로젝트의 docs/document-vault.md를 참고하세요.\n\n다이어리는 별도 표시본이며 서로의 수동 편집을 자동 동기화하지 않습니다. 전체 폴더를 함께 백업하세요. .sync는 위치 목록과 복구 상태입니다. 서버 동기화는 아직 제공하지 않으며 Space는 개발 기록에서 명시적으로 켠 경우에만 사용합니다.\n');
+  if (!fs.existsSync(guide)) atomicWrite(guide, '# TimeScheduleData 개인 문서 저장소\n\nprojects는 프로젝트, studies는 공부 자료입니다. 각 기록의 record.md가 읽을 수 있는 원문이고 metadata.json은 분류·ID·수정 정보입니다. history에는 가져온 수정본이 남습니다. attachments에 첨부 파일을 보관할 수 있습니다.\n\nTimeSchedule 프로젝트 폴더에서 `node scripts/document-vault.mjs status`로 위치와 상태를 확인하고, `import --input FILE`로 JSON 문서를 가져옵니다. record.md를 직접 편집한 뒤 `node scripts/document-vault.mjs adopt --id UUID`로 수정본을 확정할 수 있습니다. adopt 이후 문서는 수동 관리되어 자동 갱신이 덮어쓰지 않습니다. 입력 예제와 전체 사용법은 프로젝트의 docs/document-vault.md를 참고하세요.\n\n다이어리는 별도 표시본이며 서로의 수동 편집을 자동 동기화하지 않습니다. 전체 폴더를 함께 백업하세요. .sync는 위치 목록과 복구 상태입니다. 서버 동기화는 아직 제공하지 않습니다.\n');
   return { root, ...readJson(marker) };
 }
 
@@ -90,21 +90,21 @@ export async function initVault(root) {
 
 export function vaultPreferences(stateDir = DEFAULT_STATE) {
   const file = path.join(stateDir, 'vault-settings.json');
-  if (!fs.existsSync(file)) return { schemaVersion: 1, root: path.join(os.homedir(), 'Documents', 'TimeScheduleData'), spaceEnabled: false };
+  if (!fs.existsSync(file)) return { schemaVersion: 1, root: path.join(os.homedir(), 'Documents', 'TimeScheduleData') };
   const settings = readJson(file);
-  if (settings.schemaVersion !== 1 || typeof settings.root !== 'string' || !path.isAbsolute(settings.root)
-      || typeof settings.spaceEnabled !== 'boolean') throw new Error('문서 저장소 설정을 확인해 주세요.');
-  return settings;
+  if (settings.schemaVersion !== 1 || typeof settings.root !== 'string' || !path.isAbsolute(settings.root)) throw new Error('문서 저장소 설정을 확인해 주세요.');
+  return { schemaVersion: 1, root: settings.root };
 }
 
 export async function configureVault(stateDir = DEFAULT_STATE, changes = {}) {
   return withLock(stateDir, async canonical => {
     const previous = vaultPreferences(canonical);
     if (changes.root !== undefined && (!path.isAbsolute(changes.root) || !changes.root.trim())) throw new Error('저장소 절대 경로가 필요합니다.');
-    if (changes.spaceEnabled !== undefined && typeof changes.spaceEnabled !== 'boolean') throw new Error('Space 설정은 on 또는 off입니다.');
     const initialized = await initVault(changes.root ?? previous.root);
-    const next = { schemaVersion: 1, root: initialized.root, spaceEnabled: changes.spaceEnabled ?? previous.spaceEnabled };
-    atomicJson(safePath(canonical, 'vault-settings.json'), next);
+    const next = { schemaVersion: 1, root: initialized.root };
+    // A checkout from before Space publishing was removed refuses a settings
+    // file without spaceEnabled, and publishes when it is true.
+    atomicJson(safePath(canonical, 'vault-settings.json'), { ...next, spaceEnabled: false });
     return next;
   });
 }
@@ -176,8 +176,8 @@ function saveUnlocked(document, canonical, adopt = false) {
       return { id: document.id, root: canonical, file, revision: previous.revision, unchanged: true };
     }
     if (previous?.manual && !adopt) throw conflict('수동 편집한 문서입니다. 자동 갱신 충돌을 보존했습니다. 직접 편집 후 adopt를 사용하세요.');
-    // Retrying an older development capture must not roll back a newer local
-    // document while the older Space publication is still pending.
+    // An older development capture that is delivered late must not roll back
+    // a newer local document.
     if (Number.isSafeInteger(previous?.source?.captureRevision) && Number.isSafeInteger(document.source?.captureRevision)
         && previous.source.repoPath === document.source.repoPath && previous.source.captureRevision > document.source.captureRevision) {
       return { id: document.id, root: canonical, file, revision: previous.revision, unchanged: true, stale: true };
@@ -228,13 +228,12 @@ export async function vaultStatus(root) {
 async function main([command, ...args]) {
   const allowedOptions = {
     init: ['--root'],
-    config: ['--space'],
     import: ['--input'],
     adopt: ['--id'],
     status: [],
   };
   if (!Object.hasOwn(allowedOptions, command)) {
-    throw new Error('사용법: node scripts/document-vault.mjs init --root PATH | import --input FILE | adopt --id UUID | status | config --space on|off');
+    throw new Error('사용법: node scripts/document-vault.mjs init --root PATH | import --input FILE | adopt --id UUID | status');
   }
   const options = {};
   while (args.length) {
@@ -252,9 +251,6 @@ async function main([command, ...args]) {
   if (command === 'init') {
     if (!options.root) throw new Error('init --root ABSOLUTE_PATH를 사용하세요.');
     result = await configureVault(stateDir, { root: options.root });
-  } else if (command === 'config') {
-    if (!['on', 'off'].includes(options.space)) throw new Error('config --space on|off를 사용하세요.');
-    result = await configureVault(stateDir, { spaceEnabled: options.space === 'on' });
   } else if (command === 'import') {
     if (!options.input) throw new Error('import --input FILE를 사용하세요. 저장 경로는 init으로 선택합니다.');
     const settings = vaultPreferences(stateDir);

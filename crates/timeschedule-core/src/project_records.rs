@@ -19,8 +19,13 @@ pub struct ProjectRecord {
     pub kind: String,
     pub title: String,
     pub summary: String,
+    /// The record's Space page. Space publishing was removed, so the record
+    /// script sends it empty; a payload sent before that may carry a link,
+    /// which stays the entry's link.
     pub space_url: String,
     pub status: String,
+    /// "local" from the record script. "pending" and "synced" are from
+    /// payloads sent while Space publishing existed and are still accepted.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub delivery_state: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -215,6 +220,9 @@ impl Storage {
             [&record.work_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).optional().map_err(database_error)?;
 
+        // The link the entry already has. Space publishing was removed, so new
+        // records carry none; an entry that got a Space page keeps its link.
+        let mut kept_link = String::new();
         if let Some((revision, previous_payload, entry_id, snapshot)) = &previous {
             if record.revision < *revision {
                 return Ok(record.receipt(
@@ -251,6 +259,7 @@ impl Storage {
                     )
                 });
             }
+            kept_link = managed.source_url;
         }
 
         let key = repo_key(&record.repo_path);
@@ -282,33 +291,24 @@ impl Storage {
             .as_ref()
             .map(|row| row.2.clone())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let body = if record.schema_version >= 2 {
-            format!(
-                "{}\n\n상태: {}\n\n{}",
-                record.detail.trim(),
-                record.status_label()?,
-                if record.delivery_state == "local" {
-                    "로컬 저장 완료 — Space 연동은 선택 사항입니다."
-                } else if record.delivery_state == "pending" {
-                    "Space 연결 대기 — 원문은 다이어리에 보관되어 있습니다."
-                } else {
-                    "Space 연결 완료"
-                }
-            )
+        // v1 carried only the summary. From v2 the full text is in `detail`.
+        let text = if record.schema_version >= 2 {
+            &record.detail
         } else {
-            format!(
-                "{}\n\n상태: {}",
-                record.summary.trim(),
-                record.status_label()?
-            )
+            &record.summary
         };
+        let body = format!("{}\n\n상태: {}", text.trim(), record.status_label()?);
         let snapshot = ManagedSnapshot {
             project_id: Some(project_id),
             date: record.date.clone(),
             kind: record.kind.clone(),
             title: record.title.trim().into(),
             body,
-            source_url: record.space_url.clone(),
+            source_url: if record.space_url.is_empty() {
+                kept_link
+            } else {
+                record.space_url.clone()
+            },
         };
         let source_ref = format!("space-work:{}", record.work_id);
         tx.execute(
@@ -385,7 +385,7 @@ impl Storage {
         Ok(record.receipt(
             "saved",
             Some(entry_id),
-            "기록 원문과 연결 상태를 다이어리에 저장했습니다.",
+            "기록 원문을 다이어리에 저장했습니다.",
         ))
     }
 }
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_record_keeps_full_text_and_later_links_the_same_entry() {
+    fn payloads_from_before_space_was_removed_keep_full_text_and_link_the_same_entry() {
         let store = Storage::open(":memory:").unwrap();
         let mut pending = record();
         pending.schema_version = 2;
@@ -631,8 +631,10 @@ mod tests {
         let saved = store.apply_project_record(&pending).unwrap();
         let id = saved.entry_id.unwrap();
         let offline = store.get_entry(&id).unwrap();
-        assert!(offline.body.contains(&pending.detail));
-        assert!(offline.body.contains("Space 연결 대기"));
+        assert_eq!(
+            offline.body,
+            format!("{}\n\n상태: 검증 대기", pending.detail)
+        );
         assert!(offline.source_url.is_empty());
         pending.revision += 1;
         pending.delivery_state = "synced".into();
@@ -646,8 +648,7 @@ mod tests {
             Some(id.as_str())
         );
         let online = store.get_entry(&id).unwrap();
-        assert!(online.body.contains(&pending.detail));
-        assert!(!online.body.contains("Space 연결 대기"));
+        assert_eq!(online.body, offline.body);
         assert_eq!(online.source_url, pending.space_url);
         assert_eq!(
             store.apply_project_record(&pending).unwrap().outcome,
@@ -684,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn local_record_is_complete_without_space_and_preserves_user_edits() {
+    fn local_record_shows_its_text_and_status_and_keeps_an_earlier_link() {
         let store = Storage::open(":memory:").unwrap();
         let mut local = record();
         local.schema_version = 2;
@@ -694,9 +695,27 @@ mod tests {
         assert!(local.validate().is_ok());
         let receipt = store.apply_project_record(&local).unwrap();
         let entry = store.get_entry(receipt.entry_id.as_ref().unwrap()).unwrap();
-        assert!(entry.body.contains("로컬 저장 완료"));
-        assert!(!entry.body.contains("Space 연결 대기"));
+        assert_eq!(entry.body, "로컬 문서 저장소의 원문\n\n상태: 검증 대기");
         assert!(entry.source_url.is_empty());
+        let id = receipt.entry_id.unwrap();
+        // An entry that got a Space page before publishing was removed keeps
+        // the link when a later record of the work arrives without one.
+        let mut linked = local.clone();
+        linked.revision += 1;
+        linked.delivery_state = "synced".into();
+        linked.space_url = record().space_url;
+        store.apply_project_record(&linked).unwrap();
+        let mut later = local.clone();
+        later.revision += 2;
+        later.detail = "후속 수정본의 원문".into();
+        assert_eq!(store.apply_project_record(&later).unwrap().outcome, "saved");
+        let entry = store.get_entry(&id).unwrap();
+        assert_eq!(entry.body, "후속 수정본의 원문\n\n상태: 검증 대기");
+        assert_eq!(entry.source_url, linked.space_url);
+        later.revision += 1;
+        later.detail = "그다음 수정본의 원문".into();
+        assert_eq!(store.apply_project_record(&later).unwrap().outcome, "saved");
+        assert_eq!(store.get_entry(&id).unwrap().source_url, linked.space_url);
         local.space_url = record().space_url;
         assert!(local.validate().is_err());
     }

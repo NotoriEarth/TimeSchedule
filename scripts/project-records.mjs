@@ -3,12 +3,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
-import { publishCodex, validatePublication, runBounded } from './project-records-codex.mjs';
+import { spawn } from 'node:child_process';
 import { developmentEvidence, canonicalPath, ownedCommits } from './project-records-git.mjs';
 import { saveDocument, vaultPreferences } from './document-vault.mjs';
 
 export const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const PARENT_PAGE_ID = 'page_6ae1b18a44f08191ad2a86276972476c';
 const DEFAULT_STATE = path.join(PROJECT_ROOT, '.cache', 'project-records');
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const LABELS = { in_progress: '진행 중', verification_pending: '검증 대기', verified: '확인한 범위 검증 완료', completed: '작업 정리 완료', merged: '병합 완료' };
@@ -74,9 +73,18 @@ function normalizeSource(input, projectRoot = PROJECT_ROOT) {
   }
   if (input.commits != null && (!Array.isArray(input.commits) || input.commits.length > 200)) throw new Error('commits는 최대 200개의 커밋 해시 목록이어야 합니다.');
   const source = { workId: input.workId, projectTitle: text(input.projectTitle, '프로젝트 제목', 200), repoPath: canonicalPath(repoPath), date,
-    kind: input.kind, title: text(input.title, '기록 제목', 200), status: input.status, detailedMarkdown, diarySummary, parentPageId: PARENT_PAGE_ID };
+    kind: input.kind, title: text(input.title, '기록 제목', 200), status: input.status, detailedMarkdown, diarySummary };
   return { source, completedAt: input.completedAt ?? null,
     commits: input.commits == null ? null : input.commits.map(c => typeof c === 'string' ? c : c?.hash) };
+}
+// Versions that published to Space kept the parent page's ID in the source,
+// after diarySummary, and hashed it. Hashing it in that place still gives an
+// unchanged record the hash those versions stored, so preparing it again is
+// "unchanged" in either version and not a new capture.
+function contentHashOf(source) {
+  const entries = Object.entries(source);
+  entries.splice(entries.findIndex(([key]) => key === 'diarySummary') + 1, 0, ['parentPageId', 'page_6ae1b18a44f08191ad2a86276972476c']);
+  return sha(JSON.stringify(Object.fromEntries(entries)));
 }
 function atomicJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -99,6 +107,10 @@ function loadJobs(stateDir, workId) {
       .map(f => ({ file: path.join(stateDir, e.name, f), job: readJson(path.join(stateDir, e.name, f)) })))
     .sort((a,b) => a.job.source.workId === b.job.source.workId ? a.job.revision-b.job.revision : (a.job.createdAt ?? a.job.updatedAt).localeCompare(b.job.createdAt ?? b.job.updatedAt));
 }
+// A capture ends as local_complete (the diary has it), conflict (the user's
+// edit was kept) or excluded (Git shows no development change). 'complete' is
+// the end of a record that also got a Space page, before Space publishing was
+// removed. Such a record stays as it is.
 const finished = job => ['complete', 'local_complete', 'conflict', 'excluded'].includes(job.phase);
 // git_paused is not finished: every sync rechecks it and resumes it once Git
 // answers. It only stops waking the app.
@@ -108,17 +120,52 @@ const retryDelay = failures => RETRY_DELAYS[Math.min(failures, RETRY_DELAYS.leng
 // Twelve failures on the ladder above span about nine hours of the app being
 // open (1+5+15 minutes, then hourly). Past that the cause is not passing.
 export const GIT_RETRY_LIMIT = 12;
-const uncertainPublication = job => job?.publicationUncertain === true
-  || (job && job.schemaVersion !== 2 && (job.phase === 'publishing' || job.excludedFromPhase === 'publishing'));
+// The number a capture's diary payload carries. The app shows the highest
+// number it has taken for a work and refuses other content under a number it
+// holds. So prepare gives each capture a higher number than every capture
+// before it, and nothing changes it afterwards. A schemaVersion 1 job has none
+// stored and uses revision + 1.
+const deliveryRevision = job => job.localRevision ?? job.revision + 1;
+// The highest number a job has used or reserved.
+const usedRevision = job => Math.max(job.finalRevision ?? 0, job.diaryReceipt?.revision ?? 0, deliveryRevision(job));
+// Whether the app confirmed that the diary took this capture, under any number.
+const inDiary = job => job.localSaved === true || ['complete', 'local_complete'].includes(job.phase) || ['saved', 'unchanged'].includes(job.diaryReceipt?.outcome);
+// The Space page of a work published before Space publishing was removed.
+const pageUrlOf = job => job.pageUrl ?? (job.spaceVerified || job.phase === 'complete' ? job.space?.pageUrl ?? null : null);
+// A job that a version before 0.32.0 prepared has no diaryMode until that
+// version's sync reaches it. Run again with Space off, that version gives such
+// a job a new number above its work's other captures, which can put it over a
+// later capture the diary already shows. Marked 'local' it keeps its number in
+// both versions. Only a job that never sent anything is marked: one that may
+// have sent 'pending' under its number has to send the same content again.
+function keepNumber(file, job) {
+  if (finished(job) || job.diaryMode === 'local' || job.localSaved || job.diaryReceipt || job.attempts) return;
+  // The payload file is written before the app's command line is started.
+  if (fs.existsSync(path.join(path.dirname(file), `diary-${deliveryRevision(job)}.json`))) return;
+  job.diaryMode = 'local';
+  atomicJson(file, job);
+}
 function writeWake(stateDir) {
   const pending = loadJobs(stateDir).map(x=>x.job).filter(waiting);
   atomicJson(path.join(stateDir,'wake.json'), {pending:pending.length,nextAttemptAt:pending.length ? Math.min(...pending.map(j=>j.nextAttemptAt ?? 0)) : null});
 }
-function upgradeJob(job) {
-  if(job.schemaVersion===2 || finished(job)) return;
-  job.schemaVersion=2; job.localRevision=job.revision+1; job.finalRevision=job.revision+2;
-  job.localSaved=false; job.spaceVerified=['space_saved','diary_queued'].includes(job.phase);
-  job.publicationUncertain=job.phase==='publishing';
+// Runs the app's command line with a time limit and a cap on what it prints.
+function runBounded(executable, args, { cwd, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, { cwd, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    let printed = 0, stderr = '', failure;
+    const fail = message => { failure ??= new Error(message); child.kill(); };
+    const timer = setTimeout(() => fail('기록 실행 제한 시간을 초과했습니다.'), timeoutMs);
+    child.on('error', error => { clearTimeout(timer); reject(error); });
+    child.stdout.on('data', data => { printed += data.length; if (printed > 8 * 1024 * 1024) fail('기록 실행 출력 크기 제한을 초과했습니다.'); });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', data => { stderr += data; if (Buffer.byteLength(stderr) > 65536) fail('기록 실행 오류 출력 크기 제한을 초과했습니다.'); });
+    child.stdin.on('error', () => {}); child.stdin.end();
+    child.on('close', exitCode => {
+      clearTimeout(timer);
+      if (failure) reject(failure); else resolve({ exitCode, stderr });
+    });
+  });
 }
 // Takes every named lock or none. Each name is an OS-owned named pipe, which
 // disappears on process exit: no stale PID marker or check/unlink race. The
@@ -201,25 +248,29 @@ export async function prepare(input, { stateDir = DEFAULT_STATE, projectRoot = P
   attachTimeline(source, timeline, stateDir);
   return locked(stateDir, async () => {
     const file = path.join(stateDir, source.workId, 'state.json');
-    const previous = fs.existsSync(file) ? readJson(file) : null;
+    const earlier = loadJobs(stateDir, source.workId);
+    const previous = earlier.find(x => x.file === file)?.job ?? null;
     // Keep the repository spelling this work was first saved with: the document
     // vault groups a work's records by it, so a new spelling of the same folder
     // would look like a move and be refused.
     if (previous?.source?.repoPath && previous.source.repoPath !== source.repoPath && samePlace(previous.source.repoPath, source.repoPath)) source.repoPath = previous.source.repoPath;
-    const contentHash = sha(JSON.stringify(source));
+    const contentHash = contentHashOf(source);
     if (previous?.contentHash === contentHash && previous.phase !== 'excluded') return { workId: source.workId, revision: previous.revision, unchanged: true, phase: previous.phase };
-    if (previous && !finished(previous)) {
-      upgradeJob(previous);
-      atomicJson(path.join(stateDir, source.workId, `pending-${previous.revision}.json`), previous);
-    }
+    for (const { file: earlierFile, job } of earlier) keepNumber(earlierFile, job);
+    if (previous && !finished(previous)) atomicJson(path.join(stateDir, source.workId, `pending-${previous.revision}.json`), previous);
     const revision = (previous?.revision ?? 0) + 1;
-    const pageMarkdown = `**프로젝트:** ${source.projectTitle}\n\n**작업일:** ${source.date}\n\n**상태:** ${LABELS[source.status]}\n\n${source.detailedMarkdown}`;
-    const localRevision = (previous?.finalRevision ?? previous?.diaryReceipt?.revision ?? previous?.revision ?? 0)+1;
-    const job = { schemaVersion: 2, source, revision, contentHash, pageMarkdown, phase: 'prepared', space: previous?.space ?? null,
-      localRevision, finalRevision:localRevision+1, localSaved:false, spaceVerified:false,
-      publicationUncertain: !!uncertainPublication(previous),
-      attempts:0,nextAttemptAt:0,modelCalls: previous?.modelCalls ?? 0, lastError: null, createdAt:new Date().toISOString(), updatedAt: new Date().toISOString() };
-    atomicJson(path.join(stateDir, source.workId, `${revision}.json`), { source, revision, contentHash, pageMarkdown });
+    // Above every number a capture of this work used or reserved, whichever
+    // file it is in.
+    const localRevision = Math.max(0, ...earlier.map(x => usedRevision(x.job))) + 1;
+    const pageUrl = earlier.map(x => pageUrlOf(x.job)).findLast(Boolean);
+    // schemaVersion, finalRevision and diaryMode are for a checkout from before
+    // Space publishing was removed, which may run on this folder again: with
+    // them it sends this capture once under localRevision and numbers the next
+    // capture above it. This version reads finalRevision only as a used number.
+    const job = { schemaVersion: 2, source, revision, contentHash, phase: 'prepared',
+      localRevision, finalRevision: localRevision + 1, diaryMode: 'local', localSaved: false, ...(pageUrl ? { pageUrl } : {}),
+      attempts: 0, nextAttemptAt: 0, lastError: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    atomicJson(path.join(stateDir, source.workId, `${revision}.json`), { source, revision, contentHash });
     atomicJson(file, job);
     writeWake(stateDir);
     return { workId: source.workId, revision, unchanged: false, phase: job.phase };
@@ -228,16 +279,20 @@ export async function prepare(input, { stateDir = DEFAULT_STATE, projectRoot = P
 
 // Jobs prepared before times were recorded keep sending the v2 payload the app
 // already accepted for them; only a source with evidence sends v3.
-export function diaryPayload(job, linked) {
-  const { source, space } = job;
+// deliveryState and spaceUrl are fields of that payload format. A job prepared
+// while Space publishing existed may already have sent 'pending' under its
+// number, and the app refuses other content under a number it holds, so such a
+// job sends 'pending' again. Every job prepared since sends 'local'.
+export function diaryPayload(job) {
+  const { source } = job;
   const timeline = {
     ...(source.startedAt ? { startedAt: source.startedAt } : {}),
     ...(source.completedAt ? { completedAt: source.completedAt } : {}),
     ...(source.commits?.length ? { commits: source.commits } : {}),
   };
-  return { schemaVersion: Object.keys(timeline).length ? 3 : 2, workId: source.workId, revision:linked?job.finalRevision:job.localRevision, projectTitle: source.projectTitle, repoPath: source.repoPath, date: source.date,
+  return { schemaVersion: Object.keys(timeline).length ? 3 : 2, workId: source.workId, revision: deliveryRevision(job), projectTitle: source.projectTitle, repoPath: source.repoPath, date: source.date,
     kind: source.kind, title: source.title, summary: source.diarySummary, detail:source.detailedMarkdown,
-    deliveryState:linked?'synced':job.diaryMode==='local'?'local':'pending', spaceUrl:linked?space.pageUrl:'', status: source.status, ...timeline };
+    deliveryState: job.diaryMode === 'local' ? 'local' : 'pending', spaceUrl: '', status: source.status, ...timeline };
 }
 async function registerNative(options) {
   const resultFile=path.join(options.stateDir,`registration-${randomUUID()}.json`);
@@ -264,43 +319,12 @@ async function importNative(record, options) {
 export async function sync(options = {}) {
   const stateDir = path.resolve(options.stateDir ?? DEFAULT_STATE);
   return locked(stateDir, async () => {
-    const preferences = vaultPreferences(stateDir);
-    const vaultRoot = options.vaultRoot ?? preferences.root;
-    const spaceEnabled = options.spaceEnabled ?? preferences.spaceEnabled;
-    if (typeof spaceEnabled !== 'boolean') throw new Error('Space 설정을 확인해 주세요.');
+    const vaultRoot = options.vaultRoot ?? vaultPreferences(stateDir).root;
     const results = []; const jobs=loadJobs(stateDir); let processed=0;
     let registered = false;
     const now=Date.now();
-    // Reserve new delivery revisions across the entire work item, including
-    // queued/unsent newer captures. Per-job increments can reuse a revision
-    // already allocated to another body.
-    const nextDelivery = new Map();
-    for (const { job } of jobs) {
-      if (!finished(job)) upgradeJob(job);
-      const greatest = Math.max(nextDelivery.get(job.source.workId) ?? 0,
-        job.localRevision ?? 0, job.finalRevision ?? 0, job.diaryReceipt?.revision ?? 0, job.revision ?? 0);
-      nextDelivery.set(job.source.workId, greatest);
-    }
-    // A legacy pending receipt may already be in the app's inbox. A new
-    // revision avoids changing the meaning of that accepted payload.
-    const toLocal = job => {
-      job.localRevision = nextDelivery.get(job.source.workId) + 1;
-      job.finalRevision = job.localRevision + 1;
-      nextDelivery.set(job.source.workId, job.finalRevision);
-      job.localSaved = false;
-      job.diaryMode = 'local'; job.nextAttemptAt = 0;
-    };
+    // Jobs Git could not check in this run. They are not delivered.
     const unverified = new Set(), failedNow = new Set();
-    // An unverified job still reserves its delivery revision now, in capture
-    // order with the other revisions of its work. Reserved later, after a newer
-    // revision was delivered, it would outrank that one and overwrite the diary.
-    // Its retry time is kept. Returns whether the job changed.
-    const holdUnverified = job => {
-      unverified.add(job);
-      if (spaceEnabled || job.diaryMode === 'local') return false;
-      const next = job.nextAttemptAt; toLocal(job); job.nextAttemptAt = next;
-      return true;
-    };
     // Each check can wait up to Git's 10-second timeout. The app stops a run
     // after 240 seconds, so checking stops at a budget and wake.json is still
     // written. Unchecked jobs are left as they are and stay undelivered.
@@ -309,15 +333,13 @@ export async function sync(options = {}) {
     // Apply the policy before registration, backoff and per-run limits: old
     // research jobs must stop waking the app even if their retry is not due.
     for (const { file, job } of jobs) {
-      if (options.workId && job.source.workId !== options.workId) continue;
-      if (job.phase === 'local_complete' && spaceEnabled && options.workId === job.source.workId) { job.phase = 'waiting_space'; job.nextAttemptAt = 0; }
       if (finished(job) || (options.workId && job.source.workId !== options.workId)) continue;
-      upgradeJob(job);
+      keepNumber(file, job);
       const due = job.phase !== 'git_paused' && (options.retryNow || (job.nextAttemptAt ?? 0) <= now);
       // Once Git has failed in this run, jobs only waiting out a Git delay are
       // not checked again: a hanging Git must not spend the run on them.
       if (Date.now() >= checkDeadline || (gitFailing && !due && (job.gitFailures || job.phase === 'git_paused'))) {
-        if (holdUnverified(job)) atomicJson(file, job);
+        unverified.add(job);
         continue;
       }
       const evidence = developmentEvidence(job.source.repoPath, job.source.gitChanges, options.projectRoot ?? PROJECT_ROOT);
@@ -326,8 +348,8 @@ export async function sync(options = {}) {
         // even on --retry-now. Only a check that was due counts as a failed
         // attempt, so rechecking waiting jobs does not push their retry back.
         gitFailing = true;
-        const reserved = holdUnverified(job);
-        if (!due) { if (reserved) atomicJson(file, job); continue; }
+        unverified.add(job);
+        if (!due) continue;
         failedNow.add(job);
         job.gitFailures = (job.gitFailures ?? 0) + 1;
         job.lastError = `Git 확인 일시 실패 ${job.gitFailures}회 (${evidence.detail}).`;
@@ -350,9 +372,6 @@ export async function sync(options = {}) {
         job.phase = 'excluded'; job.exclusionReason = evidence.reason;
         job.nextAttemptAt = null; job.updatedAt = new Date().toISOString();
         atomicJson(file, job);
-      } else if (!spaceEnabled && job.diaryMode !== 'local') {
-        toLocal(job);
-        atomicJson(file, job);
       }
     }
     writeWake(stateDir);
@@ -366,66 +385,47 @@ export async function sync(options = {}) {
       if (finished(job) || (!options.retryNow && (job.nextAttemptAt ?? 0)>now) || processed >= Number(options.maxJobs ?? Infinity)) {
         results.push({ workId: job.source.workId,revision:job.revision, phase: job.phase, skipped: true }); continue;
       }
-      processed++; upgradeJob(job);
-      // A previously prepared revision may predate the policy migration. An
-      // excluded older attempt can still have created a page remotely.
-      const uncertainPrior = jobs.filter(({job: prior}) => prior.source.workId === job.source.workId
-        && prior.revision < job.revision && prior.phase === 'excluded' && uncertainPublication(prior)).at(-1)?.job;
-      if (uncertainPrior) {
-        job.publicationUncertain = true;
-        job.space ??= uncertainPrior.space;
-      }
-      const inheritedUncertainty=job.publicationUncertain;
+      processed++;
       const save = () => { job.updatedAt = new Date().toISOString(); atomicJson(file, job); };
-      const importRecord=async linked=>{
-        const record=diaryPayload(job,linked);
+      const later = jobs.filter(x => x.job.source.workId === job.source.workId && x.job.revision > job.revision).map(x => x.job);
+      // Whether the app confirmed this capture is in the diary, or holds a
+      // higher number for its work while a later capture exists.
+      const deliver = async () => {
+        const record=diaryPayload(job);
         const receipt=await (options.importer ?? importNative)(record,{...options,stateDir});
         if(receipt?.workId!==record.workId || receipt?.revision!==record.revision) throw new Error('다이어리 수신 결과의 작업 ID 또는 revision이 다릅니다.');
         job.diaryReceipt=receipt;
         if(receipt.outcome==='conflict') {job.phase='conflict';throw new Error(receipt.message ?? '사용자 편집 충돌');}
         if(receipt.outcome==='queued'){job.phase='diary_queued';job.nextAttemptAt=now+60000;save();return false;}
-        if(receipt.outcome==='stale' && receipt.entryId && jobs.some(x=>x.job.source.workId===job.source.workId && x.job.revision>job.revision && x.job.localSaved))return true;
+        if(receipt.outcome==='stale' && receipt.entryId && later.length)return true;
         if(!(['saved','unchanged'].includes(receipt.outcome)&&receipt.entryId)) throw new Error(`다이어리 저장을 확인하지 못했습니다: ${receipt.outcome}`);
         return true;
       };
       try {
-        // Preserve one source revision as an independent document before any
-        // native executable or optional external publisher is required.
+        // Preserve one source revision as an independent document before the
+        // native executable is required.
         const repoIdentity = process.platform === 'win32' ? job.source.repoPath.toLowerCase() : job.source.repoPath;
         const receipt = await saveDocument({ id: job.source.workId, collection: 'projects', group: `repo-${sha(repoIdentity).slice(0, 16)}`,
           title: job.source.title, date: job.source.date, markdown: job.source.detailedMarkdown,
           tags: [job.source.kind], source: { projectTitle: job.source.projectTitle, repoPath: job.source.repoPath, gitChanges: job.source.gitChanges, status: job.source.status, captureRevision: job.revision } }, { root: vaultRoot });
         job.vaultSaved = true; job.vaultReceipt = receipt; save();
         if (!options.importer && !registered) { await registerNative({...options,stateDir}); registered = true; }
-        if(!job.localSaved){if(!await importRecord(false))continue;job.localSaved=true;job.phase='waiting_space';save();}
-        if (!spaceEnabled) { job.phase='local_complete'; job.lastError=null; job.nextAttemptAt=null; save(); continue; }
-        // Keep revisions of one work item ordered, but let other work proceed.
-        const earlier=jobs.find(x=>x.job.source.workId===job.source.workId && x.job.revision<job.revision && !['complete', 'local_complete', 'excluded'].includes(x.job.phase));
-        if(earlier){job.phase=earlier.job.phase==='conflict'?'conflict':'waiting_prior';job.nextAttemptAt=Math.max(now+60000,earlier.job.nextAttemptAt??0);save();continue;}
-        const mappingFile=path.join(stateDir,job.source.workId,'space-state.json');
-        if(!job.spaceVerified && fs.existsSync(mappingFile)){
-          const mapping=readJson(mappingFile);if(mapping.revision<=job.revision)job.space=mapping.space;
-        }
-        if (!job.spaceVerified) {
-          const recoverOnly = job.publicationUncertain;
-          job.phase = 'publishing'; job.modelCalls++; save();
-          job.publicationUncertain=true; save();
-          const published = await (options.publisher ?? publishCodex)(job, { ...options, stateDir, recoverOnly, cwd: PROJECT_ROOT });
-          validatePublication(published, job);
-          job.space = published; job.spaceVerified=true;job.publicationUncertain=false;job.phase = 'space_saved'; job.lastError = null;
-          atomicJson(mappingFile,{revision:job.revision,space:published});save();
-        }
-        if(!await importRecord(true))continue;
-        job.phase='complete';job.lastError=null;job.nextAttemptAt=null;save();
+        // A job that was waiting for its Space page when Space publishing was
+        // removed is already in the diary (localSaved). It ends here and is
+        // not sent again. Nor is a capture sent once a later capture of its
+        // work is in the diary: a version before 0.32.0 could give an earlier
+        // capture the higher number, and the diary shows the highest.
+        if (!job.localSaved && !later.some(inDiary) && !await deliver()) continue;
+        job.localSaved = true;
+        job.phase='local_complete';job.lastError=null;job.nextAttemptAt=null;save();
       } catch (error) {
-        if (error.space) job.space = error.space;
+        // The document vault kept the user's edit of the saved document.
         if (error.conflict) job.phase = 'conflict';
-        if(error.publicationNotStarted && !error.conflict && !inheritedUncertainty){job.publicationUncertain=false;job.phase='waiting_space';}
         job.attempts=(job.attempts??0)+1;
         job.nextAttemptAt=now+retryDelay(job.attempts);
         job.lastError = String(error.message ?? error).slice(0, 2000); save();
       } finally {
-        results.push({ workId: job.source.workId, revision: job.revision, phase: job.phase, pageUrl: job.spaceVerified ? job.space?.pageUrl ?? null : null, error: job.lastError });
+        results.push({ workId: job.source.workId, revision: job.revision, phase: job.phase, error: job.lastError });
       }
     }
     writeWake(stateDir);
@@ -435,14 +435,14 @@ export async function sync(options = {}) {
 
 export function status({ stateDir = DEFAULT_STATE, workId } = {}) {
   return loadJobs(stateDir, workId).map(({ job }) => ({ workId: job.source.workId, title: job.source.title, revision: job.revision, phase: job.phase,
-    pageUrl: job.spaceVerified || job.phase==='complete' ? job.space?.pageUrl ?? null : null, modelCalls: job.modelCalls, localSaved:job.localSaved,
+    pageUrl: pageUrlOf(job), localSaved:job.localSaved,
     vaultSaved:job.vaultSaved ?? false, localFile:job.vaultReceipt?.file ?? null,
     nextAttemptAt:job.nextAttemptAt,lastError: job.lastError, exclusionReason: job.exclusionReason, updatedAt: job.updatedAt }));
 }
 
 async function main(args) {
   const command = args.shift(); const options = {};
-  const names = { '--state-dir': 'stateDir', '--work-id': 'workId', '--exe': 'exe', '--data-dir': 'dataDir', '--codex-exe': 'codexExe', '--input': 'input', '--max-jobs':'maxJobs' };
+  const names = { '--state-dir': 'stateDir', '--work-id': 'workId', '--exe': 'exe', '--data-dir': 'dataDir', '--input': 'input', '--max-jobs':'maxJobs' };
   while (args.length) {
     const key = args.shift(); if(key==='--retry-now'){options.retryNow=true;continue;} const value = args.shift();
     if (!names[key] || !value || value.startsWith('--') || Object.hasOwn(options, names[key])) throw new Error('명령 인자를 확인해 주세요.');

@@ -37,7 +37,7 @@ function setup(t) {
   const input = (head, fields = {}) => ({ workId, projectTitle: 'TimeSchedule', repoPath: f.repo, date: '2026-11-19',
     kind: 'development', title: '기록 시각', status: 'verification_pending',
     detailedMarkdown: '시각을 저장했다. 실제 화면은 미확인.', gitChanges: { base: f.head, head, paths: ['src/time.js'] }, ...fields });
-  const options = { stateDir, projectRoot: f.repo, vaultRoot: path.join(dir, 'vault'), spaceEnabled: false };
+  const options = { stateDir, projectRoot: f.repo, vaultRoot: path.join(dir, 'vault') };
   const state = () => JSON.parse(fs.readFileSync(path.join(stateDir, workId, 'state.json'), 'utf8'));
   return { ...f, workId, stateDir, commit, receipt, input, options, state };
 }
@@ -225,7 +225,7 @@ test('begin receipts and remote links are read conservatively', t => {
     assert.equal(webRemote(unsafe), '', unsafe);
   }
   const payload = diaryPayload({ source: { workId: id, projectTitle: 'T', repoPath: dir, date: '2026-11-19', kind: 'development', title: 't',
-    diarySummary: 's', detailedMarkdown: 's', status: 'verified', completedAt: '2026-11-19T10:00:00+09:00' }, localRevision: 1, diaryMode: 'local' }, false);
+    diarySummary: 's', detailedMarkdown: 's', status: 'verified', completedAt: '2026-11-19T10:00:00+09:00' }, localRevision: 1, diaryMode: 'local' });
   assert.equal(payload.schemaVersion, 3);
   assert.equal(payload.completedAt, '2026-11-19T10:00:00+09:00');
 });
