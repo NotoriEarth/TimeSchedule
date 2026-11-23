@@ -7,7 +7,7 @@ This directory is the maintained source for verifying the user-facing behavior o
 - Build with `cargo build -p timeschedule-native --release --locked` after `. .\scripts\toolchain.ps1`.
 - Start with `control launch`. The instance has an empty data folder at `<runDir>\data`, its own MCP port, and a hidden desktop widget.
 - `control doctor -RunDir <runDir>` reports `"ok": true`.
-- The diary window shows the month of today in the Midnight (dark) theme. It is 1160×820 pixels at 100% display scaling and larger in proportion at a higher scaling. `control screenshot` prints the real `width` and `height`.
+- The diary window shows the month of today in the Midnight (dark) theme. It is 1160×820 pixels at 100% display scaling and can be larger (see "Before you start" in `SKILL.md`). `control screenshot` prints the real `width` and `height`.
 - There is no seed data. A journey creates the events it needs and says so in its preconditions.
 - Never drive an instance that this run did not launch.
 

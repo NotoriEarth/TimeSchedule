@@ -18,7 +18,7 @@ Read [features/README.md](features/README.md) before driving. It lists the mappe
 
 ## Before you start
 
-This PC has one desktop and the user is working on it. The instance you launch opens a real window in the middle of their screen and adds a tray icon. The window is 1160×820 pixels at 100% display scaling and larger in proportion at a higher scaling (2320×1640 at 200%). Clicks and typing are real input: the pointer moves and the window takes the foreground. Tell the user before the first click, keep input bursts short, and do not drive while they are typing elsewhere.
+This PC has one desktop and the user is working on it. The instance you launch opens a real window in the middle of their screen and adds a tray icon. The window is 1160×820 pixels at 100% display scaling. The size is not fixed: it grows with the display scaling, and one run on a 100% display reported 2320×1640 while the screen was locked. Clicks and typing are real input: the pointer moves and the window takes the foreground. Tell the user before the first click, keep input bursts short, and do not drive while they are typing elsewhere.
 
 Never drive the user's own TimeSchedule. Their app uses `%LOCALAPPDATA%\com.timeschedule.personal.native-experiment` and MCP port `39281`. The helper refuses to act on any process it did not start.
 
