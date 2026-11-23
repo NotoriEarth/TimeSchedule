@@ -46,7 +46,7 @@ try {
 
 async function main() {
   const load = file => import(pathToFileURL(path.join(ROOT, file)).href);
-  const { prepare, sync, GIT_RETRY_LIMIT, PARENT_PAGE_ID } = await load('scripts/project-records.mjs');
+  const { prepare, sync, GIT_RETRY_LIMIT } = await load('scripts/project-records.mjs');
   const { gitFixture } = await load('tests/helpers/record-git-fixture.mjs');
   // Violations of the current code that were reported and not fixed. They do
   // not fail the run, so that a new violation is not lost among them.
@@ -77,11 +77,9 @@ async function main() {
       if (record.revision < diary.revision) return answer('stale');
       if (record.revision === diary.revision) return answer(payload === diary.payload ? 'unchanged' : 'conflict');
     }
-    diary.revision = record.revision; diary.payload = payload; diary.capture = captureOf(record); diary.state = record.deliveryState;
+    diary.revision = record.revision; diary.payload = payload; diary.capture = captureOf(record);
     return answer('saved');
   }
-  const published = job => ({ pageId: 'page_1234567890abcdef1234567890abcdef', pageUrl: 'https://chatgpt.com/space/page_1234567890abcdef1234567890abcdef',
-    parentPageId: PARENT_PAGE_ID, title: job.source.title, markdown: job.pageMarkdown, indexVerified: true });
 
   // ---- job files ------------------------------------------------------------
 
@@ -115,38 +113,44 @@ async function main() {
     const steps = world.captures < CAPTURES ? [PREPARE] : [];
     if (!world.captures) return steps;
     const gits = ['up', 'down', 'unchecked', ...(world.captures > 1 ? Array.from({ length: world.captures }, (_, i) => i + 1) : [])];
-    for (const space of [false, true]) for (const jobs of [1, Infinity]) for (const git of gits) {
-      steps.push({ name: `sync(space ${space ? 'on' : 'off'}, ${jobs === 1 ? 'one job, as the app runs it' : 'all jobs'}, ${gitWords(git)})`, space, jobs, git, repeat: 1 });
+    const jobsWords = jobs => jobs === 1 ? 'one job, as the app runs it' : 'all jobs';
+    for (const jobs of [1, Infinity]) for (const git of gits) {
+      steps.push({ name: `sync(${jobsWords(jobs)}, ${gitWords(git)})`, jobs, git, repeat: 1 });
     }
-    // Space cannot be reached: the diary gets its delivery and the page is not published.
-    for (const jobs of [1, Infinity]) {
-      steps.push({ name: `sync(space on, ${jobs === 1 ? 'one job, as the app runs it' : 'all jobs'}, Git answers, publishing to Space fails)`, space: true, jobs, git: 'up', publish: 'fails', repeat: 1 });
+    // The app takes each delivery of the run and the script never gets its
+    // answer: the command line ended after the record was saved.
+    for (const jobs of [1, Infinity]) for (const git of gits.filter(git => git === 'up' || typeof git === 'number')) {
+      steps.push({ name: `sync(${jobsWords(jobs)}, ${gitWords(git)}, the app saves each delivery and its answer is lost)`, jobs, git, answer: 'lost', repeat: 1 });
     }
     // A shortcut to the paused state, which otherwise needs twelve steps of the path.
     if (jobFiles().some(({ job }) => UNFINISHED(job) && job.phase !== 'git_paused')) {
-      for (const space of [false, true]) steps.push({ name: `long Git outage: ${GIT_RETRY_LIMIT} failing syncs (space ${space ? 'on' : 'off'})`, space, jobs: Infinity, git: 'down', repeat: GIT_RETRY_LIMIT });
+      steps.push({ name: `long Git outage: ${GIT_RETRY_LIMIT} failing syncs`, jobs: Infinity, git: 'down', repeat: GIT_RETRY_LIMIT });
     }
     return steps;
   }
   async function runSync(step, world, events) {
     const importer = async record => {
-      const before = world.diary.capture, stateBefore = world.diary.state;
-      // Every content ever sent under a revision, whatever the app answered.
+      const before = world.diary.capture;
+      // Every content ever sent under a revision, and what the app answered.
       const hash = sha(JSON.stringify(record)), sent = world.sent[record.revision];
-      const resent = sent !== undefined && sent !== hash;
-      if (sent === undefined) world.sent[record.revision] = hash;
+      const resent = sent !== undefined && sent.hash !== hash;
       // The app's inbox (record_inbox.rs `enqueue`) refuses other content under a
       // revision it has received, before the receiving rule is consulted.
       if (resent) {
-        events.push({ delivered: record.revision, capture: captureOf(record), state: record.deliveryState, outcome: 'error', shownBefore: before, stateBefore, resent });
+        events.push({ delivered: record.revision, capture: captureOf(record), outcome: 'error', shownBefore: before, resent });
         throw new Error('the inbox already holds other content under this revision');
       }
-      const receipt = receive(world.diary, record);
-      events.push({ delivered: record.revision, capture: captureOf(record), state: record.deliveryState, outcome: receipt.outcome, shownBefore: before, stateBefore, resent });
+      // The same content under a revision it has handled gets the receipt it
+      // stored then. The diary is not touched.
+      const again = sent !== undefined;
+      const receipt = again ? { outcome: sent.outcome, workId: record.workId, revision: record.revision, entryId: 'entry-1' } : receive(world.diary, record);
+      if (!again) world.sent[record.revision] = { hash, outcome: receipt.outcome };
+      events.push({ delivered: record.revision, capture: captureOf(record), outcome: receipt.outcome, shownBefore: before, resent, again });
+      if (step.answer === 'lost') throw new Error('the answer of the app did not arrive');
       return receipt;
     };
-    const options = { stateDir: live.state, vaultRoot: live.vault, projectRoot: fixture.repo, spaceEnabled: step.space, retryNow: true,
-      importer, publisher: async job => { if (step.publish === 'fails') throw new Error('Space cannot be reached'); return published(job); }, ...(step.jobs === 1 ? { maxJobs: 1 } : {}), ...(step.git === 'unchecked' ? { gitCheckBudgetMs: 0 } : {}) };
+    const options = { stateDir: live.state, vaultRoot: live.vault, projectRoot: fixture.repo, retryNow: true,
+      importer, ...(step.jobs === 1 ? { maxJobs: 1 } : {}), ...(step.git === 'unchecked' ? { gitCheckBudgetMs: 0 } : {}) };
     let spelling = null;
     if (step.git === 'down') fs.renameSync(dotGit, away);
     if (typeof step.git === 'number') spelling = setRepoOf(step.git, nowhere);
@@ -167,10 +171,10 @@ async function main() {
   function summary(world) {
     return { captures: world.captures, sent: world.sent,
       diary: { revision: world.diary.revision, capture: world.diary.capture, payload: world.diary.payload && sha(world.diary.payload) },
-      jobs: jobFiles().map(({ name, job: j }) => ({ file: name, capture: j.revision, phase: j.phase, local: j.localRevision, final: j.finalRevision,
-        localSaved: !!j.localSaved, vaultSaved: !!j.vaultSaved, spaceVerified: !!j.spaceVerified, uncertain: !!j.publicationUncertain,
+      jobs: jobFiles().map(({ name, job: j }) => ({ file: name, capture: j.revision, phase: j.phase, local: j.localRevision,
+        localSaved: !!j.localSaved, vaultSaved: !!j.vaultSaved,
         mode: j.diaryMode ?? null, gitFailures: j.gitFailures ?? 0, pausedFrom: j.pausedFromPhase ?? null, excludedFrom: j.excludedFromPhase ?? null,
-        reason: j.exclusionReason ?? null, hasSpace: !!j.space, receipt: j.diaryReceipt ? `${j.diaryReceipt.revision}:${j.diaryReceipt.outcome}` : null,
+        reason: j.exclusionReason ?? null, receipt: j.diaryReceipt ? `${j.diaryReceipt.revision}:${j.diaryReceipt.outcome}` : null,
         attempts: Math.min(j.attempts ?? 0, 1) })) };
   }
   const snapshots = path.join(scratch, 'snapshots');
@@ -191,15 +195,8 @@ async function main() {
   function stepViolations(before, after, events) {
     const found = [];
     for (const e of events) {
-      if (e.outcome === 'saved' && e.shownBefore !== null && e.capture < e.shownBefore) {
-        // What was on show had been delivered in Space mode ("pending" or
-        // "synced") and a delivery in local mode displaced it. Only a sync with
-        // Space off puts a capture in local mode. Reported under its own name,
-        // so that this recorded finding cannot hide a rollback of another kind.
-        const renumbered = e.state === 'local' && e.stateBefore !== 'local';
-        found.push({ property: renumbered ? 'no-rollback-after-space-turned-off' : 'no-rollback',
-          text: `the diary showed capture ${e.shownBefore} and delivery revision ${e.delivered} replaced it with the older capture ${e.capture}${
-            renumbered ? ' (the newer one was delivered while Space was on, the older one was renumbered by a sync with Space off)' : ''}` });
+      if (e.outcome === 'saved' && !e.again && e.shownBefore !== null && e.capture < e.shownBefore) {
+        found.push({ property: 'no-rollback', text: `the diary showed capture ${e.shownBefore} and delivery revision ${e.delivered} replaced it with the older capture ${e.capture}` });
       }
       if (e.resent || e.outcome === 'conflict') {
         found.push({ property: 'one-payload-per-revision', text: `delivery revision ${e.delivered} was sent with content different from what it carried before (capture ${e.capture}); the app answered "${e.outcome}"` });
@@ -217,14 +214,14 @@ async function main() {
   // Checked from every state: once Git answers and syncs that run every job
   // keep coming, the newest capture is what the diary shows and nothing waits.
   const settleRuns = jobs => jobs === 1 ? CAPTURES + 2 : SETTLE;
-  const settleWords = (space, jobs) => `${settleRuns(jobs)} syncs of ${jobs === 1 ? 'one job each, as the app runs them' : 'all jobs'}, with Git answering, space ${space ? 'on' : 'off'}`;
-  async function settleViolations(world, space, jobs) {
+  const settleWords = jobs => `${settleRuns(jobs)} syncs of ${jobs === 1 ? 'one job each, as the app runs them' : 'all jobs'}, with Git answering`;
+  async function settleViolations(world, jobs) {
     const events = [], before = summary(world);
-    await runSync({ space, jobs, git: 'up', repeat: settleRuns(jobs) }, world, events);
+    await runSync({ jobs, git: 'up', repeat: settleRuns(jobs) }, world, events);
     const end = summary(world), found = stepViolations(before, end, events);
     if (world.captures > 0) {
       const waiting = end.jobs.filter(j => !['complete', 'local_complete'].includes(j.phase));
-      const tail = `after ${settleWords(space, jobs)}`;
+      const tail = `after ${settleWords(jobs)}`;
       if (waiting.length) found.push({ property: 'delivered-in-the-end', text: `${tail}, ${waiting.map(j => `capture ${j.capture} is still "${j.phase}"`).join(', ')}` });
       if (end.diary.capture !== world.captures) found.push({ property: 'newest-shown-in-the-end', text: `${tail}, the diary shows ${end.diary.capture === null ? 'nothing' : `capture ${end.diary.capture}`} but the newest capture is ${world.captures}` });
     }
@@ -250,7 +247,7 @@ async function main() {
   const enough = () => UNTIL ? UNTIL.split(',').every(property => findings.has(property)) : STOP_AT_FIRST && fresh();
 
   let transitions = 0, complete = true;
-  const first = { captures: 0, sent: {}, diary: { revision: null, payload: null, capture: null, state: null } };
+  const first = { captures: 0, sent: {}, diary: { revision: null, payload: null, capture: null } };
   nodes.push({ world: first, depth: 0, parent: null, step: null });
   seen.set(JSON.stringify(summary(first)), 0); save('0');
   explore: for (let id = 0; id < nodes.length; id++) {
@@ -274,10 +271,10 @@ async function main() {
         if (enough()) { complete = false; break explore; }
       }
     }
-    // From this state, for both Space settings: does the backlog drain?
-    for (const space of [false, true]) for (const jobs of [Infinity, 1]) {
+    // From this state: does the backlog drain?
+    for (const jobs of [Infinity, 1]) {
       restore(String(id));
-      for (const violation of await settleViolations(cloneWorld(node.world), space, jobs)) report(violation, id, [`then ${settleWords(space, jobs)}`]);
+      for (const violation of await settleViolations(cloneWorld(node.world), jobs)) report(violation, id, [`then ${settleWords(jobs)}`]);
     }
     if (enough()) { complete = false; break; }
   }

@@ -1,5 +1,5 @@
-// Proves the checker can fail. Each case breaks one rule in a scratch copy of
-// scripts/project-records.mjs and expects check.mjs to report the properties
+// Proves the checker can fail. Each case breaks a rule in a scratch copy of
+// scripts/project-records.mjs and expects check.mjs to report the property
 // that rule protects. Between them the cases make every property fail once.
 // The real files are never changed.
 //
@@ -20,10 +20,17 @@ const REPO = path.resolve(HERE, '..', '..', '..');
 // scripts/project-records.mjs. When it does not, the code moved: update the
 // case to the new text of the same rule.
 const CASES = [
-  { name: 'unverified-capture-reserves-no-revision', expect: 'no-rollback', depth: 3,
-    why: 'a capture Git could not check keeps no delivery revision, so it is numbered and delivered after a newer capture',
-    find: `      const next = job.nextAttemptAt; toLocal(job); job.nextAttemptAt = next;\n      return true;`,
-    replace: `      return false;` },
+  // Two rules keep an earlier capture from replacing a later one: prepare
+  // numbers captures in order, and sync does not send a capture once a later
+  // one is in the diary. Either alone holds, so this case breaks both.
+  { name: 'late-capture-numbered-when-sent', expect: 'no-rollback', depth: 3,
+    why: 'a capture gets its delivery number when it is sent, and is sent although a later capture is already in the diary',
+    edits: [
+      [`        const record=diaryPayload(job);`,
+        `        job.localRevision = Math.max(...jobs.filter(x => x.job.source.workId === job.source.workId).map(x => x.job.localRevision)) + 1;\n        const record=diaryPayload(job);`],
+      [`        if (!job.localSaved && !later.some(inDiary) && !await deliver()) continue;`,
+        `        if (!job.localSaved && !await deliver()) continue;`],
+    ] },
   { name: 'git-failure-read-as-no-evidence', expect: 'no-false-exclusion', depth: 2,
     why: 'a Git check that failed is treated as a finding that the work has no development changes',
     find: `      if (evidence.transient) {\n        // Nothing is known about this work yet`,
@@ -32,21 +39,25 @@ const CASES = [
     why: 'a capture paused after a long Git outage keeps its paused phase when Git answers again',
     find: `      if (resumed) { job.phase = job.pausedFromPhase ?? 'prepared'; delete job.pausedFromPhase; job.nextAttemptAt = 0; }`,
     replace: `` },
-  { name: 'linked-delivery-reuses-local-revision', expect: 'one-payload-per-revision', depth: 2,
-    why: 'the delivery that carries the Space link uses the same revision as the earlier local delivery',
-    find: `revision:linked?job.finalRevision:job.localRevision`,
-    replace: `revision:job.localRevision` },
+  { name: 'earlier-capture-retries-on-stale', expect: 'delivered-in-the-end', depth: 3,
+    why: 'an earlier capture that the app answers as stale is retried for ever, although a later capture exists',
+    find: `receipt.entryId && later.length)return true;`,
+    replace: `receipt.entryId && false)return true;` },
+  { name: 'every-capture-gets-the-same-number', expect: 'one-payload-per-revision', depth: 2,
+    why: 'prepare gives every capture of a work the same delivery number',
+    find: `    const localRevision = Math.max(0, ...earlier.map(x => usedRevision(x.job))) + 1;`,
+    replace: `    const localRevision = 1;` },
   { name: 'any-error-recorded-as-a-conflict', expect: 'no-false-conflict', depth: 2,
     why: 'a delivery that failed for any reason is recorded as a conflict with the user',
     find: `        if (error.conflict) job.phase = 'conflict';`,
     replace: `        job.phase = 'conflict';` },
-  { name: 'space-off-skips-the-diary', expect: 'newest-shown-in-the-end', depth: 2,
-    why: 'with Space off a capture is marked complete without being delivered to the diary',
-    find: `        if(!job.localSaved){if(!await importRecord(false))continue;`,
-    replace: `        if(!job.localSaved && spaceEnabled){if(!await importRecord(false))continue;` },
+  { name: 'capture-ends-without-delivery', expect: 'newest-shown-in-the-end', depth: 2,
+    why: 'a capture is marked complete without being delivered to the diary',
+    find: `        if (!job.localSaved && !later.some(inDiary) && !await deliver()) continue;`,
+    replace: `` },
   { name: 'new-capture-drops-the-waiting-one', expect: 'no-capture-lost', depth: 2,
     why: 'preparing a new capture no longer keeps the job of the capture that was still waiting',
-    find: '      atomicJson(path.join(stateDir, source.workId, `pending-${previous.revision}.json`), previous);',
+    find: '    if (previous && !finished(previous)) atomicJson(path.join(stateDir, source.workId, `pending-${previous.revision}.json`), previous);',
     replace: `` },
 ];
 

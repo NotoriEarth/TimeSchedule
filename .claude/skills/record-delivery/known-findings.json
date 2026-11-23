@@ -1,7 +1,1 @@
-[
-  {
-    "property": "no-rollback-after-space-turned-off",
-    "foundAt": "f826227",
-    "summary": "After Space is turned off, an older capture that Git could not check earlier is delivered with a higher revision than a newer capture already in the diary. The diary shows the older text until the newer capture is delivered again."
-  }
-]
+[]
