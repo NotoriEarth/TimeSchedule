@@ -30,7 +30,6 @@ test('vault CLI rejects misplaced options before reading settings or opening the
   const cases = [
     ['status', '--id', 'abc'],
     ['init', '--root', root, '--id', 'abc'],
-    ['config', '--space', 'off', '--id', 'abc'],
     ['import', '--input', 'missing.json', '--id', 'abc'],
     ['adopt', '--id', randomUUID(), '--root', root],
     ['status', '--unknown', 'abc'],
@@ -53,7 +52,6 @@ test('vault CLI accepts each command with its own options and a shared state dir
     return JSON.parse(result.stdout);
   };
   assert.equal(run('init', '--root', root).root, fs.realpathSync(root));
-  assert.equal(run('config', '--space', 'on').spaceEnabled, true);
   const document = source();
   const input = path.join(stateDir, 'input.json');
   fs.writeFileSync(input, JSON.stringify(document));
@@ -114,16 +112,21 @@ test('vault rejects linked managed directories', async t => {
   assert.deepEqual(fs.readdirSync(outside), []);
 });
 
-test('selected path persists, Space defaults off and enabling is explicit for this capture state', async t => {
+test('selected path persists, and a settings file from before Space was removed is read', async t => {
   const f = fixture(t);
-  assert.equal(vaultPreferences(f.stateDir).spaceEnabled, false);
   await configureVault(f.stateDir, { root: f.root });
-  assert.equal(vaultPreferences(f.stateDir).root, f.root);
-  assert.equal(vaultPreferences(f.stateDir).spaceEnabled, false);
-  await configureVault(f.stateDir, { spaceEnabled: true });
-  assert.equal(vaultPreferences(f.stateDir).spaceEnabled, true);
-  await configureVault(f.stateDir, { spaceEnabled: false });
-  assert.equal(vaultPreferences(f.stateDir).root, f.root);
+  const file = path.join(f.stateDir, 'vault-settings.json');
+  const root = vaultPreferences(f.stateDir).root;
+  assert.deepEqual(vaultPreferences(f.stateDir), { schemaVersion: 1, root });
+  // A checkout from before the removal refuses a file without spaceEnabled.
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).spaceEnabled, false);
+  fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, root, spaceEnabled: true }));
+  assert.deepEqual(vaultPreferences(f.stateDir), { schemaVersion: 1, root });
+  fs.writeFileSync(file, JSON.stringify({ schemaVersion: 1, root }));
+  assert.deepEqual(vaultPreferences(f.stateDir), { schemaVersion: 1, root });
+  // The command that turned Space on is gone.
+  assert.equal(runCli(f.stateDir, 'config', '--space', 'on').status, 1);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), { schemaVersion: 1, root });
 });
 
 test('an interrupted save recovers its committed revision without losing the previous body', async t => {
