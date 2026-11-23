@@ -7,7 +7,7 @@ This directory is the maintained source for verifying the user-facing behavior o
 - Build with `cargo build -p timeschedule-native --release --locked` after `. .\scripts\toolchain.ps1`.
 - Start with `control launch`. The instance has an empty data folder at `<runDir>\data`, its own MCP port, and a hidden desktop widget.
 - `control doctor -RunDir <runDir>` reports `"ok": true`.
-- The diary window is 1160×820 and shows the month of today in the Midnight (dark) theme.
+- The diary window shows the month of today in the Midnight (dark) theme. It is 1160×820 pixels at 100% display scaling and larger in proportion at a higher scaling. `control screenshot` prints the real `width` and `height`.
 - There is no seed data. A journey creates the events it needs and says so in its preconditions.
 - Never drive an instance that this run did not launch.
 
@@ -15,7 +15,8 @@ This directory is the maintained source for verifying the user-facing behavior o
 
 - Start every recipe from the baseline state unless its preconditions say otherwise.
 - The handle for a control is its Korean label, exactly as written in the recipe. Find the label in a fresh screenshot and click its pixel position.
-- Coordinates in the recipes are reference positions for the baseline window in version 0.31.1. Confirm each one in a screenshot taken immediately before the click. A resized window, a scrolled page or a changed layout moves them.
+- The recipes give no click coordinates. `-X <x> -Y <y>` stands for the pixel position of the named label in the screenshot taken immediately before the click.
+- Where a recipe says where to look, it gives a share of the window: `79% across, 28% down` is 79% of the screenshot's width from the left and 28% of its height from the top. That is a place to look, not a position to click. A resized window, a scrolled page or a changed layout moves the label.
 - Take a screenshot after every action. It is both the proof and the source of the next coordinates.
 - Clicks and typing are real input on the user's desktop. Tell the user before the first one.
 - Treat every command as literal. Keep quoted names and JSON unchanged apart from dates and IDs.

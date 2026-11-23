@@ -18,7 +18,7 @@ Read [features/README.md](features/README.md) before driving. It lists the mappe
 
 ## Before you start
 
-This PC has one desktop and the user is working on it. The instance you launch opens a real 1160×820 window in the middle of their screen and adds a tray icon. Clicks and typing are real input: the pointer moves and the window takes the foreground. Tell the user before the first click, keep input bursts short, and do not drive while they are typing elsewhere.
+This PC has one desktop and the user is working on it. The instance you launch opens a real window in the middle of their screen and adds a tray icon. The window is 1160×820 pixels at 100% display scaling and larger in proportion at a higher scaling (2320×1640 at 200%). Clicks and typing are real input: the pointer moves and the window takes the foreground. Tell the user before the first click, keep input bursts short, and do not drive while they are typing elsewhere.
 
 Never drive the user's own TimeSchedule. Their app uses `%LOCALAPPDATA%\com.timeschedule.personal.native-experiment` and MCP port `39281`. The helper refuses to act on any process it did not start.
 
@@ -83,7 +83,9 @@ The app draws its own pixels and exposes no accessibility tree. The handles are 
 .\.claude\skills\verify\control-timeschedule.ps1 screenshot -RunDir <runDir> -Name 01-month
 ```
 
-Read the PNG, find the label, and use its pixel position. Screenshot pixels and click coordinates are the same client-area pixels.
+Read the PNG, find the label, and use its pixel position. Screenshot pixels and click coordinates are the same client-area pixels, whatever the display scaling. The `width` and `height` in the screenshot command's output are the size of that area.
+
+The numbers below are examples from one screenshot. They are not positions to reuse: the same label is somewhere else at another display scaling, window size or scroll position.
 
 ```powershell
 .\.claude\skills\verify\control-timeschedule.ps1 click -RunDir <runDir> -X 917 -Y 232
@@ -93,6 +95,7 @@ Read the PNG, find the label, and use its pixel position. Screenshot pixels and 
 ```
 
 - `click` brings the window to the foreground, then moves the pointer and clicks in one burst. It refuses when Windows does not give the window the foreground or another window covers the point. Nothing is sent in either case.
+- While the screen is locked no window has the foreground. `click`, `type` and `key` are then refused with `Windows did not give the window the foreground` and nothing is sent. `launch`, `doctor` and `screenshot` still work. Input needs the user at an unlocked desktop.
 - `type` sends Unicode text to the focused field. It works for Korean whatever the IME state. Use `-TextFile <utf8 file>` for long text. It stops as soon as the window loses the foreground.
 - `key` accepts `Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `Left`, `Right`, `Up`, `Down`, `Home`, `End`.
 - `-Window quick` targets the quick schedule window (`… · 빠른 일정`) and `-Window jump` the year and month picker (`TimeSchedule · 연·월 이동`). The default is `diary`.
