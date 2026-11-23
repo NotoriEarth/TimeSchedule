@@ -1,0 +1,121 @@
+{
+  "files": {
+    "1.json": {
+      "source": {
+        "workId": "11111111-1111-4111-8111-111111111111",
+        "projectTitle": "TimeSchedule",
+        "repoPath": "<REPO>",
+        "date": "2026-11-20",
+        "kind": "development",
+        "title": "Space 시절 기록",
+        "status": "verification_pending",
+        "detailedMarkdown": "원인을 확인했다. 실제 입력은 확인하지 않았다.",
+        "diarySummary": "원인을 확인했다. 실제 입력은 확인하지 않았다.",
+        "parentPageId": "page_6ae1b18a44f08191ad2a86276972476c",
+        "gitChanges": {
+          "base": "<BASE>",
+          "head": "<HEAD>",
+          "paths": [
+            "src/example.js"
+          ]
+        }
+      },
+      "revision": 1,
+      "contentHash": "c3aa30d2472a8877897f7b82eeaf44dadcd54b3af3d87b397dd71e40851cff84",
+      "pageMarkdown": "**프로젝트:** TimeSchedule\n\n**작업일:** 2026-11-20\n\n**상태:** 검증 대기\n\n원인을 확인했다. 실제 입력은 확인하지 않았다."
+    },
+    "space-state.json": {
+      "revision": 1,
+      "space": {
+        "pageId": "page_1234567890abcdef1234567890abcdef",
+        "pageUrl": "https://chatgpt.com/space/page_1234567890abcdef1234567890abcdef",
+        "parentPageId": "page_6ae1b18a44f08191ad2a86276972476c",
+        "title": "Space 시절 기록",
+        "markdown": "**프로젝트:** TimeSchedule\n\n**작업일:** 2026-11-20\n\n**상태:** 검증 대기\n\n원인을 확인했다. 실제 입력은 확인하지 않았다.",
+        "indexVerified": true
+      }
+    },
+    "state.json": {
+      "schemaVersion": 2,
+      "source": {
+        "workId": "11111111-1111-4111-8111-111111111111",
+        "projectTitle": "TimeSchedule",
+        "repoPath": "<REPO>",
+        "date": "2026-11-20",
+        "kind": "development",
+        "title": "Space 시절 기록",
+        "status": "verification_pending",
+        "detailedMarkdown": "원인을 확인했다. 실제 입력은 확인하지 않았다.",
+        "diarySummary": "원인을 확인했다. 실제 입력은 확인하지 않았다.",
+        "parentPageId": "page_6ae1b18a44f08191ad2a86276972476c",
+        "gitChanges": {
+          "base": "<BASE>",
+          "head": "<HEAD>",
+          "paths": [
+            "src/example.js"
+          ]
+        }
+      },
+      "revision": 1,
+      "contentHash": "c3aa30d2472a8877897f7b82eeaf44dadcd54b3af3d87b397dd71e40851cff84",
+      "pageMarkdown": "**프로젝트:** TimeSchedule\n\n**작업일:** 2026-11-20\n\n**상태:** 검증 대기\n\n원인을 확인했다. 실제 입력은 확인하지 않았다.",
+      "phase": "space_saved",
+      "space": {
+        "pageId": "page_1234567890abcdef1234567890abcdef",
+        "pageUrl": "https://chatgpt.com/space/page_1234567890abcdef1234567890abcdef",
+        "parentPageId": "page_6ae1b18a44f08191ad2a86276972476c",
+        "title": "Space 시절 기록",
+        "markdown": "**프로젝트:** TimeSchedule\n\n**작업일:** 2026-11-20\n\n**상태:** 검증 대기\n\n원인을 확인했다. 실제 입력은 확인하지 않았다.",
+        "indexVerified": true
+      },
+      "localRevision": 1,
+      "finalRevision": 2,
+      "localSaved": true,
+      "spaceVerified": true,
+      "publicationUncertain": false,
+      "attempts": 1,
+      "nextAttemptAt": 1795413264571,
+      "modelCalls": 1,
+      "lastError": "EXE를 실행하지 못했습니다.",
+      "createdAt": "2026-11-23T05:53:24.564Z",
+      "updatedAt": "2026-11-23T05:53:24.972Z",
+      "vaultSaved": true,
+      "vaultReceipt": {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "root": "<DIR>\\vault",
+        "file": "<DIR>\\vault\\projects\\repo-c5bd2ccc0a0d1d8b\\11111111-1111-4111-8111-111111111111\\record.md",
+        "revision": 1,
+        "unchanged": false
+      },
+      "diaryReceipt": {
+        "outcome": "saved",
+        "workId": "11111111-1111-4111-8111-111111111111",
+        "revision": 1,
+        "entryId": "entry-1"
+      }
+    }
+  },
+  "app": {
+    "received": {
+      "1": {
+        "schemaVersion": 2,
+        "workId": "11111111-1111-4111-8111-111111111111",
+        "revision": 1,
+        "projectTitle": "TimeSchedule",
+        "repoPath": "<REPO>",
+        "date": "2026-11-20",
+        "kind": "development",
+        "title": "Space 시절 기록",
+        "summary": "원인을 확인했다. 실제 입력은 확인하지 않았다.",
+        "detail": "원인을 확인했다. 실제 입력은 확인하지 않았다.",
+        "deliveryState": "pending",
+        "spaceUrl": "",
+        "status": "verification_pending"
+      }
+    },
+    "inbox": {},
+    "revision": 1,
+    "detail": "원인을 확인했다. 실제 입력은 확인하지 않았다.",
+    "spaceUrl": ""
+  }
+}

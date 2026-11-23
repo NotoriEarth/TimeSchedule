@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { prepare, sync, status, PARENT_PAGE_ID } from '../scripts/project-records.mjs';
+import { prepare, sync, status } from '../scripts/project-records.mjs';
 import { developmentEvidence } from '../scripts/project-records-git.mjs';
 import { gitFixture, git } from './helpers/record-git-fixture.mjs';
 
@@ -19,7 +19,7 @@ function setup(t) {
   const fixture = gitFixture(dir);
   const dotGit = path.join(fixture.repo, '.git');
   const away = path.join(fixture.repo, '.git-away');
-  return { ...fixture, dir, stateDir: path.join(dir, 'state'), projectRoot: fixture.repo, vaultRoot: path.join(dir, 'vault'), spaceEnabled: false,
+  return { ...fixture, dir, stateDir: path.join(dir, 'state'), projectRoot: fixture.repo, vaultRoot: path.join(dir, 'vault'),
     breakRepo: () => fs.renameSync(dotGit, away), fixRepo: () => fs.renameSync(away, dotGit) };
 }
 function input(f, gitChanges = f.gitChanges) {
@@ -28,8 +28,6 @@ function input(f, gitChanges = f.gitChanges) {
     detailedMarkdown: '코드를 수정하고 테스트했다. 실제 UI 동작은 미확인.', gitChanges };
 }
 const saved = r => ({ outcome: 'saved', workId: r.workId, revision: r.revision, entryId: 'entry-1' });
-const published = j => ({ pageId: 'page_1234567890abcdef1234567890abcdef', pageUrl: 'https://chatgpt.com/space/page_1234567890abcdef1234567890abcdef',
-  parentPageId: PARENT_PAGE_ID, title: j.source.title, markdown: j.pageMarkdown, indexVerified: true });
 const refuse = () => { throw new Error('must not deliver unverified work'); };
 const readState = (f, workId) => JSON.parse(fs.readFileSync(path.join(f.stateDir, workId, 'state.json'), 'utf8'));
 const wake = f => JSON.parse(fs.readFileSync(path.join(f.stateDir, 'wake.json'), 'utf8'));
@@ -151,27 +149,25 @@ test('a paused record whose commits turn out to be gone is excluded for that rea
   await prepare(candidate, f);
   const file = path.join(f.stateDir, candidate.workId, 'state.json');
   const state = readState(f, candidate.workId);
-  Object.assign(state, { phase: 'git_paused', pausedFromPhase: 'publishing', gitFailures: 12, nextAttemptAt: null });
+  Object.assign(state, { phase: 'git_paused', pausedFromPhase: 'diary_queued', gitFailures: 12, nextAttemptAt: null });
   state.source.gitChanges.head = 'f'.repeat(40);
   fs.writeFileSync(file, JSON.stringify(state));
   await sync({ ...f, importer: refuse });
   const excluded = readState(f, candidate.workId);
   assert.equal(excluded.phase, 'excluded');
   assert.equal(excluded.exclusionReason, 'commit_not_found');
-  assert.equal(excluded.excludedFromPhase, 'publishing');
+  assert.equal(excluded.excludedFromPhase, 'diary_queued');
 });
 
 test('once Git answers again, a record held back only by Git is delivered without waiting out the delay', async t => {
   const f = setup(t), candidate = input(f);
   await prepare(candidate, f);
-  // With Space on, nothing else in sync moves the retry time forward.
-  const space = { ...f, spaceEnabled: true, publisher: async j => published(j) };
   f.breakRepo();
-  await sync({ ...space, importer: refuse });
+  await sync({ ...f, importer: refuse });
   assert.ok(readState(f, candidate.workId).nextAttemptAt > Date.now());
   f.fixRepo();
-  await sync({ ...space, importer: async r => saved(r) });
-  assert.equal(readState(f, candidate.workId).phase, 'complete');
+  await sync({ ...f, importer: async r => saved(r) });
+  assert.equal(readState(f, candidate.workId).phase, 'local_complete');
 });
 
 test('an earlier revision that resumes after Git recovers cannot overwrite a newer diary revision', async t => {
@@ -196,9 +192,13 @@ test('an earlier revision that resumes after Git recovers cannot overwrite a new
   const resumed = JSON.parse(fs.readFileSync(earlierFile, 'utf8'));
   resumed.source.repoPath = realRepo;
   fs.writeFileSync(earlierFile, JSON.stringify(resumed));
+  const numbers = () => ['pending-1.json', 'state.json'].map(name => JSON.parse(fs.readFileSync(path.join(f.stateDir, candidate.workId, name), 'utf8')).localRevision);
+  const before = numbers();
   await sync({ ...f, retryNow: true, importer: app });
   assert.match(diary.detail, /후속 수정/);
+  assert.deepEqual(numbers(), before, 'a delivery number changed');
   assert.deepEqual(status(f).map(s => s.phase), ['local_complete', 'local_complete']);
+  assert.equal(wake(f).pending, 0);
 });
 
 test('Git checks stop at the run budget, leaving unchecked records undelivered and unpenalised with the wake file current', async t => {

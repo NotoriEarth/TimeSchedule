@@ -7,18 +7,15 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { prepare as prepareRecord, sync as syncRecords, status } from '../scripts/project-records.mjs';
-import { verifyPageEvents, createdPageObservation } from '../scripts/project-records-codex.mjs';
 import { gitFixture } from './helpers/record-git-fixture.mjs';
+import { appHolding } from './helpers/space-era.mjs';
 
 const fixtureDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'timeschedule-record-git-'));
 const fixture = gitFixture(fixtureDirectory);
 after(() => fs.rmSync(fixtureDirectory, { recursive: true, force: true }));
 const prepare = (input, options) => prepareRecord(input, { ...options, projectRoot: fixture.repo });
-const sync = options => syncRecords({ spaceEnabled: true, vaultRoot: path.join(options.stateDir, 'vault'), ...options, projectRoot: fixture.repo });
+const sync = options => syncRecords({ vaultRoot: path.join(options.stateDir, 'vault'), ...options, projectRoot: fixture.repo });
 
-const parentPageId = 'page_6ae1b18a44f08191ad2a86276972476c';
-const pageId = 'page_1234567890abcdef1234567890abcdef';
-const pageUrl = `https://chatgpt.com/space/${pageId}`;
 function source() {
   return {
     workId: randomUUID(), projectTitle: 'TimeSchedule', repoPath: fixture.repo, gitChanges: fixture.gitChanges, date: '2026-10-31',
@@ -35,54 +32,115 @@ function stateDir(t) {
   });
   return dir;
 }
-function publisherReceipt(job) {
-  return { pageId, pageUrl, parentPageId, title: job.source.title, markdown: job.pageMarkdown, indexVerified: true };
-}
 
 const saved = r => ({ outcome: 'saved', workId: r.workId, revision: r.revision, entryId: 'entry-1' });
-test('no-PR record saves full diary text before Space and later links the same record', async t => {
+test('a no-PR record sends its full text to the diary once and an unchanged prepare sends nothing more', async t => {
   const dir = stateDir(t); const input = source();
   const a = await prepare(input, { stateDir: dir });
   assert.equal(a.revision, 1);
-  const order = [];
-  const options = { stateDir: dir,
-    publisher: async job => { order.push('space'); return publisherReceipt(job); },
-    importer: async record => { order.push(record.deliveryState); assert.equal(record.spaceUrl, record.deliveryState === 'pending' ? '' : pageUrl); assert.equal(record.detail, input.detailedMarkdown); return saved(record); },
-  };
+  const sent = [];
+  const options = { stateDir: dir, importer: async record => { sent.push(record); return saved(record); } };
   await sync(options);
-  assert.deepEqual(order, ['pending', 'space', 'synced']);
-  assert.equal(status({ stateDir: dir })[0].phase, 'complete');
+  assert.deepEqual(sent.map(r => [r.deliveryState, r.spaceUrl, r.detail]), [['local', '', input.detailedMarkdown]]);
+  assert.equal(status({ stateDir: dir })[0].phase, 'local_complete');
   assert.equal((await prepare(input, { stateDir: dir })).revision, 1);
   await sync(options);
-  assert.deepEqual(order, ['pending', 'space', 'synced']);
-});
-
-test('Space success survives diary failure without republishing', async t => {
-  const dir = stateDir(t); await prepare(source(), { stateDir: dir });
-  let publications = 0;
-  const publisher = async job => { publications++; return publisherReceipt(job); };
-  await sync({ stateDir: dir, publisher, importer: async r => { if(r.deliveryState === 'pending') return saved(r); throw new Error('EXE unavailable'); } });
-  assert.equal(status({ stateDir: dir })[0].phase, 'space_saved');
-  await sync({ stateDir: dir, retryNow: true, publisher, importer: async r => saved(r) });
-  assert.equal(publications, 1);
-  assert.equal(status({ stateDir: dir })[0].phase, 'complete');
+  assert.equal(sent.length, 1);
 });
 
 test('queued is not complete and user-edit conflict is retained', async t => {
   const dir = stateDir(t); await prepare(source(), { stateDir: dir });
-  const publisher = async job => publisherReceipt(job);
-  await sync({ stateDir: dir, publisher, importer: async r => ({ outcome: 'queued', workId: r.workId, revision: r.revision, entryId: null }) });
+  await sync({ stateDir: dir, importer: async r => ({ outcome: 'queued', workId: r.workId, revision: r.revision, entryId: null }) });
   assert.equal(status({ stateDir: dir })[0].phase, 'diary_queued');
-  await sync({ stateDir: dir, retryNow: true, publisher: async () => { throw new Error('must not republish'); }, importer: async r => ({ outcome: 'conflict', workId: r.workId, revision: r.revision, message: 'user edited' }) });
+  await sync({ stateDir: dir, retryNow: true, importer: async r => ({ outcome: 'conflict', workId: r.workId, revision: r.revision, message: 'user edited' }) });
   assert.equal(status({ stateDir: dir })[0].phase, 'conflict');
 });
 
-test('uncertain publication is reconciled without permission to create again', async t => {
-  const dir = stateDir(t); const input = source(); await prepare(input, { stateDir: dir });
-  await sync({ stateDir: dir, publisher: async () => { throw new Error('connection lost after create'); }, importer: async r => saved(r) });
-  assert.equal(status({ stateDir: dir })[0].phase, 'publishing');
-  await sync({ stateDir: dir, retryNow: true, publisher: async (job, { recoverOnly }) => { assert.equal(recoverOnly, true); return publisherReceipt(job); }, importer: async r => saved(r) });
-  assert.equal(status({ stateDir: dir })[0].phase, 'complete');
+test('a queued record is sent again with the same content until the app confirms it', async t => {
+  const dir = stateDir(t); await prepare(source(), { stateDir: dir });
+  const sent = [];
+  await sync({ stateDir: dir, importer: async r => { sent.push(r); return { outcome: 'queued', workId: r.workId, revision: r.revision, entryId: null }; } });
+  await sync({ stateDir: dir, retryNow: true, importer: async r => { sent.push(r); return saved(r); } });
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[1], sent[0]);
+  assert.equal(status({ stateDir: dir })[0].phase, 'local_complete');
+});
+
+test('each capture of a work gets a higher delivery number, and delivery never changes it', async t => {
+  const dir = stateDir(t); const input = source();
+  const numbers = () => status({ stateDir: dir }).map(s => JSON.parse(fs.readFileSync(path.join(dir, input.workId, s.revision === 3 ? 'state.json' : `pending-${s.revision}.json`), 'utf8')).localRevision);
+  await prepare(input, { stateDir: dir });
+  await prepare({ ...input, detailedMarkdown: input.detailedMarkdown + '\n\n둘째 수정본.' }, { stateDir: dir });
+  await prepare({ ...input, detailedMarkdown: input.detailedMarkdown + '\n\n셋째 수정본.' }, { stateDir: dir });
+  const prepared = numbers();
+  assert.ok(prepared[0] < prepared[1] && prepared[1] < prepared[2], String(prepared));
+  const sent = [];
+  await sync({ stateDir: dir, importer: async r => { sent.push(r.revision); return saved(r); } });
+  assert.deepEqual(sent, prepared);
+  assert.deepEqual(numbers(), prepared);
+});
+
+test('a work item whose delivery fails does not block a different work item', async t => {
+  const dir = stateDir(t), a = source(), b = source();
+  await prepare(a, { stateDir: dir }); await prepare(b, { stateDir: dir });
+  await sync({ stateDir: dir, importer: async r => { if (r.workId === a.workId) throw new Error('EXE unavailable'); return saved(r); } });
+  assert.equal(status({ stateDir: dir, workId: a.workId })[0].phase, 'prepared');
+  assert.match(status({ stateDir: dir, workId: a.workId })[0].lastError, /EXE unavailable/);
+  assert.equal(status({ stateDir: dir, workId: b.workId })[0].phase, 'local_complete');
+});
+
+test('a new capture is numbered above every earlier capture of its work, also one kept in a pending file', async t => {
+  const dir = stateDir(t); const input = source();
+  await prepare(input, { stateDir: dir });
+  await prepare({ ...input, detailedMarkdown: input.detailedMarkdown + '\n\n둘째 수정본.' }, { stateDir: dir });
+  // As a version before 0.32.0 leaves it after renumbering the first capture.
+  const file = path.join(dir, input.workId, 'pending-1.json');
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), localRevision: 9, finalRevision: 10 }));
+  await prepare({ ...input, detailedMarkdown: input.detailedMarkdown + '\n\n셋째 수정본.' }, { stateDir: dir });
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, input.workId, 'state.json'), 'utf8')).localRevision, 11);
+});
+
+test('an earlier capture ends when the app answers stale and a later capture exists, even if that one\'s answer was lost', async t => {
+  const dir = stateDir(t); const input = source(), app = appHolding();
+  const second = { ...input, detailedMarkdown: input.detailedMarkdown + '\n\n둘째 수정본.' };
+  await prepare(input, { stateDir: dir });
+  await sync({ stateDir: dir, importer: async () => { throw new Error('EXE unavailable'); } });
+  await prepare(second, { stateDir: dir });
+  // The app saves the second capture; its answer does not reach the script.
+  await sync({ stateDir: dir, importer: async r => { await app.importer(r); throw new Error('answer lost'); } });
+  assert.equal(app.detail, second.detailedMarkdown);
+  assert.deepEqual(status({ stateDir: dir }).map(s => s.phase), ['prepared', 'prepared']);
+  // As the app runs it: one job per run. The earlier capture is tried first.
+  for (let run = 0; run < 2; run++) await sync({ stateDir: dir, retryNow: true, maxJobs: 1, importer: app.importer });
+  assert.deepEqual(status({ stateDir: dir }).map(s => [s.phase, s.lastError]), [['local_complete', null], ['local_complete', null]]);
+  assert.equal(app.detail, second.detailedMarkdown);
+  assert.deepEqual(app.rollbacks, []);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'wake.json'), 'utf8')).pending, 0);
+});
+
+test('the newest capture does not end on a stale answer', async t => {
+  const dir = stateDir(t); const input = source();
+  await prepare(input, { stateDir: dir });
+  await sync({ stateDir: dir, importer: async r => ({ outcome: 'stale', workId: r.workId, revision: r.revision, entryId: 'entry-1' }) });
+  const [record] = status({ stateDir: dir });
+  assert.equal(record.phase, 'prepared');
+  assert.match(record.lastError, /stale/);
+});
+
+test('a document the user edited in the vault ends the next capture as a conflict, not as an endless retry', async t => {
+  const dir = stateDir(t); const input = source(), app = appHolding();
+  await prepare(input, { stateDir: dir });
+  await sync({ stateDir: dir, importer: app.importer });
+  const document = status({ stateDir: dir })[0].localFile;
+  fs.writeFileSync(document, '사용자가 직접 고친 문서');
+  await prepare({ ...input, detailedMarkdown: input.detailedMarkdown + '\n\n둘째 수정본.' }, { stateDir: dir });
+  await sync({ stateDir: dir, importer: app.importer });
+  assert.equal(status({ stateDir: dir })[0].phase, 'conflict');
+  assert.equal(fs.readFileSync(document, 'utf8'), '사용자가 직접 고친 문서');
+  assert.equal(app.detail, input.detailedMarkdown);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'wake.json'), 'utf8')).pending, 0);
+  await sync({ stateDir: dir, retryNow: true, importer: () => { throw new Error('must not retry a conflict'); } });
+  assert.equal(status({ stateDir: dir })[0].phase, 'conflict');
 });
 
 test('summary must retain a whole source paragraph including limitations', async t => {
@@ -90,84 +148,9 @@ test('summary must retain a whole source paragraph including limitations', async
   await assert.rejects(prepare({ ...input, diarySummary: 'RAM은 감소했다. 모든 성능이 향상되었다.' }, { stateDir: dir }), /원문|문단/);
   const { diarySummary, ...withoutSummary } = input;
   await prepare(withoutSummary, { stateDir: dir });
-  await sync({ stateDir: dir, publisher: async job => { assert.equal(job.source.diarySummary, diarySummary); return publisherReceipt(job); }, importer: async r => ({ outcome: 'saved', workId: r.workId, revision: r.revision, entryId: 'entry-1' }) });
-});
-
-test('wrong publication body or URL never reaches the diary', async t => {
-  for (const change of [{ pageUrl: 'https://evil.test/page' }, { markdown: '모든 성능이 향상되었다.' }]) {
-    const dir = stateDir(t); await prepare(source(), { stateDir: dir }); let imports = 0;
-    await sync({ stateDir: dir, publisher: async job => ({ ...publisherReceipt(job), ...change }), importer: async r => { if(r.spaceUrl) imports++; return saved(r); } });
-    assert.equal(imports, 0);
-    assert.notEqual(status({ stateDir: dir })[0].phase, 'complete');
-  }
-});
-
-function readEvent(id, title, markdown, parent = parentPageId) {
-  return { type: 'item.completed', item: { type: 'mcp_tool_call', server: 'codex_apps', tool: 'chatgpt_space.read_page', arguments: { page_id: id }, status: 'completed', error: null,
-    result: { content: [], structured_content: { metadata: { page_id: id, title, url: `https://chatgpt.com/space/${id}`, parent: { page_id: parent }, access: { can_read: true, can_write: true }, deleted_at: null }, content: { page_id: id, blocks: markdown.split('\n\n').map((text, i) => ({ id: `b${i}`, kind: 'markdown', markdown: text, hash: `hash${i}`, metadata: {} })) } } },
-  } };
-}
-
-test('publication requires actual read_page tool receipts, not model self-report', () => {
-  const job = { source: { ...source(), parentPageId }, pageMarkdown: '정확한 원문\n\n검증 범위는 제한적이다.', space: null };
-  assert.throws(() => verifyPageEvents([{ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify({ pageId, pageUrl, markdown: job.pageMarkdown }) } }], job), /읽기|read|검증/);
-  const events = [readEvent(pageId, job.source.title, job.pageMarkdown), readEvent(parentPageId, '포트폴리오', `[검증 결과와 한계](${pageUrl})`, 'page_abcdefabcdefabcdefabcdefabcdefab')];
-  assert.equal(verifyPageEvents(events, job).pageUrl, pageUrl);
-  assert.throws(() => verifyPageEvents([...events, readEvent(pageId, job.source.title, '나중에 사용자가 편집함')], job), /읽기|read|검증/);
-  const selected = structuredClone(events);
-  selected[0].item.result.structured_content.selection = { whole_page_complete: false };
-  assert.throws(() => verifyPageEvents(selected, job), /읽기|read|검증/);
-  assert.throws(() => verifyPageEvents([readEvent(pageId, job.source.title, '다른 내용')], job), /읽기|read|검증/);
-});
-
-test('a changed word is rejected but actual create receipts retain the page for repair', () => {
-  const job = { source: { ...source(), parentPageId }, pageMarkdown: '확인했다. 미검증 사항은 남아 있다.', space: null };
-  const changed = readEvent(pageId, job.source.title, '확인함. 미검증 사항은 남아 있다.');
-  const created = structuredClone(changed); created.item.tool = 'chatgpt_space.create_page';
-  const events = [created, changed];
-  assert.throws(() => verifyPageEvents(events, job), /검증/);
-  assert.equal(createdPageObservation(events, job).pageId, pageId);
-  assert.equal(createdPageObservation(events, job).markdown, '확인함. 미검증 사항은 남아 있다.');
-  assert.equal(createdPageObservation([changed], job), null);
-});
-
-test('Space list-item blocks verify against the original compact list without rewriting it', () => {
-  for (const list of ['- 검증 136개 통과\n- [PR #8](https://github.com/NotoriEarth/TimeSchedule/pull/8)', '1. 원문 저장\n2. 링크 연결']) {
-    const job = { source: { ...source(), parentPageId }, pageMarkdown: `실제 입력은 미확인.\n\n## 관련 자료\n\n${list}`, space: null };
-    const child = readEvent(pageId, job.source.title, job.pageMarkdown);
-    const blocks = child.item.result.structured_content.content.blocks;
-    const listBlock = blocks.pop();
-    blocks.push(...listBlock.markdown.split('\n').map((markdown, i) => ({ ...listBlock, id: `list${i}`, markdown })));
-    // Real Pages readbacks return each list item as a separate markdown block.
-    const events = [child, readEvent(parentPageId, '포트폴리오', `[기록](${pageUrl})`)];
-    const verified = verifyPageEvents(events, job);
-    assert.equal(verified.markdown, job.pageMarkdown);
-    job.space = { ...verified, markdown: blocks.map(b => b.markdown).join('\n\n') };
-    assert.equal(verifyPageEvents(events, job).pageId, pageId);
-    // A subsequent revision must recognize the previously verified snapshot
-    // even before the page receives the new text, without accepting it as new.
-    const next = { ...job, space: verified, pageMarkdown: `${job.pageMarkdown}\n\n후속 검증: 완료.` };
-    const created = structuredClone(child); created.item.tool = 'chatgpt_space.create_page';
-    assert.equal(createdPageObservation([created, child], next).markdown, verified.markdown);
-    assert.throws(() => verifyPageEvents(events, next), /검증/);
-  }
-});
-
-test('Space block reconciliation rejects changed facts, links, order and code whitespace', () => {
-  const original = '- 검증 136개 통과\n- 실제 입력은 미확인.\n- [PR #8](https://github.com/NotoriEarth/TimeSchedule/pull/8)';
-  const job = { source: { ...source(), parentPageId }, pageMarkdown: original, space: null };
-  const parent = readEvent(parentPageId, '포트폴리오', `[기록](${pageUrl})`);
-  for (const changed of [original.replace('136', '137'), original.replace('미확인', '확인'), original.replace('/pull/8', '/pull/7'), original.split('\n').reverse().join('\n')]) {
-    const child = readEvent(pageId, job.source.title, changed.replaceAll('\n', '\n\n'));
-    assert.throws(() => verifyPageEvents([child, parent], job), /검증/);
-  }
-  for (const [expected, actual] of [
-    ['첫 줄\n둘째 줄', '첫 줄\n\n둘째 줄'],
-    ['```text\n- 원문\n- 공백 보존\n```', '```text\n- 원문\n\n- 공백 보존\n```'],
-    ['- 첫 항목\n  내부 줄\n- 다음 항목', '- 첫 항목\n\n  내부 줄\n\n- 다음 항목'],
-  ]) {
-    assert.throws(() => verifyPageEvents([readEvent(pageId, job.source.title, actual), parent], { ...job, pageMarkdown: expected }), /검증/);
-  }
+  let summary;
+  await sync({ stateDir: dir, importer: async r => { summary = r.summary; return saved(r); } });
+  assert.equal(summary, diarySummary);
 });
 
 test('a stale lock observer cannot enter while another process owns delivery', async t => {
@@ -175,7 +158,7 @@ test('a stale lock observer cannot enter while another process owns delivery', a
   const moduleUrl = pathToFileURL(path.resolve('scripts/project-records.mjs')).href;
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import {sync} from ${JSON.stringify(moduleUrl)};
-    try { await sync({stateDir:process.argv[1],vaultRoot:process.argv[1]+'/vault',spaceEnabled:true,projectRoot:process.argv[2],importer:async r=>({outcome:'saved',workId:r.workId,revision:r.revision,entryId:'entry-1'}),publisher:async()=>{
+    try { await sync({stateDir:process.argv[1],vaultRoot:process.argv[1]+'/vault',projectRoot:process.argv[2],importer:async()=>{
       process.send('entered'); await new Promise(r=>process.once('message',r)); throw Error('test finished');
     }}); } catch {} finally { process.disconnect(); }
   `, dir, fixture.repo], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
@@ -189,7 +172,7 @@ test('a stale lock observer cannot enter while another process owns delivery', a
     return originalRead.call(this, file, ...args);
   };
   try {
-    await assert.rejects(sync({stateDir:dir, publisher:async job=>publisherReceipt(job), importer:async r=>({outcome:'saved',workId:r.workId,revision:r.revision,entryId:'unexpected'})}), /다른 기록 작업/);
+    await assert.rejects(sync({stateDir:dir, importer:async r=>({outcome:'saved',workId:r.workId,revision:r.revision,entryId:'unexpected'})}), /다른 기록 작업/);
   } finally { fs.readFileSync = originalRead; child.send('finish'); }
   await new Promise(resolve => child.once('exit', resolve));
 });
