@@ -72,8 +72,8 @@ pub fn register(dir: &Path, node: &Path, script: &Path, state_dir: &Path) -> Res
     result
 }
 
-// The job owns only this retry process tree, including its Codex child. Closing
-// the app or hitting the deadline cannot leave another publisher running.
+// The job owns only this retry process tree. Closing the app or hitting the
+// deadline cannot leave a retry running.
 #[cfg(windows)]
 struct Job(isize);
 #[cfg(windows)]
@@ -216,9 +216,7 @@ impl Runner {
             Ok(true)
         })();
         match start {
-            Ok(true) => {
-                Some("대기 기록의 로컬 저장을 재시도합니다. Space는 선택 설정을 따릅니다.".into())
-            }
+            Ok(true) => Some("대기 기록의 로컬 저장을 재시도합니다.".into()),
             Ok(false) => None,
             Err(e) => Some(format!("대기 기록 재시도 실패: {e}")),
         }
