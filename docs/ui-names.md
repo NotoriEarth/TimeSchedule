@@ -16,7 +16,7 @@
 | 상단 검색창 / 검색 결과 | ‘일정, 프로젝트, 기록 검색’에 입력하면 현재 본문 자리에 ‘검색 결과’가 표시됨 | `app.search`, `app.search_results`, `views::search_results` |
 | 월간 다이어리 | ‘월간’. 연·월 제목 아래 달력과 선택한 날짜의 일정·기록을 표시 | `Page::Month`, `app.month`, `shell::month` |
 | 주간 다이어리 | ‘주간’. 주간 개요와 7개의 날짜 칸, ‘주간 근거 요약’ 버튼 | `Page::Week`, `app.week`, `views::week`, `views::day` |
-| 프로젝트 화면 | ‘프로젝트’. ‘모든 프로젝트’ 또는 프로젝트 이름을 골라 기록을 조회. 개별 프로젝트의 기본 버튼은 ‘Git 커밋 수집’, ‘근거 요약’, ‘자료 발췌 초안’ | `Page::Projects`, `app.project`, `views::projects` |
+| 프로젝트 화면 | ‘프로젝트’. ‘모든 프로젝트’ 또는 프로젝트 이름을 골라 기록을 조회. 개별 프로젝트의 기본 버튼은 ‘근거 요약’, ‘자료 발췌 초안’ | `Page::Projects`, `app.project`, `views::projects` |
 | 기록 보관함 (현행 화면 식별용) | 왼쪽 메뉴 ‘개발 기록’ → 제목 ‘기록 보관함’. 여러 날짜와 여러 종류의 기록을 조회하는 기존 화면 | `Page::Records`, `views::records`, `app.snapshot.entries` |
 | 날짜 미정 화면 | ‘날짜 미정’. 날짜가 비어 있는 일정을 모아 표시. 여기서 ‘+ 일정’을 누르면 날짜를 비워 둘 수 있음 | `Page::Tasks`, `views::tasks`, `Kind::Task` |
 | 노트 화면 | 왼쪽 메뉴 ‘노트’ → 제목 ‘메모’. ‘+ 메모’로 추가하고 제목을 눌러 편집 | `Page::Notes`, `views::notes`, `app.snapshot.notes` |

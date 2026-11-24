@@ -528,16 +528,12 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
         } else {
             panel = panel.push(
                 row![
-                    control("Git 커밋 수집", Message::Import),
                     control("근거 요약", Message::Draft(false)),
                     control("자료 발췌 초안", Message::Draft(true))
                 ]
                 .spacing(6),
             );
         }
-        panel = panel.push(quiet(
-            "최근 500개 커밋을 수집하며 중복과 사용자 수정을 보존합니다.",
-        ));
         let watching = app.snapshot.chat_capture_project.as_ref() == Some(&p.id);
         if watching || !p.repo_path.is_empty() {
             panel = panel.push(control(
