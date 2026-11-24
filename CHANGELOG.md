@@ -1,6 +1,6 @@
 # TimeSchedule 버전 이력
 
-현재 대표 앱은 **Rust/Iced 네이티브 0.32.0**이며 실행 파일은 `artifacts/TimeSchedule.exe`이다.
+현재 대표 앱은 **Rust/Iced 네이티브 0.33.0**이며 실행 파일은 `artifacts/TimeSchedule.exe`이다.
 
 ## 버전 규칙
 
@@ -11,6 +11,15 @@
 - **수정 버전**: 기존 기능의 버그·작은 동작·배포 문제를 고칠 때 올린다.
 - 커밋·문서 정리만으로 매번 올리지 않는다. 같은 미출시 작업에 대한 후속 수정은 그 버전에 포함한다.
 - 버전 변경 시 `apps/timeschedule-native/Cargo.toml`, `Cargo.lock`, 이 이력과 README를 함께 갱신한다. 앱 표시·Windows 속성·빌드 출력 정보는 Cargo 버전을 사용한다.
+
+## 0.33.0 · 채팅 원문 보관
+
+- 채팅 수집을 켠 프로젝트의 Codex·Claude Code 세션 파일을 문서 저장소의 `originals/<프로젝트>/`에 zstd 압축본으로 보관한다. 도구가 세션 파일을 지워도 보관본은 남는다. CLI와 데스크톱 앱 세션, 하위 에이전트 기록, 작업 폴더(worktree)에서 연 세션, Codex가 압축해 둔 `.jsonl.zst`를 모두 포함한다. 규칙과 폴더 구조는 [채팅 원문 보관](docs/chat-originals.md)에 있다.
+- 프로젝트마다 `index.jsonl`에 보관한 파일의 세션 ID, 작업 폴더, 연 프로그램, 시작 시각, 원본 경로를 적는다. 바뀐 파일만 다시 보관한다. 이전 보관본의 내용이 새 내용의 앞부분과 같을 때만 보관본을 바꾸고, 그렇지 않으면 이전 보관본을 `.prev-…`로 남긴다. 보관본은 지우지 않는다.
+- 채팅 수집 시점을 60초마다에서 앱을 켤 때, 프로젝트 화면을 열 때, 한 시간마다로 바꿨다. 다이어리의 채팅 발췌도 같은 시점에 갱신된다. 기록 수신함 확인은 그대로 1분마다 한다.
+- `record scan-local-chats`의 결과에 `originals`(`archived`, `unchanged`, `failed`)가 추가됐다. 보관에 실패한 파일이 있으면 `outcome`이 `attention`이다.
+- 다이어리 발췌가 읽는 세션 범위는 바꾸지 않았다. Claude Code 데스크톱 앱 세션은 보관되지만 발췌에는 아직 들어가지 않는다.
+- zstd 압축에 `zstd` 크레이트를 추가했다.
 
 ## 0.32.0 · Space 게시 제거
 

@@ -88,6 +88,10 @@ node scripts/document-vault.mjs adopt --id f16531cf-6c03-4b61-8f87-63b534b36085
 
 `vault-settings.json`의 `spaceEnabled`는 읽지 않는다. 0.32.0 이전 코드를 체크아웃해 실행하면 그 코드는 이 값이 없는 설정 파일을 거절하고 `true`이면 게시한다. 그래서 `init`은 설정 파일을 쓸 때 `spaceEnabled: false`를 함께 쓴다. 자세한 내용은 [자동 개발 기록](project-records.md)의 "Space 게시 제거"에 있다.
 
+## 채팅 원문 (0.33.0)
+
+앱은 채팅 수집을 켠 프로젝트의 Codex·Claude Code 세션 파일을 이 저장소의 `originals/` 아래에 압축해 보관한다. `document-vault.mjs`의 명령은 이 폴더를 읽거나 쓰지 않는다. 보관본에는 채팅에 붙여 넣은 내용과 명령 출력이 그대로 들어 있다. 구조와 규칙은 [채팅 원문 보관](chat-originals.md)에 있다.
+
 ## 백업과 향후 서버
 
 전체 `TimeScheduleData` 폴더를 백업하면 원문·메타데이터·수정 이력·첨부 자료를 함께 보존할 수 있다. 동기화는 삭제도 전파할 수 있으므로 과거 버전을 보존하는 백업과 구분한다. `.cache/project-records`에는 다이어리 전달 상태와 저장 경로 설정이 있으므로 대기 작업이 있다면 함께 보존한다. 기록 작성 중인 파일의 단순 복사 대신 명령이 끝난 시점에 백업한다.

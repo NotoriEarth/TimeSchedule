@@ -18,7 +18,7 @@ pub(super) struct Transcript {
 // Skip large protocol blobs without allocating their full line. Only completed,
 // user-visible chat events enter a diary record.
 const LINE_LIMIT: u64 = 8 * 1024 * 1024;
-pub(super) fn line(input: &mut impl BufRead, buf: &mut Vec<u8>) -> Result<bool, String> {
+pub(crate) fn line(input: &mut impl BufRead, buf: &mut Vec<u8>) -> Result<bool, String> {
     buf.clear();
     input
         .take(LINE_LIMIT + 1)

@@ -10,6 +10,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["clock"] }
 url = "2"
+zstd = "0.13"
 
 [dev-dependencies]
 # Tests count SQLite VM steps (progress handler) to check work does not grow with data size.

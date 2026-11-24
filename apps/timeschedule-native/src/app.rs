@@ -135,6 +135,11 @@ pub struct NativeReport {
     pub position: Option<(i32, i32)>,
     pub size: Option<(u32, u32)>,
 }
+/// One tick is 500 ms. The record inbox is polled every minute.
+const RECORDS_POLL_TICKS: u32 = 120;
+/// Chat files are read and kept every hour, and when the projects screen opens.
+const CHAT_SCAN_TICKS: u32 = 7200;
+
 #[derive(Clone, Debug)]
 pub enum Message {
     Calendar(crate::calendar_ui::Action),
@@ -154,7 +159,7 @@ pub enum Message {
     RecordsDue,
     SetChatCapture(String, bool),
     ScanChats,
-    ChatsScanned(Result<timeschedule_core::chat_history::ScanReport, String>),
+    ChatsScanned(Result<worker::ChatScan, String>),
     RecordsDrained(Result<crate::record_inbox::DrainReport, String>),
     Navigate(Page),
     Month(i32),
@@ -304,6 +309,8 @@ pub struct App {
     ticks: u32,
     records_due: bool,
     chat_scanning: bool,
+    /// The hourly chat scan is owed. It stays owed until a scan can start.
+    chat_scan_due: bool,
     records_processing: bool,
     pub manager_visible: bool,
     prefs_saving: bool,
@@ -448,6 +455,7 @@ impl App {
             ticks: 0,
             records_due: false,
             chat_scanning: false,
+            chat_scan_due: false,
             records_processing: false,
             manager_visible: true,
             prefs_saving: false,
@@ -636,6 +644,30 @@ impl App {
             },
         }
     }
+    /// Reads the AI apps' chat files for the projects that capture chats, unless a scan runs.
+    fn scan_chats(&mut self) -> Task<Message> {
+        if self.chat_scanning {
+            // The running scan may have listed its projects and files already.
+            self.chat_scan_due = true;
+            return Task::none();
+        }
+        let Some(store) = self
+            .store
+            .clone()
+            .filter(|_| self._instance.is_some() && !self.quit_when_idle)
+        else {
+            return Task::none();
+        };
+        self.chat_scan_due = false;
+        self.chat_scanning = true;
+        let data_dir = self.data_dir.clone();
+        worker::job(
+            store,
+            move |s| worker::scan_chats(s, &data_dir, false),
+            Message::ChatsScanned,
+        )
+    }
+
     pub fn refresh(&mut self) -> Task<Message> {
         self.calendar.generation += 1;
         self.view_generation += 1;
@@ -1072,27 +1104,29 @@ impl App {
                     }
                 }
             }
-            Message::ScanChats => {
-                if let Some(store) = self.store.clone().filter(|_| {
-                    self._instance.is_some() && !self.chat_scanning && !self.quit_when_idle
-                }) {
-                    self.chat_scanning = true;
-                    return worker::job(
-                        store,
-                        |s| worker::scan_chats(s, false),
-                        Message::ChatsScanned,
-                    );
-                }
-            }
+            Message::ScanChats => return self.scan_chats(),
             Message::ChatsScanned(result) => {
                 self.chat_scanning = false;
                 match result {
-                    Ok(r) => {
+                    Ok(scan) => {
+                        let mut problems = Vec::new();
+                        match &scan.originals {
+                            Ok(o) if o.failed > 0 => problems.push(format!(
+                                "채팅 원문 {}개를 보관하지 못했습니다. 다음 확인 때 재시도합니다.",
+                                o.failed
+                            )),
+                            Err(e) => problems.push(e.clone()),
+                            Ok(_) => {}
+                        }
+                        let r = scan.excerpts;
                         if r.failed > 0 {
-                            self.error = format!(
+                            problems.push(format!(
                                 "로컬 채팅 파일 {}개를 읽지 못했습니다. 다음 확인 때 재시도합니다.",
                                 r.failed
-                            );
+                            ));
+                        }
+                        if !problems.is_empty() {
+                            self.error = problems.join(" ");
                         }
                         if r.saved > 0 {
                             self.notice =
@@ -1248,6 +1282,13 @@ impl App {
                     return self.request_close(CloseIntent::Application);
                 }
                 self.ticks += 1;
+                // Set before a tray command can end this tick early.
+                if self.ticks % RECORDS_POLL_TICKS == 0 {
+                    self.records_due = true;
+                }
+                if self.ticks % CHAT_SCAN_TICKS == 0 {
+                    self.chat_scan_due = true;
+                }
                 if let Some(message) = self.record_sync.poll(&self.data_dir) {
                     self.log(&message);
                 }
@@ -1282,9 +1323,8 @@ impl App {
                     self.notice =
                         "외부 도구의 일정 변경을 반영했습니다. 작성 중인 초안은 유지됩니다.".into();
                 }
-                if self.ticks % 120 == 0 {
-                    self.records_due = true;
-                    tasks.push(Task::done(Message::ScanChats));
+                if self.chat_scan_due {
+                    tasks.push(self.scan_chats());
                 }
                 if self.records_due {
                     tasks.push(self.poll_record_inbox());
@@ -1312,6 +1352,9 @@ impl App {
                         endpoint,
                     );
                     return Task::batch([self.refresh(), board]);
+                }
+                if page == Page::Projects {
+                    return Task::batch([self.refresh(), self.scan_chats()]);
                 }
                 return self.refresh();
             }
@@ -1385,7 +1428,7 @@ impl App {
                 self.page = Page::Projects;
                 self.search.clear();
                 self.search_generation += 1;
-                return self.refresh();
+                return Task::batch([self.refresh(), self.scan_chats()]);
             }
             Message::New(kind, date) if self.editor.is_none() => {
                 let date = date.unwrap_or_else(|| self.selected.to_string());
@@ -2077,6 +2120,7 @@ mod tests {
             ticks: 0,
             records_due: false,
             chat_scanning: false,
+            chat_scan_due: false,
             records_processing: false,
             manager_visible: true,
             prefs_saving: false,
@@ -2948,6 +2992,82 @@ mod tests {
                 }
             }
         }
+    }
+    fn scanning_app() -> (crate::record_inbox::tests::TestDir, App) {
+        let dir = crate::record_inbox::tests::TestDir::new();
+        let mut app = fixture();
+        app._instance = Some(InstanceLock::acquire(&dir.0).unwrap());
+        app.data_dir = dir.0.clone();
+        (dir, app)
+    }
+    #[test]
+    fn chat_files_are_read_hourly_while_the_record_inbox_is_polled_every_minute() {
+        let (_dir, mut app) = scanning_app();
+        app.ticks = RECORDS_POLL_TICKS - 1;
+        let _ = app.update(Message::Tick);
+        // The fixture's fixed date makes this first tick reload, which holds the poll.
+        assert!(app.records_due);
+        assert!(!app.chat_scanning, "tick 120 must not read chat files");
+        app.loading = false;
+        let _ = app.update(Message::Tick);
+        assert!(
+            app.records_processing,
+            "the poll runs on the next free tick"
+        );
+        assert!(!app.records_due);
+        let _ = app.update(Message::RecordsDrained(Ok(Default::default())));
+        app.loading = false;
+        app.ticks = RECORDS_POLL_TICKS * 2 - 1;
+        let _ = app.update(Message::Tick);
+        assert!(app.records_processing, "and again a minute later");
+        assert!(!app.chat_scanning);
+        app.ticks = CHAT_SCAN_TICKS - 1;
+        let _ = app.update(Message::Tick);
+        assert!(app.chat_scanning, "tick 7200 must read chat files");
+        assert!(!app.chat_scan_due);
+    }
+    #[test]
+    fn an_hourly_chat_scan_that_cannot_start_stays_owed() {
+        let (dir, mut app) = scanning_app();
+        let instance = app._instance.take();
+        app.ticks = CHAT_SCAN_TICKS - 1;
+        let _ = app.update(Message::Tick);
+        assert!(!app.chat_scanning);
+        assert!(app.chat_scan_due);
+        app._instance = instance;
+        let _ = app.update(Message::Tick);
+        assert!(app.chat_scanning, "it starts on the next tick that can");
+        assert!(!app.chat_scan_due);
+        // The hour comes round while that scan still runs: it has already listed the
+        // files, so the hourly scan is still owed.
+        app.ticks = CHAT_SCAN_TICKS * 2 - 1;
+        let _ = app.update(Message::Tick);
+        assert!(app.chat_scan_due);
+        let _ = app.update(Message::ChatsScanned(Err("끝".into())));
+        let _ = app.update(Message::Tick);
+        assert!(app.chat_scanning && !app.chat_scan_due);
+        drop(dir);
+    }
+    #[test]
+    fn opening_the_projects_screen_reads_chat_files() {
+        for message in [
+            Message::Navigate(Page::Projects),
+            Message::Project(Some("p1".into())),
+        ] {
+            let (_dir, mut app) = scanning_app();
+            let _ = app.update(message);
+            assert_eq!(app.page, Page::Projects);
+            assert!(app.chat_scanning);
+        }
+        let (_dir, mut app) = scanning_app();
+        let _ = app.update(Message::Navigate(Page::Records));
+        assert!(!app.chat_scanning, "other screens do not read chat files");
+        // Asked for while a scan runs: one more scan follows it.
+        let (_dir, mut app) = scanning_app();
+        let _ = app.update(Message::ScanChats);
+        assert!(app.chat_scanning && !app.chat_scan_due);
+        let _ = app.update(Message::Navigate(Page::Projects));
+        assert!(app.chat_scan_due);
     }
     #[test]
     fn theme_toggle_keeps_editor_and_queues_latest_preference() {
