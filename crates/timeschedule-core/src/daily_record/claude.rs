@@ -122,9 +122,10 @@ fn result_text(block: &Value) -> String {
     }
 }
 
-/// The answers a person picked in a question dialog, each under its question, in the
-/// order asked. `None` when the row holds no picked answer.
-fn picked(result: &Value) -> Option<String> {
+/// The answers a person picked in a question dialog: the text that shows each under its
+/// question, in the order asked, and the answers alone. `None` when the row holds no
+/// picked answer.
+fn picked(result: &Value) -> Option<(String, Vec<String>)> {
     let answers = result["answers"].as_object()?;
     let asked = result["questions"]
         .as_array()
@@ -138,16 +139,18 @@ fn picked(result: &Value) -> Option<String> {
             order.push(question);
         }
     }
-    let pairs: Vec<String> = order
+    let (pairs, picked): (Vec<String>, Vec<String>) = order
         .into_iter()
         .filter_map(|question| {
             let answer = plain_lines(answers[question].as_str()?);
             let answer = without_blank_edges(&answer);
-            (!answer.is_empty())
-                .then(|| format!("질문: {}\n고른 답: {answer}", one_line(question).trim()))
+            (!answer.is_empty()).then(|| {
+                let pair = format!("질문: {}\n고른 답: {answer}", one_line(question).trim());
+                (pair, answer.to_owned())
+            })
         })
-        .collect();
-    (!pairs.is_empty()).then(|| pairs.join("\n\n"))
+        .unzip();
+    (!pairs.is_empty()).then(|| (pairs.join("\n\n"), picked))
 }
 
 struct Reader<'a> {
@@ -236,6 +239,7 @@ impl Reader<'_> {
             at: row.at,
             group,
             text,
+            answers: Vec::new(),
         };
         if kind == Some("assistant") {
             for block in blocks().filter(|b| b["type"] == "tool_use") {
@@ -273,7 +277,7 @@ impl Reader<'_> {
                 // cancelled has no answer, whatever the row holds.
                 Some(QUESTION) => picked(&v["toolUseResult"])
                     .filter(|_| !self.subagent && !failed && questions == 1 && no_other_sender)
-                    .map(|answers| (Role::Picked, answers)),
+                    .map(|(text, answers)| (Role::Picked, text, answers)),
                 Some(name) if SHELLS.contains(&name) => {
                     let text = result_text(block);
                     // Here too `toolUseResult` is this result's only when the row has
@@ -289,13 +293,16 @@ impl Reader<'_> {
                     (failed || code.is_some_and(|c| c != 0))
                         .then(|| command::diagnostics(&text, code, failed))
                         .flatten()
-                        .map(|evidence| (Role::Check, evidence))
+                        .map(|evidence| (Role::Check, evidence, Vec::new()))
                 }
                 _ => None,
             };
-            if let Some((role, text)) = message {
+            if let Some((role, text, answers)) = message {
                 let key = Some(format!("result:{id}"));
-                self.parsed.items.push(item(key, role, None, text));
+                self.parsed.items.push(Item {
+                    answers,
+                    ..item(key, role, None, text)
+                });
             }
         }
         let text = texts(content, "\n");

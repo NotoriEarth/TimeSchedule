@@ -95,6 +95,7 @@ pub(super) fn read<R: std::io::BufRead>(
                 at: row.at,
                 group: None,
                 text,
+                answers: Vec::new(),
             }),
             // A row left out still tells against a copy of the item that looks like
             // a person's.

@@ -6,13 +6,7 @@ use std::{
 use timeschedule_core::storage::Storage;
 use timeschedule_desktop::paths::{self, InstanceLock};
 
-const USAGE: &str = "record enqueue --input FILE | drain | status --work-id UUID --revision N | configure-local-chats --project UUID --enabled true/false | scan-local-chats | daily --project UUID|FOLDER --dry-run [--date YYYY-MM-DD] [--transcript FILE] [--data-dir DIR] [--result FILE]";
-
-/// Characters of transcript per input token, and the input Codex CLI adds to every
-/// call. Both measured on 2026-11-24 (see docs/daily-record.md); the first is rounded
-/// down for Korean text, so the estimate is a rough upper figure.
-const CHARS_PER_TOKEN: f64 = 3.3;
-const CALL_OVERHEAD_TOKENS: usize = 11_449;
+const USAGE: &str = "record enqueue --input FILE | drain | status --work-id UUID --revision N | configure-local-chats --project UUID --enabled true/false | scan-local-chats | daily --project UUID|FOLDER [--dry-run] [--date YYYY-MM-DD] [--model NAME] [--transcript FILE] [--data-dir DIR] [--result FILE]";
 
 fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
     if args.len() < 2 || args[0] != "record" {
@@ -28,7 +22,11 @@ fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
             (&["--project", "--enabled"], &[], &[])
         }
         "scan-codex-chats" | "scan-local-chats" => (&[], &[], &[]),
-        "daily" => (&["--project"], &["--date", "--transcript"], &["--dry-run"]),
+        "daily" => (
+            &["--project"],
+            &["--date", "--transcript", "--model"],
+            &["--dry-run"],
+        ),
         _ => return Err(USAGE.into()),
     };
     let mut options = HashMap::new();
@@ -69,18 +67,24 @@ fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
 #[cfg(test)]
 fn execute(args: &[String]) -> Result<serde_json::Value, String> {
     let (command, options) = parse(args)?;
-    let one_file = result_is_transcript(&options);
-    perform(command, &options, one_file)
+    let store = daily_store(command, &options);
+    let refused = refused_outputs(&options, store.as_ref());
+    perform(command, &options, refused, store)
 }
 
-/// Runs a command that `parse` read. `one_file` is `result_is_transcript` of its options.
+/// Runs a command that `parse` read. `store` is `daily_store` of it and `refused` is
+/// `refused_outputs` of that same store.
 fn perform(
     command: &str,
     options: &HashMap<&str, &str>,
-    one_file: bool,
+    refused: Option<String>,
+    store: Option<Store>,
 ) -> Result<serde_json::Value, String> {
-    if command == "daily" {
-        return daily(options, one_file);
+    if let Some(store) = store {
+        return match refused {
+            Some(why) => Err(why),
+            None => daily(options, store),
+        };
     }
     let input = if command == "enqueue" {
         Some(record_inbox::read_record(Path::new(options["--input"]))?)
@@ -204,17 +208,123 @@ fn result_is_transcript(options: &HashMap<&str, &str>) -> bool {
     }
 }
 
-/// The day transcript of one project. It reads only the kept originals in the document
-/// store, so it runs while the app is open and makes no data folder. The model call
-/// comes in a later version.
-fn daily(options: &HashMap<&str, &str>, one_file: bool) -> Result<serde_json::Value, String> {
-    use timeschedule_core::daily_record::{day_transcript, kst};
-    if !options.contains_key("--dry-run") {
-        return Err("record daily는 아직 --dry-run으로만 실행합니다. 하루 대화록만 만들고 모델은 부르지 않습니다.".into());
+/// Whether `path` (a `place`) is `folder` or below it.
+fn within(path: &str, folder: &str) -> bool {
+    path.strip_prefix(folder)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['\\', '/']))
+}
+
+/// Whether an output file named `path` would be written among the kept originals or
+/// the daily records of the document store at `vault`. The program keeps those two
+/// folders itself, and an output there could replace a record or a kept revision.
+fn in_kept_folders(vault: &Path, path: &str) -> bool {
+    let path = Path::new(path);
+    // The file the output names may itself be a link: `place` follows it to where it
+    // points, but writing replaces the name. So the name's own place, its folder
+    // resolved and the name put after it, is checked too.
+    let entry = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => {
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            Some(
+                place(parent).trim_end_matches(['\\', '/']).to_owned()
+                    + "\\"
+                    + &name.to_string_lossy().to_lowercase(),
+            )
+        }
+        _ => None,
+    };
+    let places = [Some(place(path)), entry];
+    ["daily", "originals"].iter().any(|folder| {
+        let folder = place(&vault.join(folder));
+        places.iter().flatten().any(|at| within(at, &folder))
+    })
+}
+
+/// Where the document store of a `daily` run is, or why it was not found.
+type Store = Result<PathBuf, String>;
+
+/// The document store `daily` reads and writes; `None` for any other command. A run
+/// asks this once. The check of where its outputs go and the run itself are given the
+/// same answer, so a setting changed in between cannot have the check look at one
+/// store while the run writes over a record of another.
+fn daily_store(command: &str, options: &HashMap<&str, &str>) -> Option<Store> {
+    (command == "daily").then(|| {
+        #[cfg(test)]
+        tests::STORE_LOOKUPS.with(|count| count.set(count.get() + 1));
+        let dir = paths::data_dir(options.get("--data-dir").map(PathBuf::from), true)?;
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        crate::record_original::originals_vault(&dir)
+    })
+}
+
+/// Why `daily` must not write the files its arguments name, if it must not. `store` is
+/// `daily_store` of the run. Such a run writes neither file, the result included: a
+/// refusal must leave a transcript, a record or a kept revision as it was. This is
+/// asked once, before anything is written: writing makes folders, and a path can
+/// resolve differently after.
+fn refused_outputs(options: &HashMap<&str, &str>, store: Option<&Store>) -> Option<String> {
+    let store = store?;
+    if result_is_transcript(options) {
+        return Some("--transcript와 --result는 서로 다른 파일이어야 합니다.".into());
     }
-    if one_file {
-        return Err("--transcript와 --result는 서로 다른 파일이어야 합니다.".into());
+    let named: Vec<(&str, &str)> = ["--result", "--transcript"]
+        .into_iter()
+        .filter_map(|key| Some((key, *options.get(key)?)))
+        .collect();
+    if named.is_empty() {
+        return None;
     }
+    // While the store cannot be found, nothing says an output is not one of its
+    // records or kept revisions, so none is written.
+    let vault = match store {
+        Ok(vault) => vault,
+        Err(why) => {
+            return Some(format!(
+                "{why} 문서 저장소의 위치를 확인하지 못해 --result와 --transcript 파일을 쓰지 않았습니다."
+            ))
+        }
+    };
+    named.into_iter().find_map(|(key, path)| {
+        in_kept_folders(vault, path).then(|| {
+            format!("{key}는 문서 저장소의 daily와 originals 폴더 밖의 파일이어야 합니다.")
+        })
+    })
+}
+
+/// Writes `bytes` whole to a temporary file beside `path` and renames it to `path`. The
+/// name then holds what it held or all of `bytes`, and a file the name was a hard link
+/// of is left as it was.
+fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let temporary = parent.join(format!(".record-output-{}.tmp", uuid::Uuid::new_v4()));
+    let written =
+        std::fs::write(&temporary, bytes).and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written.map_err(|e| e.to_string())
+}
+
+/// The day transcript of one project and, without `--dry-run`, the daily record a
+/// model makes of it. It reads the kept originals in the document store and writes
+/// only below the store's `daily` folder, so it runs while the app is open and makes
+/// no data folder. `store` is `daily_store` of the run.
+fn daily(options: &HashMap<&str, &str>, store: Store) -> Result<serde_json::Value, String> {
+    use timeschedule_core::{
+        daily_record::{
+            day_transcript, kst,
+            record::{estimated_tokens, summarize, Outcome},
+        },
+        terra,
+    };
     let date = match options.get("--date") {
         // The parser also takes `2026-1-2` and `+10000-01-01`, so the shape is checked
         // first: four digits, two and two.
@@ -230,62 +340,115 @@ fn daily(options: &HashMap<&str, &str>, one_file: bool) -> Result<serde_json::Va
             .ok_or("--date는 YYYY-MM-DD 형식이어야 합니다.")?,
         None => chrono::Utc::now().with_timezone(&kst()).date_naive(),
     };
-    let dir = paths::data_dir(options.get("--data-dir").map(PathBuf::from), true)?;
-    let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
-    let vault = crate::record_original::originals_vault(&dir)?;
+    let vault = store?;
     let transcript = day_transcript(&vault, options["--project"], date)?;
     let written = match options.get("--transcript") {
         Some(path) => {
             let path = Path::new(path);
-            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            std::fs::write(path, transcript.render()).map_err(|e| e.to_string())?;
+            write_whole(path, transcript.render().as_bytes())?;
             Some(path.to_string_lossy().into_owned())
         }
         None => None,
     };
     let summary = transcript.summary();
-    let estimate = (summary.chars as f64 / CHARS_PER_TOKEN).ceil() as usize + CALL_OVERHEAD_TOKENS;
-    Ok(serde_json::json!({
+    let mut out = serde_json::json!({
         "outcome": if transcript.warnings.is_empty() { "dry_run" } else { "attention" },
         "project": {"id": transcript.project_id, "title": transcript.title},
         "date": date.to_string(),
         "summary": summary,
-        "estimatedInputTokens": estimate,
+        "estimatedInputTokens": estimated_tokens(summary.chars),
         "sources": transcript.sources,
         "warnings": transcript.warnings,
         "latestArchived": transcript.latest_archived,
         "transcript": written,
-    }))
+    });
+    // A day with warnings and no dialogue has nothing to send, and its warnings are
+    // what the caller needs to see: the dialogue may be in a file that was not read.
+    let unread_day = transcript.blocks.is_empty() && !transcript.warnings.is_empty();
+    if options.contains_key("--dry-run") || unread_day {
+        return Ok(out);
+    }
+    let model = options.get("--model").copied().unwrap_or(terra::MODEL);
+    let outcome = summarize(
+        &vault,
+        &transcript,
+        model,
+        DAILY_EFFORT,
+        |prompt, schema| {
+            terra::run(
+                prompt,
+                &terra::Call {
+                    model,
+                    effort: DAILY_EFFORT,
+                    schema: Some(schema),
+                    timeout: std::time::Duration::from_secs(600),
+                    answer_limit: 1 << 20,
+                    read_usage: true,
+                    // The answer is checked as the model wrote it.
+                    unfence: false,
+                },
+            )
+        },
+    )?;
+    let warned = !transcript.warnings.is_empty();
+    match outcome {
+        Outcome::Saved { path, record } => {
+            out["outcome"] = (if warned { "attention" } else { "saved" }).into();
+            out["record"] = serde_json::json!({
+                "path": path,
+                "revision": record.revision,
+                "model": record.model,
+                "usage": record.usage,
+                "checks": record.checks,
+                "development": record.development.len(),
+                "troubleshooting": record.troubleshooting.len(),
+                "improvements": record.improvements.len(),
+                "decisions": record.decisions.len(),
+            });
+        }
+        Outcome::Unchanged { path, revision } => {
+            out["outcome"] = (if warned { "attention" } else { "unchanged" }).into();
+            out["record"] = serde_json::json!({"path": path, "revision": revision});
+        }
+        Outcome::Busy { path } => {
+            out["outcome"] = "busy".into();
+            out["record"] = serde_json::json!({"path": path});
+        }
+    }
+    Ok(out)
 }
+
+/// The daily record asks for a summary of one day, not hard reasoning.
+const DAILY_EFFORT: &str = "medium";
 
 /// Runs the record command line in `args` (`record ...`) and returns the exit code.
 ///
 /// The outcome is printed, and written to `--result` when the arguments say beyond
-/// doubt which file that is: not when they could not be read, and not when the file
-/// is also the `--transcript`, which a refusal must leave as it was. Any other error
-/// is written there, so a caller that reads the file does not take an older result
-/// for this run's.
+/// doubt which file that is and the file may be written: not when they could not be
+/// read, and not when `refused_outputs` gives a reason, which it also does when the
+/// document store cannot be found. Any other error is written there, so a caller that
+/// reads the file does not take an older result for this run's.
 pub fn run(args: &[String]) -> i32 {
     let parsed = parse(args);
-    let one_file = parsed
+    let store = parsed
         .as_ref()
-        .is_ok_and(|(_, options)| result_is_transcript(options));
+        .ok()
+        .and_then(|(command, options)| daily_store(command, options));
+    let refused = parsed
+        .as_ref()
+        .ok()
+        .and_then(|(_, options)| refused_outputs(options, store.as_ref()));
+    let writes_result = refused.is_none();
     let output = parsed
         .as_ref()
         .map_err(String::clone)
-        .and_then(|(command, options)| perform(command, options, one_file))
+        .and_then(|(command, options)| perform(command, options, refused, store))
         .unwrap_or_else(|message| serde_json::json!({"outcome": "error", "message": message}));
     let bytes = serde_json::to_vec_pretty(&output).expect("JSON value serialization");
     if let Ok((_, options)) = &parsed {
-        if let Some(path) = options.get("--result").filter(|_| !one_file) {
+        if let Some(path) = options.get("--result").filter(|_| writes_result) {
             let result = (|| -> Result<(), String> {
                 let path = Path::new(path);
-                let parent = path
-                    .parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or(Path::new("."));
                 if let Some(input) = options.get("--input") {
                     if std::fs::canonicalize(input).ok().is_some_and(|source| {
                         std::fs::canonicalize(path).ok().as_ref() == Some(&source)
@@ -293,14 +456,7 @@ pub fn run(args: &[String]) -> i32 {
                         return Err("결과 파일은 입력 파일과 다른 위치여야 합니다.".into());
                     }
                 }
-                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                let temporary = parent.join(format!(".record-result-{}.tmp", uuid::Uuid::new_v4()));
-                std::fs::write(&temporary, &bytes).map_err(|e| e.to_string())?;
-                if let Err(error) = std::fs::rename(&temporary, path) {
-                    let _ = std::fs::remove_file(&temporary);
-                    return Err(error.to_string());
-                }
-                Ok(())
+                write_whole(path, &bytes)
             })();
             if let Err(error) = result {
                 eprintln!("결과 파일 저장 실패: {error}");
@@ -311,7 +467,7 @@ pub fn run(args: &[String]) -> i32 {
     println!("{}", String::from_utf8_lossy(&bytes));
     match output["outcome"].as_str() {
         Some("error") => 1,
-        Some("conflict" | "missing" | "attention") => 2,
+        Some("conflict" | "missing" | "attention" | "busy") => 2,
         _ => 0,
     }
 }
@@ -322,6 +478,12 @@ mod tests {
     use crate::record_inbox::tests::{sample, TestDir};
     use timeschedule_core::storage::Storage;
     use timeschedule_desktop::paths::InstanceLock;
+
+    thread_local! {
+        /// How many times this thread has looked up the document store of a `daily` run.
+        pub(super) static STORE_LOOKUPS: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
 
     fn enqueue_args(dir: &TestDir) -> Vec<String> {
         let path = dir.0.join("한글 입력 record.json");
@@ -404,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn record_daily_runs_only_as_a_dry_run_for_now() {
+    fn record_daily_takes_only_a_well_formed_date() {
         let dir = TestDir::new();
         let args = |extra: &[&str]| {
             let mut args = vec!["record", "daily", "--project", "x"];
@@ -412,7 +574,6 @@ mod tests {
             args.extend(["--data-dir", dir.0.to_str().unwrap()]);
             args.into_iter().map(String::from).collect::<Vec<_>>()
         };
-        assert!(execute(&args(&[])).unwrap_err().contains("--dry-run"));
         for date in [
             "2026/11/24",
             "2026-1-2",
@@ -460,29 +621,147 @@ mod tests {
         let unread = ["--dry-run", "--result", result.to_str().unwrap(), "--bogus"];
         assert_eq!(daily(&unread), 1);
         assert!(!result.exists());
-        // Any other refusal is written to the result file the caller named.
-        let bad_date = [
-            "--dry-run",
-            "--date",
-            "2026/11/24",
-            "--result",
-            result.to_str().unwrap(),
-        ];
-        assert_eq!(daily(&bad_date), 1);
-        let written: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&result).unwrap()).unwrap();
-        assert_eq!(written["outcome"], "error");
-        assert!(written["message"].as_str().unwrap().contains("YYYY-MM-DD"));
-        assert_eq!(daily(&["--result", result.to_str().unwrap()]), 1);
-        assert!(std::fs::read_to_string(&result)
-            .unwrap()
-            .contains("--dry-run"));
         assert!(!data.exists());
         let left: Vec<_> = std::fs::read_dir(&dir.0)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect();
-        assert_eq!(left.len(), 2, "{left:?}");
+        assert_eq!(left.len(), 1, "{left:?}");
+    }
+
+    /// A data folder registered with a record state folder whose document store is
+    /// `vault`, so that where the store is does not depend on the user's home.
+    fn registered(dir: &TestDir, vault: &Path) -> PathBuf {
+        let (data, state) = (dir.0.join("data"), dir.0.join("state"));
+        let script = dir.0.join("project-records.mjs");
+        std::fs::create_dir_all(&state).unwrap();
+        std::fs::write(&script, "").unwrap();
+        let node = std::env::current_exe().unwrap();
+        crate::record_sync::register(&data, &node, &script, &state).unwrap();
+        let settings = serde_json::json!({"schemaVersion": 1, "root": vault});
+        std::fs::write(state.join("vault-settings.json"), settings.to_string()).unwrap();
+        data
+    }
+
+    #[test]
+    fn record_daily_writes_no_output_while_the_store_cannot_be_found() {
+        let dir = TestDir::new();
+        let vault = dir.0.join("Vault");
+        let record = vault.join("daily").join("p").join("2026-11-24.json");
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, "앞서 만든 기록").unwrap();
+        let data = registered(&dir, &vault);
+        let out = dir.0.join("out.json");
+        let daily = |date: &str, key: &str, path: &Path| {
+            let args = [
+                "record",
+                "daily",
+                "--project",
+                "x",
+                "--dry-run",
+                "--date",
+                date,
+            ];
+            let named = [key, path.to_str().unwrap()];
+            let data = ["--data-dir", data.to_str().unwrap()];
+            let args = args.iter().chain(&named).chain(&data);
+            run(&args.map(|arg| arg.to_string()).collect::<Vec<_>>())
+        };
+        // The store's marker cannot be read, so nothing says where the records are.
+        std::fs::write(vault.join("vault.json"), "{").unwrap();
+        for (key, path) in [
+            ("--result", &record),
+            ("--transcript", &record),
+            ("--result", &out),
+        ] {
+            assert_eq!(daily("2026-11-24", key, path), 1);
+            assert_eq!(std::fs::read_to_string(&record).unwrap(), "앞서 만든 기록");
+        }
+        assert!(!out.exists());
+        // With the store found, a run's own error is written to the result it named.
+        std::fs::write(vault.join("vault.json"), r#"{"schemaVersion":1}"#).unwrap();
+        assert_eq!(daily("2026/11/24", "--result", &out), 1);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+        assert_eq!(written["outcome"], "error");
+        assert!(written["message"].as_str().unwrap().contains("YYYY-MM-DD"));
+        assert_eq!(daily("2026/11/24", "--result", &record), 1);
+        assert_eq!(std::fs::read_to_string(&record).unwrap(), "앞서 만든 기록");
+    }
+
+    /// Two lookups could be told of two stores when the setting changes in between:
+    /// the outputs would be checked against one and the run would write in the other.
+    #[test]
+    fn record_daily_looks_the_store_up_once_for_the_check_and_the_run() {
+        let dir = TestDir::new();
+        let vault = dir.0.join("Vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::write(vault.join("vault.json"), r#"{"schemaVersion":1}"#).unwrap();
+        let data = registered(&dir, &vault);
+        let out = dir.0.join("out.json");
+        let args = [
+            "record",
+            "daily",
+            "--project",
+            "x",
+            "--dry-run",
+            "--result",
+            out.to_str().unwrap(),
+            "--data-dir",
+            data.to_str().unwrap(),
+        ]
+        .map(String::from);
+        let before = STORE_LOOKUPS.get();
+        // The run gets as far as reading the store: it has no originals of the project.
+        assert_eq!(run(&args), 1);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+        assert!(written["message"]
+            .as_str()
+            .unwrap()
+            .contains("원문이 없습니다"));
+        assert_eq!(STORE_LOOKUPS.get() - before, 1);
+    }
+
+    #[test]
+    fn record_daily_writes_no_output_among_the_kept_records_or_originals() {
+        let dir = TestDir::new();
+        let vault = dir.0.join("Vault");
+        std::fs::create_dir_all(vault.join("daily").join("p")).unwrap();
+        let inside = |path: PathBuf| in_kept_folders(&vault, path.to_str().unwrap());
+        assert!(inside(
+            vault.join("daily").join("p").join("2026-11-24.json")
+        ));
+        assert!(inside(
+            vault.join("DAILY").join("p").join("2026-11-24.r1.json")
+        ));
+        assert!(inside(vault.join("daily").join("p").join("x.json:stream")));
+        // A folder not made yet, reached by going up and down again.
+        let roundabout = vault.join("other").join("..").join("originals");
+        assert!(inside(roundabout.join("new").join("day.md")));
+        assert!(inside(vault.join("daily")));
+        assert!(!inside(vault.join("daily-notes").join("day.md")));
+        assert!(!inside(vault.join("result.json")));
+        assert!(!inside(dir.0.join("result.json")));
+    }
+
+    /// A record name that is a link to a file outside the store is still a name among
+    /// the records: writing the result would replace the link.
+    #[cfg(windows)]
+    #[test]
+    fn record_daily_sees_a_linked_record_name_as_inside_the_store() {
+        let dir = TestDir::new();
+        let vault = dir.0.join("vault");
+        let day = vault.join("daily").join("p");
+        std::fs::create_dir_all(&day).unwrap();
+        let outside = dir.0.join("outside.json");
+        std::fs::write(&outside, "{}").unwrap();
+        let name = day.join("2026-11-24.json");
+        if let Err(error) = std::os::windows::fs::symlink_file(&outside, &name) {
+            eprintln!("skipped: this account cannot make a file link ({error})");
+            return;
+        }
+        assert!(in_kept_folders(&vault, name.to_str().unwrap()));
     }
 
     #[test]
