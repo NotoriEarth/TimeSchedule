@@ -16,7 +16,7 @@ use std::{
 
 mod claude;
 mod codex;
-mod command;
+pub(crate) mod command;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Provider {

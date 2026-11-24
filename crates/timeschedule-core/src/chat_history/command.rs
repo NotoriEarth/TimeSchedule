@@ -7,11 +7,31 @@ pub(super) fn evidence(
     tool_error: bool,
     git_work_tree: bool,
 ) -> Option<String> {
-    let code_label = code.map_or_else(|| "미상".to_owned(), |n| n.to_string());
-    let mut result = format!("종료 코드 {code_label}");
     if out.starts_with("TAP version ") && out.lines().any(|s| s.starts_with("# tests ")) {
-        return Some(format!("{result}\n{out}"));
+        return Some(format!("{}\n{out}", code_line(code)));
     }
+    lines(out, code, tool_error, git_work_tree, false)
+}
+
+/// The same lines for the day transcript, which copies no output whole. Of a failed
+/// test report in TAP form it keeps the failed tests and the count of failures.
+pub(crate) fn diagnostics(out: &str, code: Option<i64>, tool_error: bool) -> Option<String> {
+    lines(out, code, tool_error, false, true)
+}
+
+fn code_line(code: Option<i64>) -> String {
+    let code_label = code.map_or_else(|| "미상".to_owned(), |n| n.to_string());
+    format!("종료 코드 {code_label}")
+}
+
+fn lines(
+    out: &str,
+    code: Option<i64>,
+    tool_error: bool,
+    git_work_tree: bool,
+    tap: bool,
+) -> Option<String> {
+    let mut result = code_line(code);
     let failed = tool_error || code.is_some_and(|n| n != 0);
     let mut lines = Vec::new();
     for line in out.lines().map(str::trim) {
@@ -67,7 +87,8 @@ pub(super) fn evidence(
             "실패",
         ]
         .iter()
-        .any(|term| lower.contains(term));
+        .any(|term| lower.contains(term))
+            || tap && (line.starts_with("not ok ") || line.starts_with("# fail "));
         let git_status = git_work_tree && matches!(line, "true" | "false");
         if (status || git_status || failed && diagnostic) && !lines.contains(&line) {
             lines.push(line);

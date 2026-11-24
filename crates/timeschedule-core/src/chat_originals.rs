@@ -143,12 +143,32 @@ fn exists(path: &Path) -> io::Result<bool> {
     }
 }
 
-fn is_link(path: &Path) -> io::Result<bool> {
+pub(crate) fn is_link(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(meta) => Ok(meta.file_type().is_symlink()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// Where the kept `file` of the index is under the project folder `dir`, for reading.
+/// `file` must be plain names joined by `/`, so it cannot leave `dir`, and no step may
+/// be a link.
+pub(crate) fn kept_path(dir: &Path, file: &str) -> io::Result<PathBuf> {
+    // Windows drops dots and spaces at the end of a name, so `.. ` would be `..`.
+    let plain =
+        |part: &str| !part.is_empty() && !part.contains(['\\', ':']) && !part.ends_with(['.', ' ']);
+    if !file.split('/').all(plain) {
+        return Err(other("보관 폴더 안의 경로가 아닙니다."));
+    }
+    let mut path = dir.to_path_buf();
+    for part in file.split('/') {
+        path.push(part);
+        if is_link(&path)? {
+            return Err(other("링크 경로의 보관본은 읽지 않습니다."));
+        }
+    }
+    Ok(path)
 }
 
 /// Where whole files are written before they are moved into place. The folder is made
