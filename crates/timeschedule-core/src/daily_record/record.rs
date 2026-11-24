@@ -28,11 +28,15 @@ use std::{
 
 /// Changes whenever the prompt or the schema does. The fingerprint also covers their
 /// text, so an old record is not taken as the answer to a new question either way.
-pub const PROMPT_VERSION: u32 = 2;
+pub const PROMPT_VERSION: u32 = 3;
 /// Larger days are refused instead of split. On 2026-11-24 the largest day kept on
-/// this PC was about 104,000 tokens by the dry run's estimate.
+/// this PC was about 165,000 tokens by this estimate.
 pub const MAX_ESTIMATED_TOKENS: usize = 200_000;
-pub const CHARS_PER_TOKEN: f64 = 3.3;
+/// Characters of prompt per input token, measured once on 2026-11-24: the record of
+/// 2026-11-20 (35,761 characters of transcript plus the instructions) took 30,628 input
+/// tokens with `gpt-6.1-terra`, which is about two characters per token once the call's
+/// own input is taken off. The transcript is mostly Korean.
+pub const CHARS_PER_TOKEN: f64 = 2.0;
 pub const CALL_OVERHEAD_TOKENS: usize = 11_449;
 /// Characters of one quote the record keeps. A longer quote does not count.
 pub const QUOTE_LIMIT: usize = 300;
@@ -61,7 +65,7 @@ const INSTRUCTIONS: &str = r#"아래는 한 소프트웨어 프로젝트의 하�
   - reason: 대화록에 적힌 이유. 적힌 이유가 없으면 null. 추측해서 채우지 않는다.
   - rejected: 검토하고 택하지 않은 대안. 없으면 빈 목록.
   - proposedBy: 처음 제안한 쪽. "human"(사람이 친 글에서 나옴), "ai"(AI나 에이전트 실행 블록에서 나옴), 알 수 없으면 "unknown". 질문 창에서 고른 답은 AI가 낸 선택지를 고른 것이므로 사람의 제안이 아니다.
-  - proposalEvidence: 그 제안이 처음 나온 블록. 블록 번호(block)와, 그 블록에서 제안에 해당하는 글귀(quote)를 적는다.
+  - proposalEvidence: 그 제안이 처음 나온 블록. 블록 번호(block)와, 그 블록에서 제안에 해당하는 글귀(quote)를 적는다. 사람이 앞선 제안 없이 직접 정했으면(decidedBy가 "human_decided"이고 proposedBy가 "human"이면) 그 사람 블록과 글귀를 여기에도 적는다. 비워 두면 제안한 쪽을 알 수 없는 것으로 남는다.
   - decidedBy: "human_approved"(사람이 제안을 받아들임), "human_changed"(사람이 제안을 바꿈), "human_decided"(제안 없이 사람이 직접 정함), "unconfirmed"(사람이 정했다는 글이 없음). AI가 정하고 사람이 답한 글이 없으면 "unconfirmed"다. 사람이 검토나 조사를 부탁한 것은 정한 것이 아니다.
   - decisionEvidence: 정한 블록. 사람이 정했다고 쓰려면 사람 블록의 번호와, 그 블록에서 사람이 받아들이거나 바꾸거나 정한 글귀를 적는다. 받아들이거나 바꾼 글은 제안보다 뒤의 블록이어야 한다.
   - evidence: 이유나 버린 대안처럼 그 밖의 근거가 된 블록 번호. 없으면 빈 목록.

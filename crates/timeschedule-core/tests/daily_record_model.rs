@@ -1012,7 +1012,11 @@ fn every_call_is_in_the_usage_log_whatever_became_of_its_answer() {
             &usage[0]["effort"],
             &usage[0]["promptVersion"]
         ),
-        (&json!("2026-11-24"), &json!("medium"), &json!(2))
+        (
+            &json!("2026-11-24"),
+            &json!("medium"),
+            &json!(timeschedule_core::daily_record::record::PROMPT_VERSION)
+        )
     );
     // The record on disk says the same as the log: not reported, not zero.
     let kept: Value = serde_json::from_slice(&std::fs::read(v.day()).unwrap()).unwrap();
