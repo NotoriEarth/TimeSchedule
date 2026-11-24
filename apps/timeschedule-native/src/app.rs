@@ -13,7 +13,7 @@ use std::{
 };
 use timeschedule_core::{
     dates::{calendar_days, shift_month, week_after_sunday, week_containing},
-    diary::{Entry, EntrySummary, ImportResult, SearchHit},
+    diary::{Entry, EntrySummary, SearchHit},
     storage::Storage,
 };
 use timeschedule_desktop::{
@@ -227,8 +227,6 @@ pub enum Message {
     Search(String),
     SearchDue(u64, String),
     SearchDone(u64, Result<Vec<SearchHit>, String>),
-    Import,
-    Imported(Result<ImportResult, String>),
     Portfolio(crate::portfolio_ui::Action),
     ChatReview(crate::chat_review_ui::Action),
     Draft(bool),
@@ -1043,7 +1041,6 @@ impl App {
                     | Message::SearchDone(..)
                     | Message::Saved(..)
                     | Message::MutationDone(_)
-                    | Message::Imported(_)
                     | Message::Drafted(..)
                     | Message::ChatReview(
                         crate::chat_review_ui::Action::Read(..)
@@ -1866,32 +1863,6 @@ impl App {
                 self.searching = false;
                 match result {
                     Ok(rows) => self.search_results = rows,
-                    Err(e) => self.error = e,
-                }
-            }
-            Message::Import if !self.busy => {
-                if let (Some(id), Some(store)) = (self.project.clone(), self.store.clone()) {
-                    self.busy = true;
-                    return worker::job(store, move |s| s.import_git(&id), Message::Imported);
-                }
-            }
-            Message::Imported(result) => {
-                self.busy = false;
-                match result {
-                    Ok(r) => {
-                        self.notice = format!(
-                            "커밋 {}개 확인 · {}개 추가 · {}개 중복 보존{}",
-                            r.scanned,
-                            r.imported,
-                            r.scanned - r.imported,
-                            if r.limited {
-                                " (최근 500개 제한)"
-                            } else {
-                                ""
-                            }
-                        );
-                        return self.refresh();
-                    }
                     Err(e) => self.error = e,
                 }
             }

@@ -1872,63 +1872,47 @@ fn clicking_widget_record_opens_its_day_before_loading_detail() {
 }
 
 #[test]
-fn incoming_records_and_import_refresh_open_day_and_detail() {
+fn incoming_records_refresh_open_day_and_detail() {
     use crate::calendar_ui::{message, Action};
-    for inbox in [true, false] {
-        let mut app = calendar_record_fixture();
-        app.quick_window = Some(window::Id::unique());
-        app.quick_date = Some(app.selected);
-        let item = app
-            .snapshot
-            .days
-            .iter()
-            .flat_map(|d| &d.items)
-            .next()
-            .unwrap()
-            .clone();
-        run_message(
-            &mut app,
-            message(Action::Open(item.source, item.id.clone(), true)),
-        );
-        let store = app.store.as_ref().unwrap();
-        let mut changed =
-            worker::hydrate_form(store, Form::entry(store.get_entry(&item.id).unwrap())).unwrap();
-        changed.title = "외부 수정 반영".into();
-        changed.save(store).unwrap();
-        let mut added = Form::new(Kind::Entry, app.selected.to_string(), None);
-        added.title = "새 수신 기록".into();
-        added.save(store).unwrap();
-        if inbox {
-            app.records_processing = true;
-            run_message(
-                &mut app,
-                Message::RecordsDrained(Ok(crate::record_inbox::DrainReport {
-                    saved: 1,
-                    ..Default::default()
-                })),
-            );
-        } else {
-            run_message(
-                &mut app,
-                Message::Imported(Ok(ImportResult {
-                    imported: 1,
-                    scanned: 1,
-                    limited: false,
-                })),
-            );
-        }
-        assert_eq!(
-            app.calendar.quick.total, 2,
-            "open day must refresh, inbox={inbox}"
-        );
-        assert_eq!(
-            app.calendar.detail.as_ref().unwrap().title,
-            "외부 수정 반영"
-        );
-        app.store.as_ref().unwrap().delete_entry(&item.id).unwrap();
-        run_message(&mut app, Message::Load);
-        assert!(app.calendar.detail.is_none());
-    }
+    let mut app = calendar_record_fixture();
+    app.quick_window = Some(window::Id::unique());
+    app.quick_date = Some(app.selected);
+    let item = app
+        .snapshot
+        .days
+        .iter()
+        .flat_map(|d| &d.items)
+        .next()
+        .unwrap()
+        .clone();
+    run_message(
+        &mut app,
+        message(Action::Open(item.source, item.id.clone(), true)),
+    );
+    let store = app.store.as_ref().unwrap();
+    let mut changed =
+        worker::hydrate_form(store, Form::entry(store.get_entry(&item.id).unwrap())).unwrap();
+    changed.title = "외부 수정 반영".into();
+    changed.save(store).unwrap();
+    let mut added = Form::new(Kind::Entry, app.selected.to_string(), None);
+    added.title = "새 수신 기록".into();
+    added.save(store).unwrap();
+    app.records_processing = true;
+    run_message(
+        &mut app,
+        Message::RecordsDrained(Ok(crate::record_inbox::DrainReport {
+            saved: 1,
+            ..Default::default()
+        })),
+    );
+    assert_eq!(app.calendar.quick.total, 2, "open day must refresh");
+    assert_eq!(
+        app.calendar.detail.as_ref().unwrap().title,
+        "외부 수정 반영"
+    );
+    app.store.as_ref().unwrap().delete_entry(&item.id).unwrap();
+    run_message(&mut app, Message::Load);
+    assert!(app.calendar.detail.is_none());
 }
 
 #[test]
