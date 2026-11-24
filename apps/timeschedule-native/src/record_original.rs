@@ -79,14 +79,22 @@ fn no_links(root: &Path, parts: &[&str]) -> Result<PathBuf, String> {
 
 fn vault_root(state_dir: &Path, home: Option<&Path>) -> Result<PathBuf, String> {
     let settings = state_dir.join("vault-settings.json");
-    if settings.exists() {
+    // Only a file that is really absent means "use the default store".
+    if settings
+        .try_exists()
+        .map_err(|e| format!("문서 저장소 설정을 확인하지 못했습니다: {e}"))?
+    {
         let value: VaultSettings = read_json(&settings, "문서 저장소 설정")?;
         if value.schema_version != 1 || !value.root.is_absolute() {
             return Err("문서 저장소 설정을 확인해 주세요.".into());
         }
         return Ok(value.root);
     }
-    // The record script's default when nothing was configured.
+    default_vault(home)
+}
+
+/// The record script's default when nothing was configured.
+fn default_vault(home: Option<&Path>) -> Result<PathBuf, String> {
     home.map(|h| h.join("Documents").join("TimeScheduleData"))
         .ok_or_else(|| "문서 저장소 위치를 확인하지 못했습니다.".into())
 }
@@ -126,6 +134,31 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
+}
+
+/// The document store root where chat originals are kept: the registered record state
+/// folder's store, or the default one when no record delivery is registered.
+pub fn originals_vault(data_dir: &Path) -> Result<PathBuf, String> {
+    let missing = || "문서 저장소를 찾지 못해 채팅 원문을 보관하지 못했습니다.".to_string();
+    let registered = data_dir
+        .join("project-record-sync.json")
+        .try_exists()
+        .map_err(|e| format!("자동 기록 전달 설정을 확인하지 못했습니다: {e}"))?;
+    let root = if registered {
+        vault_root(
+            &crate::record_sync::registered_state_dir(data_dir)?,
+            home_dir().as_deref(),
+        )
+    } else {
+        default_vault(home_dir().as_deref())
+    }?;
+    let root = std::fs::canonicalize(root).map_err(|_| missing())?;
+    let marker = no_links(&root, &["vault.json"]).map_err(|_| missing())?;
+    let marker: VaultMarker = read_json(&marker, "문서 저장소 표식")?;
+    if marker.schema_version != 1 {
+        return Err("지원하지 않는 문서 저장소 형식입니다.".into());
+    }
+    Ok(root)
 }
 
 pub fn open(data_dir: &Path, work_id: &str) -> Result<(), String> {

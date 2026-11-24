@@ -99,13 +99,19 @@ pub fn execute(args: &[String]) -> Result<serde_json::Value, String> {
         return Ok(serde_json::json!({"outcome":"configured","enabled":enabled}));
     }
     if matches!(command, "scan-codex-chats" | "scan-local-chats") {
-        let report = if command == "scan-codex-chats" {
-            store.scan_codex_chats(&crate::worker::codex_home()?, true)?
-        } else {
-            crate::worker::scan_chats(&store, true)?
+        if command == "scan-codex-chats" {
+            let report = store.scan_codex_chats(&crate::worker::codex_home()?, true)?;
+            return Ok(
+                serde_json::json!({"outcome":if report.failed>0 {"attention"}else{"scanned"},"report":report}),
+            );
+        }
+        let scan = crate::worker::scan_chats(&store, &dir, true)?;
+        let originals = match &scan.originals {
+            Ok(report) => serde_json::json!(report),
+            Err(message) => serde_json::json!({"error": message}),
         };
         return Ok(
-            serde_json::json!({"outcome":if report.failed>0 {"attention"}else{"scanned"},"report":report}),
+            serde_json::json!({"outcome":if scan.needs_attention() {"attention"}else{"scanned"},"report":scan.excerpts,"originals":originals}),
         );
     }
     let report = record_inbox::drain(&dir, &store)?;

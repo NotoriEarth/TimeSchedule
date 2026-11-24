@@ -1,5 +1,6 @@
 //! Local, opt-in project history from local Codex Desktop and Claude Code session files.
 use crate::{
+    chat_originals::OriginalsProject,
     project_records::repo_key,
     storage::{database_error, timestamp, Storage},
 };
@@ -40,7 +41,7 @@ impl Provider {
     }
 }
 
-mod transcript;
+pub(crate) mod transcript;
 use transcript::Transcript;
 
 pub(crate) fn migrate(c: &Connection) -> Result<(), String> {
@@ -110,6 +111,56 @@ impl Storage {
         Ok(())
     }
 
+    /// Every project with a repository folder, one per folder, and whether its chats
+    /// are captured. A project that is not captured still owns the sessions in its
+    /// folder, so a project above it does not keep them.
+    pub fn originals_projects(&self) -> Result<Vec<OriginalsProject>, String> {
+        let c = self.connection()?;
+        let mut q = c.prepare(
+            "SELECT p.id,p.title,p.repo_path,w.repo_key,COALESCE(w.include_claude,0) FROM projects p LEFT JOIN codex_chat_projects w ON w.project_id=p.id ORDER BY w.project_id IS NULL"
+        ).map_err(database_error)?;
+        let rows = q
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, bool>(4)?,
+                ))
+            })
+            .map_err(database_error)?;
+        let mut projects: Vec<OriginalsProject> = Vec::new();
+        for row in rows {
+            let (id, title, path, enabled_key, claude) = row.map_err(database_error)?;
+            if !Path::new(&path).is_absolute() {
+                continue;
+            }
+            let root = repo_key(&path);
+            // Capture was switched on for the folder the project had then.
+            let capture = enabled_key.as_deref() == Some(root.as_str());
+            let project = OriginalsProject {
+                id,
+                title,
+                root,
+                capture,
+                claude: capture && claude,
+            };
+            match projects.iter_mut().find(|p| p.root == project.root) {
+                Some(same) if capture && same.capture => {
+                    return Err(
+                        "같은 저장소에 채팅 수집 프로젝트가 두 개 연결되어 있습니다.".into(),
+                    );
+                }
+                // Of two projects on one folder, the captured one stands for it.
+                Some(same) if capture => *same = project,
+                Some(_) => {}
+                None => projects.push(project),
+            }
+        }
+        Ok(projects)
+    }
+
     pub fn scan_codex_chats(&self, home: &Path, reread: bool) -> Result<ScanReport, String> {
         self.scan_local_chats(home, None, reread)
     }
@@ -121,32 +172,12 @@ impl Storage {
         reread: bool,
     ) -> Result<ScanReport, String> {
         let mut report = ScanReport::default();
-        let enabled: HashMap<String, (String, bool)> = {
-            let c = self.connection()?;
-            let mut q = c.prepare(
-                "SELECT p.id,p.repo_path,w.repo_key,w.include_claude FROM codex_chat_projects w JOIN projects p ON p.id=w.project_id"
-            ).map_err(database_error)?;
-            let mut enabled = HashMap::new();
-            let rows = q
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, bool>(3)?,
-                    ))
-                })
-                .map_err(database_error)?;
-            for row in rows {
-                let (id, path, key, claude) = row.map_err(database_error)?;
-                if repo_key(&path) == key && enabled.insert(key, (id, claude)).is_some() {
-                    return Err(
-                        "같은 저장소에 채팅 수집 프로젝트가 두 개 연결되어 있습니다.".into(),
-                    );
-                }
-            }
-            enabled
-        };
+        let enabled: HashMap<String, (String, bool)> = self
+            .originals_projects()?
+            .into_iter()
+            .filter(|p| p.capture)
+            .map(|p| (p.root, (p.id, p.claude)))
+            .collect();
         if enabled.is_empty() {
             return Ok(report);
         }

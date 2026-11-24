@@ -322,17 +322,49 @@ pub(crate) fn codex_home() -> Result<std::path::PathBuf, String> {
         })
         .ok_or_else(|| "Codex 사용자 폴더를 찾을 수 없습니다.".into())
 }
+/// What one chat scan did: the diary excerpts, and the originals kept in the document store.
+#[derive(Debug, Clone)]
+pub struct ChatScan {
+    pub excerpts: timeschedule_core::chat_history::ScanReport,
+    pub originals: Result<timeschedule_core::chat_originals::OriginalsReport, String>,
+}
+
+impl ChatScan {
+    /// Excerpt files or originals that could not be read or kept.
+    pub fn needs_attention(&self) -> bool {
+        self.excerpts.failed > 0 || self.originals.as_ref().map_or(true, |o| o.failed > 0)
+    }
+}
+
 pub fn scan_chats(
     store: &Storage,
+    data_dir: &std::path::Path,
     reread: bool,
-) -> Result<timeschedule_core::chat_history::ScanReport, String> {
+) -> Result<ChatScan, String> {
     let home = codex_home()?;
     let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(std::path::PathBuf::from)
         .or_else(|| {
             std::env::var_os("USERPROFILE").map(|p| std::path::PathBuf::from(p).join(".claude"))
         });
-    store.scan_local_chats(&home, claude_home.as_deref(), reread)
+    // Keeping originals must not stop the excerpt scan, nor the reverse.
+    let originals = (|| {
+        let projects = store.originals_projects()?;
+        if !projects.iter().any(|p| p.capture) {
+            return Ok(Default::default());
+        }
+        let vault = crate::record_original::originals_vault(data_dir)?;
+        let homes = timeschedule_core::chat_originals::ToolHomes {
+            codex: &home,
+            claude: claude_home.as_deref(),
+        };
+        timeschedule_core::chat_originals::archive(&projects, &homes, &vault)
+    })();
+    let excerpts = store.scan_local_chats(&home, claude_home.as_deref(), reread)?;
+    Ok(ChatScan {
+        excerpts,
+        originals,
+    })
 }
 
 pub fn job<T: Send + 'static, M: Send + 'static>(
