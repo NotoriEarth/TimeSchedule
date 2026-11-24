@@ -125,13 +125,7 @@ fn extend_evidence(
     let mut added = 0;
     for citation in &item.citations {
         let text = citation.attributed();
-        let already_quoted = |s: &str| {
-            s.contains(&text)
-                || (citation.field == "원문 발췌"
-                    && s.contains(&format!("{} · 원문 {}행\n", citation.role, citation.line))
-                    && s.contains(&citation.quote))
-        };
-        if already_quoted(&body) || already_quoted(&original) {
+        if body.contains(&text) || original.contains(&text) {
             continue;
         }
         let inserted = c
@@ -198,16 +192,6 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>().map_err(database_error)
     }
 
-    pub fn review_chat(&self, project: &str, id: &str) -> Result<Review, String> {
-        let (chat, source, _) = read_source(&*self.connection()?, project, id)?;
-        let candidates = extract::candidates(&chat, &source);
-        Ok(Review {
-            project: project.into(),
-            chat,
-            candidates,
-            source,
-        })
-    }
     pub fn review_chat_with_model(&self, project: &str, id: &str) -> Result<Review, String> {
         self.review_chat_with_inference(project, id, |req| {
             crate::terra::generate(
