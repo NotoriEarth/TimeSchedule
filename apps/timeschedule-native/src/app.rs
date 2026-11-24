@@ -661,7 +661,7 @@ impl App {
         let data_dir = self.data_dir.clone();
         worker::job(
             store,
-            move |s| worker::scan_chats(s, &data_dir, false),
+            move |s| Ok(worker::scan_chats(s, &data_dir, false)),
             Message::ChatsScanned,
         )
     }
@@ -1106,28 +1106,13 @@ impl App {
                 self.chat_scanning = false;
                 match result {
                     Ok(scan) => {
-                        let mut problems = Vec::new();
-                        match &scan.originals {
-                            Ok(o) if o.failed > 0 => problems.push(format!(
-                                "채팅 원문 {}개를 보관하지 못했습니다. 다음 확인 때 재시도합니다.",
-                                o.failed
-                            )),
-                            Err(e) => problems.push(e.clone()),
-                            Ok(_) => {}
-                        }
-                        let r = scan.excerpts;
-                        if r.failed > 0 {
-                            problems.push(format!(
-                                "로컬 채팅 파일 {}개를 읽지 못했습니다. 다음 확인 때 재시도합니다.",
-                                r.failed
-                            ));
-                        }
+                        let problems = scan.problems();
                         if !problems.is_empty() {
                             self.error = problems.join(" ");
                         }
-                        if r.saved > 0 {
-                            self.notice =
-                                format!("로컬 채팅 {}건을 프로젝트 이력에 반영했습니다.", r.saved);
+                        let notices = scan.notices();
+                        if !notices.is_empty() {
+                            self.notice = notices.join(" ");
                             return self.refresh();
                         }
                     }
