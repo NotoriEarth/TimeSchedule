@@ -144,6 +144,29 @@ fn sessions_of_both_tools_are_kept_and_decompress_to_the_source_bytes() {
 }
 
 #[test]
+fn a_project_another_process_is_keeping_is_reported_as_not_kept_whole() {
+    let w = World::new();
+    w.rollout(&w.repo, "rollout-2026-11-04-a.jsonl");
+    let group = w.group(&w.repo);
+    fs::create_dir_all(&group).unwrap();
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(group.join(".lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let report = w.run(&[w.project(&w.repo, false)]);
+    assert_eq!((report.archived, report.failed, report.locked), (0, 0, 1));
+    assert_eq!(report.incomplete, ["p1"]);
+    drop(held);
+    let report = w.run(&[w.project(&w.repo, false)]);
+    assert_eq!((report.archived, report.locked), (1, 0));
+    assert!(report.incomplete.is_empty());
+}
+
+#[test]
 fn subfolders_count_but_other_folders_and_prefix_siblings_do_not() {
     let w = World::new();
     let inside = w.repo.join(".cache").join("gone-worktree");

@@ -85,7 +85,7 @@ originals/
 - 프로젝트 화면을 열 때
 - 앱을 켜 둔 동안 한 시간마다
 - 프로젝트의 채팅 자동 수집을 켤 때
-- `TimeSchedule.exe record scan-local-chats`를 실행할 때. 결과 JSON의 `originals`는 `{"archived", "unchanged", "failed"}`이고, 문서 저장소를 찾지 못한 경우처럼 보관을 시작하지 못했으면 `{"error": "이유"}`다. 실패나 오류가 있으면 `outcome`이 `attention`이다
+- `TimeSchedule.exe record scan-local-chats`를 실행할 때. 결과 JSON의 `originals`는 `{"archived", "unchanged", "failed", "locked"}`이고(`locked`는 다른 프로세스가 보관하고 있어 이번에 건너뛴 프로젝트 수), 문서 저장소를 찾지 못한 경우처럼 보관을 시작하지 못했으면 `{"error": "이유"}`다. 실패나 오류가 있으면 `outcome`이 `attention`이다
 
 0.32.0까지는 60초마다 모든 세션 파일을 훑었다. 진행 중인 세션은 수십 MB라 매분 다시 압축하지 않도록 바꿨다. 다이어리 발췌도 같은 시점에 갱신된다. 기록 수신함 확인은 이전처럼 1분마다 한다. 수집이 도는 중에 수집 요청이 또 들어오면(한 시간이 됨, 프로젝트 화면을 엶, 채팅 수집을 켬) 그 수집이 끝난 뒤에 한 번 더 돈다.
 

@@ -13,6 +13,7 @@ use timeschedule_core::{
     diary::{EntrySummary, SearchHit},
     storage::Task,
 };
+use timeschedule_desktop::preferences::DailyRecordMode;
 
 pub(crate) const EDITOR_SIZE: iced::Size = iced::Size::new(650.0, 560.0);
 
@@ -665,6 +666,14 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         quiet("데이터 저장 위치"),
         text(app.data_dir.display().to_string()).size(14),
         quiet("기존 Tauri 앱과 분리된 네이티브 데이터 폴더입니다."),
+        space().height(10),
+        title("하루 정리 만드는 방식"),
+        daily_mode_choice(app),
+        quiet(match app.preferences.daily_record {
+            DailyRecordMode::Button => "월간 다이어리에서 날짜를 고른 뒤 ‘하루 정리 만들기’를 누를 때만 만듭니다. 모델 사용량은 누를 때만 씁니다.",
+            DailyRecordMode::Auto => "앱을 켤 때와 켜 둔 동안 한 시간마다, 최근 7일 가운데 끝난 날의 하루 정리를 만듭니다. 오늘은 만들지 않습니다. 대화가 바뀌지 않은 날은 모델을 부르지 않습니다.",
+        }),
+        quiet("채팅 자동 수집을 켠 프로젝트의 대화로 만듭니다."),
         title("로컬 일정 MCP"),
         crate::mcp_setup_ui::server_line(&app.mcp_status, app.mcp_endpoint().is_some()),
         row![
@@ -754,6 +763,23 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         .spacing(crate::calendar_ui::SCROLL_GAP)
         .height(Length::Fill)
         .into()
+}
+/// The two ways of making daily records, the chosen one highlighted.
+fn daily_mode_choice(app: &App) -> Element<'_, Message> {
+    let choice = |label: &'static str, mode: DailyRecordMode| {
+        let chosen = app.preferences.daily_record == mode;
+        control(label, Message::SetDailyMode(mode)).style(if chosen {
+            theme::primary
+        } else {
+            theme::secondary
+        })
+    };
+    row![
+        choice("버튼으로 만들기", DailyRecordMode::Button),
+        choice("자동으로 만들기", DailyRecordMode::Auto),
+    ]
+    .spacing(6)
+    .into()
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectChoice {

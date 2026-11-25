@@ -84,6 +84,10 @@ pub struct Failed {
     pub message: String,
     pub usage: Usage,
     pub seconds: f64,
+    /// The CLI was started with the prompt, so the model may have been asked. A
+    /// failure before that (no executable, a temporary folder that could not be made)
+    /// used nothing.
+    pub sent: bool,
 }
 
 impl Failed {
@@ -93,6 +97,7 @@ impl Failed {
             message: message.into(),
             usage: Usage::default(),
             seconds: 0.0,
+            sent: true,
         }
     }
 }
@@ -166,7 +171,8 @@ fn strip_fence(body: &str) -> String {
 pub fn run(prompt: &str, call: &Call) -> Result<Reply, Failed> {
     let started = Instant::now();
     let seen = Arc::new(Mutex::new(Usage::default()));
-    let result = exec(prompt, call, &seen);
+    let sent = std::sync::atomic::AtomicBool::new(false);
+    let result = exec(prompt, call, &seen, &sent);
     let usage = seen.lock().map(|u| u.clone()).unwrap_or_default();
     let seconds = started.elapsed().as_secs_f64();
     match result {
@@ -179,11 +185,17 @@ pub fn run(prompt: &str, call: &Call) -> Result<Reply, Failed> {
             message,
             usage,
             seconds,
+            sent: sent.load(std::sync::atomic::Ordering::Relaxed),
         }),
     }
 }
 
-fn exec(prompt: &str, call: &Call, seen: &Arc<Mutex<Usage>>) -> Result<String, String> {
+fn exec(
+    prompt: &str,
+    call: &Call,
+    seen: &Arc<Mutex<Usage>>,
+    sent: &std::sync::atomic::AtomicBool,
+) -> Result<String, String> {
     let mut cmd = Command::new(executable()?);
     #[cfg(windows)]
     {
@@ -229,7 +241,7 @@ fn exec(prompt: &str, call: &Call, seen: &Arc<Mutex<Usage>>) -> Result<String, S
         }
         cmd.arg("--output-last-message").arg(&answer).arg("-");
         let seen = call.read_usage.then_some(seen);
-        drive(cmd, prompt, call.model, call.timeout, seen)?;
+        drive(cmd, prompt, call.model, call.timeout, seen, sent)?;
         let body = read_answer(&answer, call.answer_limit)?;
         Ok(if call.unfence {
             strip_fence(&body)
@@ -252,6 +264,7 @@ fn drive(
     name: &str,
     timeout: Duration,
     seen: Option<&Arc<Mutex<Usage>>>,
+    sent: &std::sync::atomic::AtomicBool,
 ) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     let mut child = cmd
@@ -264,6 +277,7 @@ fn drive(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| format!("Codex CLI를 시작하지 못했습니다. {e}"))?;
+    sent.store(true, std::sync::atomic::Ordering::Relaxed);
     let mut input = child.stdin.take().expect("piped stdin");
     let bytes = prompt.as_bytes().to_owned();
     let (wrote, written) = mpsc::channel();
@@ -366,6 +380,22 @@ mod tests {
     }
 
     #[test]
+    fn a_program_that_does_not_start_was_sent_nothing() {
+        let sent = std::sync::atomic::AtomicBool::new(false);
+        let missing = Command::new("timeschedule-no-such-program");
+        let result = drive(
+            missing,
+            "prompt",
+            "test",
+            Duration::from_secs(5),
+            None,
+            &sent,
+        );
+        assert!(result.unwrap_err().contains("시작하지 못했습니다"));
+        assert!(!sent.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
     fn usage_is_read_from_the_last_completed_turn() {
         let events = concat!(
             "{\"type\":\"thread.started\"}\n",
@@ -445,7 +475,14 @@ mod tests {
         let started = Instant::now();
         let seen = Arc::new(Mutex::new(Usage::default()));
         let cmd = leaving_a_process_behind();
-        let result = drive(cmd, "prompt", "test", Duration::from_secs(60), Some(&seen));
+        let result = drive(
+            cmd,
+            "prompt",
+            "test",
+            Duration::from_secs(60),
+            Some(&seen),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
         assert_eq!(result, Ok(()));
         let took = started.elapsed();
         // `cmd` itself ends in a fraction of a second, and the output would end with
@@ -461,7 +498,14 @@ mod tests {
     fn a_call_that_reads_no_usage_waits_for_no_pipe() {
         let started = Instant::now();
         let cmd = leaving_a_process_behind();
-        let result = drive(cmd, "prompt", "test", Duration::from_secs(60), None);
+        let result = drive(
+            cmd,
+            "prompt",
+            "test",
+            Duration::from_secs(60),
+            None,
+            &std::sync::atomic::AtomicBool::new(false),
+        );
         assert_eq!(result, Ok(()));
         let took = started.elapsed();
         assert!(took < PIPE_GRACE, "{took:?}");
@@ -486,7 +530,14 @@ mod tests {
         cmd.args(["-n", "30", "127.0.0.1"]);
         let started = Instant::now();
         let seen = Arc::new(Mutex::new(Usage::default()));
-        let result = drive(cmd, "prompt", "test", Duration::from_secs(1), Some(&seen));
+        let result = drive(
+            cmd,
+            "prompt",
+            "test",
+            Duration::from_secs(1),
+            Some(&seen),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
         assert!(result.unwrap_err().contains("초과"));
         let took = started.elapsed();
         assert!(took < Duration::from_secs(10), "{took:?}");

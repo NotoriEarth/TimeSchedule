@@ -400,11 +400,7 @@ impl ChatScan {
 }
 
 pub fn scan_chats(store: &Storage, data_dir: &std::path::Path, reread: bool) -> ChatScan {
-    let claude_home = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("USERPROFILE").map(|p| std::path::PathBuf::from(p).join(".claude"))
-        });
+    let claude_home = claude_home();
     scan_from(store, codex_home(), claude_home.as_deref(), reread, || {
         crate::record_original::originals_vault(data_dir)
     })
@@ -455,6 +451,259 @@ fn scan_from(
         originals,
         daily,
     }
+}
+
+/// A day of a project and the input its record would be made from. The automatic mode
+/// does not ask the model again for an input that failed after asking it.
+pub type DailyInput = (String, chrono::NaiveDate, String);
+
+/// What one daily record job did, over the captured projects.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct DailyMade {
+    /// The days a new record was kept for, one per project and day.
+    pub saved: Vec<chrono::NaiveDate>,
+    /// Days whose record was already made from the same input: no model was asked.
+    pub unchanged: usize,
+    /// Days without dialogue, or of a project with no kept chats: nothing to make.
+    pub empty: usize,
+    /// Days another run was making at the time.
+    pub busy: usize,
+    /// Days left alone because their input failed before.
+    pub skipped: usize,
+    /// Projects whose originals this job could not all keep, by title. None of their
+    /// days was made: the kept originals may be older than the chats.
+    pub unkept: Vec<String>,
+    /// The job stopped before its last day: the way of making changed, or a project's
+    /// capture was turned off.
+    pub stopped: bool,
+    /// Why a day could not be made, one line each.
+    pub failed: Vec<String>,
+    /// The inputs the model was asked about and that failed.
+    pub failed_inputs: Vec<DailyInput>,
+    /// Diary entries the new records became or replaced.
+    pub shown: usize,
+    /// Chat files that could not be read before it was known whose they are.
+    pub unplaced: usize,
+}
+
+/// The finished days the automatic mode looks at: the seven before `today`, oldest
+/// first. Today is still going on, so it is not one of them. `today` is the date in
+/// Korea, as the day transcript counts days.
+pub fn finished_days(today: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
+    (1..=7)
+        .rev()
+        .map(|back| today - chrono::Days::new(back))
+        .collect()
+}
+
+/// How a job asks the model and decides what to leave alone.
+pub struct DailyRun<'a, M, K, G>
+where
+    M: Fn(
+        &std::path::Path,
+        &timeschedule_core::daily_record::DayTranscript,
+    ) -> Result<
+        timeschedule_core::daily_record::record::Outcome,
+        crate::record_cli::DailyError,
+    >,
+    K: Fn(&timeschedule_core::daily_record::DayTranscript) -> String,
+    G: Fn() -> bool,
+{
+    /// Makes the record of a transcript.
+    pub make: M,
+    /// The input a transcript would be sent as (`DailyInput`'s last part).
+    pub key: K,
+    /// Inputs not to send again.
+    pub skip: &'a std::collections::HashSet<DailyInput>,
+    /// Whether the job may go on to its next day.
+    pub keep_going: G,
+}
+
+/// Keeps the newest originals of the captured projects, as the chat scan does.
+pub fn keep_originals(
+    projects: &[timeschedule_core::chat_originals::OriginalsProject],
+    vault: &std::path::Path,
+) -> Result<timeschedule_core::chat_originals::OriginalsReport, String> {
+    let codex = codex_home()?;
+    let claude = claude_home();
+    timeschedule_core::chat_originals::archive(
+        projects,
+        &timeschedule_core::chat_originals::ToolHomes {
+            codex: &codex,
+            claude: claude.as_deref(),
+        },
+        vault,
+    )
+}
+
+/// One daily record job, in order: keep the newest originals of the projects whose
+/// chats are captured, make the record of each of `dates` from them, and show the new
+/// records in the diary. The projects are listed once, so the job keeps and makes the
+/// same ones. A project whose originals were not all kept is left for a later job; a
+/// project with no kept chats and a day without dialogue have nothing to make; a day
+/// whose record was made from the same input is not sent again (`summarize` checks the
+/// fingerprint). Before each day the job checks that it may go on and that the
+/// project's chats are still captured. What was done stays in the result when a later
+/// step fails.
+pub fn daily_job<M, K, G>(
+    store: &Storage,
+    vault: impl FnOnce() -> Result<std::path::PathBuf, String>,
+    keep: impl FnOnce(
+        &[timeschedule_core::chat_originals::OriginalsProject],
+        &std::path::Path,
+    ) -> Result<timeschedule_core::chat_originals::OriginalsReport, String>,
+    dates: &[chrono::NaiveDate],
+    run: DailyRun<'_, M, K, G>,
+) -> Result<DailyMade, String>
+where
+    M: Fn(
+        &std::path::Path,
+        &timeschedule_core::daily_record::DayTranscript,
+    ) -> Result<
+        timeschedule_core::daily_record::record::Outcome,
+        crate::record_cli::DailyError,
+    >,
+    K: Fn(&timeschedule_core::daily_record::DayTranscript) -> String,
+    G: Fn() -> bool,
+{
+    use timeschedule_core::{
+        chat_originals::group_name,
+        daily_record::{day_transcript, record::Outcome},
+    };
+    let all = store.originals_projects()?;
+    let projects: Vec<_> = all.iter().filter(|p| p.capture).collect();
+    let mut made = DailyMade::default();
+    if projects.is_empty() {
+        return Ok(made);
+    }
+    let folders: std::collections::HashMap<String, String> = store
+        .list_projects()?
+        .into_iter()
+        .map(|p| (p.id, p.repo_path))
+        .collect();
+    let vault = vault()?;
+    // Every project is given, captured or not: one that is not still owns its folder.
+    let kept = match keep(&all, &vault) {
+        Ok(kept) => kept,
+        Err(e) => {
+            // Nothing is made from originals that could not be kept; records an
+            // earlier job kept but could not show are still shown.
+            made.failed.push(format!("원문 보관 실패: {e}"));
+            made.unkept = projects.iter().map(|p| p.title.clone()).collect();
+            show(store, &vault, &mut made);
+            return Ok(made);
+        }
+    };
+    made.unplaced = kept.unplaced;
+    'projects: for project in projects {
+        let Some(folder) = folders.get(&project.id) else {
+            continue;
+        };
+        if kept.incomplete.contains(&project.id) {
+            made.unkept.push(project.title.clone());
+            continue;
+        }
+        let originals = vault.join("originals").join(group_name(&project.root));
+        match std::fs::symlink_metadata(&originals) {
+            Ok(_) => {}
+            // Capture is on but no chat was found yet: nothing to make.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                made.empty += dates.len();
+                continue;
+            }
+            Err(e) => {
+                made.failed.push(format!(
+                    "{}: 보관 폴더를 확인하지 못했습니다 ({e})",
+                    project.title
+                ));
+                continue;
+            }
+        }
+        for date in dates {
+            // Still captured, and for the same folder: after a move the records of the
+            // old folder would not be shown.
+            let captured = store.originals_projects().map(|now| {
+                now.iter()
+                    .any(|p| p.capture && p.id == project.id && p.root == project.root)
+            });
+            match captured {
+                Ok(true) if (run.keep_going)() => {}
+                Ok(_) => {
+                    made.stopped = true;
+                    break 'projects;
+                }
+                Err(e) => {
+                    made.failed.push(format!("{}: {e}", project.title));
+                    made.stopped = true;
+                    break 'projects;
+                }
+            }
+            let transcript = match day_transcript(&vault, folder, *date) {
+                Ok(transcript) => transcript,
+                Err(e) => {
+                    made.failed.push(format!("{} {date}: {e}", project.title));
+                    continue;
+                }
+            };
+            if transcript.blocks.is_empty() {
+                // Warnings with no dialogue mean files that could not be read, not a
+                // day without dialogue.
+                match transcript.warnings.first() {
+                    Some(warning) => made.failed.push(format!(
+                        "{} {date}: 원문을 읽지 못했습니다 ({warning})",
+                        project.title
+                    )),
+                    None => made.empty += 1,
+                }
+                continue;
+            }
+            let input = (project.id.clone(), *date, (run.key)(&transcript));
+            if run.skip.contains(&input) {
+                made.skipped += 1;
+                continue;
+            }
+            match (run.make)(&vault, &transcript) {
+                Ok(Outcome::Saved { .. }) => made.saved.push(*date),
+                Ok(Outcome::Unchanged { .. }) => made.unchanged += 1,
+                Ok(Outcome::Busy { .. }) => made.busy += 1,
+                Err(e) => {
+                    made.failed
+                        .push(format!("{} {date}: {}", project.title, e.message));
+                    if e.asked {
+                        made.failed_inputs.push(input);
+                    }
+                }
+            }
+        }
+    }
+    // Also when nothing new was made: a record kept by an earlier job whose diary
+    // step failed is shown now.
+    show(store, &vault, &mut made);
+    Ok(made)
+}
+
+/// Shows the records kept in `vault` in the diary, and says in `made` what came of it.
+fn show(store: &Storage, vault: &std::path::Path, made: &mut DailyMade) {
+    match store.import_daily_records(vault) {
+        Ok(report) => {
+            made.shown = report.added + report.updated;
+            if report.failed > 0 {
+                made.failed.push(format!(
+                    "하루 기록 {}개를 다이어리에 반영하지 못했습니다.",
+                    report.failed
+                ));
+            }
+        }
+        Err(e) => made.failed.push(format!("다이어리 반영 실패: {e}")),
+    }
+}
+
+fn claude_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|p| std::path::PathBuf::from(p).join(".claude"))
+        })
 }
 
 pub fn job<T: Send + 'static, M: Send + 'static>(
@@ -684,6 +933,93 @@ mod tests {
             before,
             "the record itself is untouched"
         );
+    }
+    #[test]
+    fn the_finished_days_are_the_seven_before_today() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 25).unwrap();
+        let days = finished_days(today);
+        assert_eq!(days.len(), 7);
+        assert_eq!(days[0].to_string(), "2026-11-18");
+        assert_eq!(days[6].to_string(), "2026-11-24");
+    }
+    #[test]
+    fn a_daily_job_keeps_first_and_makes_only_what_it_kept_whole() {
+        use timeschedule_core::chat_originals::{group_name, OriginalsReport};
+        let dir = crate::record_inbox::tests::TestDir::new();
+        let repo = dir.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = Storage::open(":memory:").unwrap();
+        let mut project = Form::new(Kind::Project, String::new(), None);
+        project.title = "작업".into();
+        project.repo_path = repo.to_string_lossy().into_owned();
+        project.save(&store).unwrap();
+        let days = finished_days(chrono::NaiveDate::from_ymd_opt(2026, 11, 25).unwrap());
+        let skip = std::collections::HashSet::new();
+        let run = |go: bool| DailyRun {
+            make: |_: &std::path::Path, _: &_| -> Result<_, crate::record_cli::DailyError> {
+                panic!("no model is asked")
+            },
+            key: |_: &_| String::new(),
+            skip: &skip,
+            keep_going: move || go,
+        };
+        let whole = |_: &[_], _: &std::path::Path| Ok(OriginalsReport::default());
+        // No captured project: nothing is looked for, kept or made.
+        let made = daily_job(
+            &store,
+            || panic!("the store was looked for"),
+            |_: &[_], _: &std::path::Path| panic!("originals were kept"),
+            &days,
+            run(true),
+        )
+        .unwrap();
+        assert_eq!(made, DailyMade::default());
+        let id = store.list_projects().unwrap().remove(0).id;
+        store.set_chat_capture(&id, true).unwrap();
+        let vault = dir.0.join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        // Originals not all kept (a failure or a lock): none of its days is made.
+        let incomplete = |_: &[_], _: &std::path::Path| {
+            Ok(OriginalsReport {
+                locked: 1,
+                incomplete: vec![id.clone()],
+                ..Default::default()
+            })
+        };
+        let made = daily_job(&store, || Ok(vault.clone()), incomplete, &days, run(true)).unwrap();
+        assert_eq!(made.unkept, ["작업"]);
+        assert!(made.failed.is_empty() && made.empty == 0);
+        // Kept whole but no chat found yet: nothing to make, and no error.
+        let made = daily_job(&store, || Ok(vault.clone()), whole, &days, run(true)).unwrap();
+        assert_eq!((made.empty, made.failed.len()), (7, 0));
+        // Kept chats whose list cannot be read: each day says why.
+        let key = store.originals_projects().unwrap().remove(0).root;
+        std::fs::create_dir_all(vault.join("originals").join(group_name(&key))).unwrap();
+        let made = daily_job(&store, || Ok(vault.clone()), whole, &days[..2], run(true)).unwrap();
+        assert_eq!(made.failed.len(), 2);
+        assert!(
+            made.failed[0].starts_with("작업 2026-11-18: "),
+            "{:?}",
+            made.failed
+        );
+        assert!(made.failed_inputs.is_empty(), "no model was asked");
+        // A job told to stop makes nothing more.
+        let made = daily_job(&store, || Ok(vault.clone()), whole, &days, run(false)).unwrap();
+        assert!(made.stopped && made.failed.is_empty());
+        // A store or originals that cannot be reached stop the job with the reason.
+        let missing = daily_job(
+            &store,
+            || Err("문서 저장소 없음".into()),
+            whole,
+            &days,
+            run(true),
+        );
+        assert_eq!(missing.unwrap_err(), "문서 저장소 없음");
+        let unkeepable = |_: &[_], _: &std::path::Path| Err("Codex 사용자 폴더 없음".to_string());
+        // Originals that cannot be kept at all: nothing is made, and the job says why.
+        let made = daily_job(&store, || Ok(vault.clone()), unkeepable, &days, run(true)).unwrap();
+        assert_eq!(made.failed, ["원문 보관 실패: Codex 사용자 폴더 없음"]);
+        assert_eq!(made.unkept, ["작업"]);
     }
     #[test]
     fn a_scan_part_that_cannot_start_does_not_hide_the_others() {

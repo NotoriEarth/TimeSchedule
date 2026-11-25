@@ -33,6 +33,11 @@ pub(super) struct Discovery {
     pub found: Vec<Found>,
     /// Folders and headers that could not be read.
     pub failed: usize,
+    /// Projects, by index, some of whose files could not be read: what is found of
+    /// them is not all they have.
+    pub incomplete: Vec<usize>,
+    /// The part of `failed` that is known to be of a project in `incomplete`.
+    pub placed: usize,
 }
 
 struct Header {
@@ -74,6 +79,17 @@ fn owner(projects: &[OriginalsProject], cwd: &str) -> Option<usize> {
 /// with `follow_links`, where the caller lists the target and goes no deeper through
 /// links. Anywhere else a link counts as failed, so what it hides is not skipped quietly.
 fn children(dir: &Path, follow_links: bool, failed: &mut usize) -> Vec<(PathBuf, String, bool)> {
+    children_noting(dir, follow_links, failed, &mut Vec::new())
+}
+
+/// `children`, and the names counted as failed in `skipped`, so a caller that later
+/// learns whose a name is can say that project lost it.
+fn children_noting(
+    dir: &Path,
+    follow_links: bool,
+    failed: &mut usize,
+    skipped: &mut Vec<String>,
+) -> Vec<(PathBuf, String, bool)> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return vec![],
@@ -90,6 +106,7 @@ fn children(dir: &Path, follow_links: bool, failed: &mut usize) -> Vec<(PathBuf,
         };
         let Ok(kind) = entry.file_type() else {
             *failed += 1;
+            skipped.push(entry.file_name().to_string_lossy().into_owned());
             continue;
         };
         let is_dir = if kind.is_symlink() {
@@ -97,6 +114,7 @@ fn children(dir: &Path, follow_links: bool, failed: &mut usize) -> Vec<(PathBuf,
                 Ok(target) if follow_links => target.is_dir(),
                 _ => {
                     *failed += 1;
+                    skipped.push(entry.file_name().to_string_lossy().into_owned());
                     continue;
                 }
             }
@@ -242,7 +260,8 @@ fn claude(projects: &[OriginalsProject], home: &Path, out: &mut Discovery) {
         if !is_dir {
             continue;
         }
-        let entries = children(&dir, false, &mut out.failed);
+        let mut skipped = Vec::new();
+        let entries = children_noting(&dir, false, &mut out.failed, &mut skipped);
         for (path, name, is_dir) in &entries {
             let Some(stem) = name.strip_suffix(".jsonl").filter(|_| !is_dir) else {
                 continue;
@@ -263,9 +282,14 @@ fn claude(projects: &[OriginalsProject], home: &Path, out: &mut Discovery) {
             };
             // Subagent transcripts and tool results sit in a folder named like the session.
             let mut side = Vec::new();
-            if let Some((folder, ..)) = entries.iter().find(|(_, n, d)| *d && n == stem) {
-                let relative = format!("{dir_name}/{stem}/");
+            // Windows names do not tell case apart.
+            let named = |n: &str| n.eq_ignore_ascii_case(stem);
+            if let Some((folder, folder_name, _)) = entries.iter().find(|(_, n, d)| *d && named(n))
+            {
+                // Kept under the folder's own name, as the source spells it.
+                let relative = format!("{dir_name}/{folder_name}/");
                 let all: fn(&str) -> bool = |_| true;
+                let before = out.failed;
                 walk(
                     folder,
                     &relative,
@@ -275,6 +299,15 @@ fn claude(projects: &[OriginalsProject], home: &Path, out: &mut Discovery) {
                     &mut side,
                     &mut out.failed,
                 );
+                if out.failed > before {
+                    out.incomplete.push(project);
+                    out.placed += out.failed - before;
+                }
+            } else if skipped.iter().any(|n| named(n)) {
+                // The listing counted the session's folder as failed (a link, or a name
+                // whose kind could not be read): this project lost its files.
+                out.incomplete.push(project);
+                out.placed += 1;
             }
             let mut push = |path: PathBuf, relative: String| {
                 out.found.push(Found {
