@@ -143,14 +143,28 @@ fn perform(
                 serde_json::json!({"outcome":if report.failed>0 {"attention"}else{"scanned"},"report":report}),
             );
         }
-        let scan = crate::worker::scan_chats(&store, &dir, true)?;
-        let originals = match &scan.originals {
-            Ok(report) => serde_json::json!(report),
-            Err(message) => serde_json::json!({"error": message}),
+        let scan = crate::worker::scan_chats(&store, &dir, true);
+        // A part that could not start says why in place of its counts.
+        fn part<T: serde::Serialize>(result: &Result<T, String>) -> serde_json::Value {
+            match result {
+                Ok(report) => serde_json::json!(report),
+                Err(message) => serde_json::json!({"error": message}),
+            }
+        }
+        // The excerpt scan that could not start at all is the error it was before this
+        // command reported each part: exit code 1, with the other parts' results kept.
+        let outcome = match (&scan.excerpts, scan.needs_attention()) {
+            (Err(_), _) => "error",
+            (_, true) => "attention",
+            _ => "scanned",
         };
-        return Ok(
-            serde_json::json!({"outcome":if scan.needs_attention() {"attention"}else{"scanned"},"report":scan.excerpts,"originals":originals}),
-        );
+        return Ok(serde_json::json!({
+            "outcome": outcome,
+            "message": scan.excerpts.as_ref().err(),
+            "report": part(&scan.excerpts),
+            "originals": part(&scan.originals),
+            "daily": part(&scan.daily),
+        }));
     }
     let report = record_inbox::drain(&dir, &store)?;
     if let Some(input) = input {

@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 const MAX_TITLE_LENGTH: usize = 200;
 const MAX_TEXT_LENGTH: usize = 20_000;
 
@@ -607,6 +607,9 @@ pub(crate) fn migrate_to(connection: &mut Connection, target: i64) -> Result<(),
     }
     if version < 15 && target >= 15 {
         transaction.execute_batch("ALTER TABLE codex_chat_projects ADD COLUMN include_claude INTEGER NOT NULL DEFAULT 0; PRAGMA user_version=15;").map_err(database_error)?;
+    }
+    if version < 16 && target >= 16 {
+        crate::daily_record::diary::migrate(&transaction)?;
     }
     transaction.commit().map_err(database_error)
 }

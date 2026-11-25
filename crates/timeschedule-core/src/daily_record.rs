@@ -32,6 +32,7 @@ use std::{
 
 mod claude;
 mod codex;
+pub mod diary;
 pub mod record;
 
 /// Korea Standard Time. Days are split at its midnight.
