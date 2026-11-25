@@ -3,10 +3,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// The data folder, made if it is missing.
 pub fn resolve_data_dir(
     override_path: Option<PathBuf>,
     experimental: bool,
 ) -> Result<PathBuf, String> {
+    let path = data_dir(override_path, experimental)?;
+    fs::create_dir_all(&path).map_err(|e| format!("데이터 폴더를 만들지 못했습니다: {e}"))?;
+    fs::canonicalize(path).map_err(|e| e.to_string())
+}
+
+/// Where the data folder is. Nothing is made, so a command that only reads can use it.
+pub fn data_dir(override_path: Option<PathBuf>, experimental: bool) -> Result<PathBuf, String> {
     let path = override_path
         .or_else(|| std::env::var_os("TIMESCHEDULE_DATA_DIR").map(PathBuf::from))
         .unwrap_or_else(|| {
@@ -22,8 +30,7 @@ pub fn resolve_data_dir(
     if path.as_os_str().is_empty() {
         return Err("데이터 폴더 경로가 비어 있습니다.".into());
     }
-    fs::create_dir_all(&path).map_err(|e| format!("데이터 폴더를 만들지 못했습니다: {e}"))?;
-    fs::canonicalize(path).map_err(|e| e.to_string())
+    Ok(path)
 }
 
 /// Keep this guard alive until all storage workers have stopped. On Windows,
