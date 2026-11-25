@@ -55,15 +55,14 @@ pub struct DiaryReport {
     pub failed: usize,
 }
 
-/// The diary text of a record: the record itself and where it came from.
+/// The diary text of a record. Its revision, model and time stay in the record file.
 pub fn entry_body(record: &DailyRecord) -> String {
-    format!(
-        "{}\n하루 기록 판 {} · {} · {}\n",
-        record.render(),
-        record.revision,
-        record.model,
-        record.generated_at
-    )
+    let text = record.render();
+    if text.is_empty() {
+        "이날 하루 기록에 남길 내용이 없었습니다.\n".into()
+    } else {
+        text
+    }
 }
 
 /// The diary's limit for an entry's text.
@@ -224,22 +223,24 @@ impl Storage {
                 .map_err(database_error)?;
                 Shown::Added
             }
-            Some((_, seen, kept, _)) if revision == seen && &kept == fingerprint => {
-                return Ok(Shown::Unchanged);
+            Some((entry, seen, kept, last_shown)) if revision == seen && &kept == fingerprint => {
+                // The same record. A newer program may show it differently: the entry
+                // takes the new text under the same rule as a newer record. An entry
+                // the owner changed keeps its text, and nothing is new for the scan.
+                if last_shown == body || !replace(&tx, &entry, project, date, &last_shown, &body)? {
+                    return Ok(Shown::Unchanged);
+                }
+                tx.execute(
+                    "UPDATE daily_record_entries SET shown_body=?4
+                     WHERE project_id=?1 AND repo_key=?2 AND date=?3",
+                    params![project.id, project.root, date, body],
+                )
+                .map_err(database_error)?;
+                Shown::Updated
             }
             Some((_, seen, ..)) if revision <= seen => return Ok(Shown::Older),
             Some((entry, _, _, last_shown)) => {
-                // Only an entry that is where the program put it, with the text the
-                // program put there, gets the new record. An entry the owner edited or
-                // moved matches no row, and neither does a deleted one.
-                let replaced = tx
-                    .execute(
-                        "UPDATE diary_entries SET body=?5, source_body=?5, updated_at=?6
-                         WHERE id=?1 AND project_id=?2 AND date=?3 AND body=?4",
-                        params![entry, project.id, date, last_shown, body, timestamp()],
-                    )
-                    .map_err(database_error)?
-                    > 0;
+                let replaced = replace(&tx, &entry, project, date, &last_shown, &body)?;
                 // The record was seen either way, so the next scan has nothing new.
                 tx.execute(
                     "UPDATE daily_record_entries SET revision=?4, fingerprint=?5, shown_body=?6
@@ -264,6 +265,27 @@ impl Storage {
         tx.commit().map_err(database_error)?;
         Ok(shown)
     }
+}
+
+/// Puts `body` in the entry only while it is where the program put it, with the text
+/// the program last put there. An entry the owner edited or moved matches no row, and
+/// neither does a deleted one.
+fn replace(
+    tx: &Connection,
+    entry: &str,
+    project: &OriginalsProject,
+    date: &str,
+    last_shown: &str,
+    body: &str,
+) -> Result<bool, String> {
+    let rows = tx
+        .execute(
+            "UPDATE diary_entries SET body=?5, source_body=?5, updated_at=?6
+             WHERE id=?1 AND project_id=?2 AND date=?3 AND body=?4",
+            params![entry, project.id, date, last_shown, body, timestamp()],
+        )
+        .map_err(database_error)?;
+    Ok(rows > 0)
 }
 
 #[cfg(test)]

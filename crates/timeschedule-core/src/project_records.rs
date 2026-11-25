@@ -207,6 +207,38 @@ pub(crate) fn repo_key(value: &str) -> String {
     }
 }
 
+/// The line after which a record's text is for the kept document, not the diary: test
+/// runs, verification and commits. `scripts/development-diary.mjs` writes it as its
+/// own paragraph (`DIARY_END`). The received record keeps the whole text.
+pub const DIARY_END: &str = "<!-- 다이어리 본문은 여기까지 -->";
+
+/// What the diary shows of a record's text: what comes before the first paragraph
+/// that is `DIARY_END` alone, or all of it when there is none, as in records made
+/// before it. The line is a boundary wherever it stands alone, also inside a code
+/// block: `finish` refuses a summary or detail that holds it, so in its records the
+/// first such line is its own. Quoted inside a sentence it ends nothing.
+fn diary_text(text: &str) -> &str {
+    let mut at = 0;
+    let lines: Vec<(usize, &str)> = text
+        .split_inclusive('\n')
+        .map(|line| {
+            let start = at;
+            at += line.len();
+            (start, line.trim_end_matches(['\n', '\r']))
+        })
+        .collect();
+    let blank = |i: Option<usize>| {
+        i.and_then(|i| lines.get(i))
+            .is_none_or(|l| l.1.trim().is_empty())
+    };
+    for (i, (start, line)) in lines.iter().enumerate() {
+        if line.trim() == DIARY_END && blank(i.checked_sub(1)) && blank(Some(i + 1)) {
+            return text[..*start].trim();
+        }
+    }
+    text.trim()
+}
+
 impl Storage {
     pub fn apply_project_record(&self, record: &ProjectRecord) -> Result<RecordReceipt, String> {
         record.validate()?;
@@ -297,7 +329,7 @@ impl Storage {
         } else {
             &record.summary
         };
-        let body = format!("{}\n\n상태: {}", text.trim(), record.status_label()?);
+        let body = format!("{}\n\n상태: {}", diary_text(text), record.status_label()?);
         let snapshot = ManagedSnapshot {
             project_id: Some(project_id),
             date: record.date.clone(),
@@ -491,6 +523,62 @@ mod tests {
         // Deleting the record removes its evidence with it.
         store.delete_entry(&id).unwrap();
         assert_eq!(store.entry_timeline(&id).unwrap(), EntryTimeline::default());
+    }
+
+    #[test]
+    fn the_diary_shows_the_text_above_the_end_line_and_the_record_keeps_all_of_it() {
+        let store = Storage::open(":memory:").unwrap();
+        let mut input = timed();
+        input.detail = format!(
+            "요약 문단\n\n설명 문단\n\n{DIARY_END}\n\n커밋에서 재실행 · {sha}\n종료 코드 0\n\n작업 커밋 · {sha}",
+            sha = "c".repeat(40)
+        );
+        let id = store
+            .apply_project_record(&input)
+            .unwrap()
+            .entry_id
+            .unwrap();
+        assert_eq!(
+            store.get_entry(&id).unwrap().body,
+            "요약 문단\n\n설명 문단\n\n상태: 확인한 범위 검증 완료"
+        );
+        // The received record keeps the whole text, and the same record again is
+        // unchanged.
+        let kept: String = store
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT payload FROM project_record_receipts WHERE work_id=?1",
+                [&input.work_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let kept: ProjectRecord = serde_json::from_str(&kept).unwrap();
+        assert_eq!(kept.detail, input.detail);
+        assert_eq!(store.entry_timeline(&id).unwrap().commits, input.commits);
+        assert_eq!(
+            store.apply_project_record(&input).unwrap().outcome,
+            "unchanged"
+        );
+        // A record made before the end line existed shows all of its text, and the
+        // line quoted in a sentence, or not standing alone, is text like any other.
+        let older = timed();
+        assert_eq!(diary_text(&older.detail), older.detail);
+        let quoted = format!("`{DIARY_END}` 뒤에 검증을 둔다.\n\n설명\n\n```\n{DIARY_END}\n```");
+        assert_eq!(diary_text(&quoted), quoted);
+        // Standing alone it is the boundary even inside a code block.
+        let fenced = format!("앞\n\n```\n\n{DIARY_END}\n\n```");
+        assert_eq!(diary_text(&fenced), "앞\n\n```");
+        assert_eq!(diary_text(&format!("{DIARY_END}\n\n뒤")), "");
+        assert_eq!(diary_text(&format!("앞\n\n\n{DIARY_END}")), "앞");
+        assert_eq!(
+            diary_text(&format!("앞\r\n\r\n{DIARY_END}\r\n\r\n뒤")),
+            "앞"
+        );
+        assert_eq!(
+            diary_text(&format!("앞\n{DIARY_END}\n뒤")),
+            format!("앞\n{DIARY_END}\n뒤")
+        );
     }
 
     #[test]

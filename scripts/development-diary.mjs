@@ -153,6 +153,8 @@ function repeatsEarlierNote(ctx, task, ownedHead, evidenceHead, note) {
 }
 
 const COMPLETING = ['verified', 'completed', 'merged'];
+// The same line as DIARY_END in crates/timeschedule-core/src/project_records.rs.
+export const DIARY_END = '<!-- 다이어리 본문은 여기까지 -->';
 const STATUSES = ['in_progress', 'verification_pending', ...COMPLETING];
 // What an earlier delivery of this work says about its first completion: the
 // moment, or that it completed before completion times were saved (unknown).
@@ -225,6 +227,8 @@ export async function finish(ctx, id, file) {
   const kind = note.kind ?? 'development';
   if (!['development', 'design', 'troubleshooting'].includes(kind)) throw new Error('경험 종류는 development, design 또는 troubleshooting입니다.');
   const detail = note.detail ? requiredText(note.detail, 'detail') : '';
+  // The app ends the diary text at the first such line, so only finish writes it.
+  if (paragraph.includes(DIARY_END) || detail.includes(DIARY_END)) throw new Error(`요약(summary)과 설명(detail)에는 다이어리 경계 줄 ${DIARY_END}을 쓸 수 없습니다.`);
   const files = note.tests ?? [];
   if (!Array.isArray(files)) throw new Error('tests에는 실행할 파일 목록을 지정하세요.');
   if (file) {
@@ -235,6 +239,9 @@ export async function finish(ctx, id, file) {
   }
   const blocks = [paragraph];
   if (detail) blocks.push(detail);
+  // The diary shows the text above this line. The runs, verification and
+  // commits below stay in the kept document and the delivered record.
+  blocks.push(DIARY_END);
   const checks = path.join(directory, 'checks');
   if (fs.existsSync(checks)) for (const name of fs.readdirSync(checks).filter(n => n.endsWith('.json')).sort()) {
     const receipt = read(path.join(checks, name));

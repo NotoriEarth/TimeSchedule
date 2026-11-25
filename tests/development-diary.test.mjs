@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { audit, begin, check, context, finish } from '../scripts/development-diary.mjs';
+import { audit, begin, check, context, DIARY_END, finish } from '../scripts/development-diary.mjs';
 import { git, gitEvidence, inspectBranch } from '../scripts/development-diary-git.mjs';
 import { replayTests } from '../scripts/development-diary-tests.mjs';
 
@@ -61,6 +61,22 @@ test('finish delivers the selected experience kind and refuses generated portfol
   const result = await finish(ctx, workId, draft('원문을 먼저 저장한다.', { kind: 'design' }));
   assert.equal(result.phase, 'local_complete');
   assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'delivery.json'))).source.kind, 'design');
+});
+
+test('the diary shows the summary and detail while the runs and commits stay in the kept document', async t => {
+  const { ctx, workId, directory, commit, draft } = recoveryFixture(t);
+  const sha = commit('src/feature.mjs', 'export const shown = true;', workId);
+  // Only finish writes the end line: a note that holds it would cut the diary short.
+  await assert.rejects(finish(ctx, workId, draft('요약 문단', { detail: '예시\n\n' + DIARY_END + '\n\n뒤' })), /다이어리 경계 줄/);
+  assert.equal(fs.existsSync(path.join(directory, 'delivery.json')), false);
+  await finish(ctx, workId, draft('요약 문단', { detail: '설명 문단', verification: '검사 문단' }));
+  const { source } = JSON.parse(fs.readFileSync(path.join(directory, 'delivery.json')));
+  // The app shows the text above the end line; the record keeps the rest.
+  const [shown, kept] = source.detailedMarkdown.split('\n\n' + DIARY_END + '\n\n');
+  assert.equal(shown, '요약 문단\n\n설명 문단');
+  assert.ok(kept.includes('검사 문단') && kept.includes('작업 커밋 · ' + sha));
+  const app = fs.readFileSync(new URL('../crates/timeschedule-core/src/project_records.rs', import.meta.url), 'utf8');
+  assert.ok(app.includes(`pub const DIARY_END: &str = "${DIARY_END}";`), 'the app looks for the same line');
 });
 
 test('a branch reuses its ID, including from a linked worktree', t => {

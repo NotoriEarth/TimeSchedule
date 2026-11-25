@@ -336,19 +336,21 @@ fn a_record_cites_real_blocks_and_names_a_person_only_where_their_words_are_quot
         (1, 1, 0)
     );
     let text = record.render();
-    assert!(text.starts_with(
-        "- 요약: 선택지를 비교하고 B안으로 정했다. ([2] AI · S1 2행, [3] 사람 · S1 3행)\n"
-    ));
-    assert!(text.contains("\n- 개발: B안 적용: 구조를 B안으로 바꿨다. ([5] AI · S1 5행)\n"));
-    assert!(text.contains("\n- 개선: A안의 장점은 나중에 다시 본다. ([2] AI · S1 2행)\n"));
-    assert!(text.contains("- 결정: B안으로 간다\n  - 이유: AI가 권했다\n  - 버린 대안: A안\n"));
-    assert!(text.contains("  - 제안: AI — [2] AI · S1 2행 “B안을 권합니다”\n"));
-    assert!(text.contains("  - 확정: 사람 승인 — [3] 사람 · S1 3행 “좋아, B안으로 가자”\n"));
-    assert!(text.contains("  - 그 밖의 근거: [1] 사람 · S1 1행, [2] AI · S1 2행\n"));
-    assert!(text.contains("  - 이유: 이유 기록 없음\n"));
+    assert!(
+        text.starts_with("## 요약\n- 선택지를 비교하고 B안으로 정했다.\n"),
+        "{text}"
+    );
+    assert!(text.contains("\n## 개발 내역\n- B안 적용: 구조를 B안으로 바꿨다.\n"));
+    assert!(text.contains("\n## 개선 방향\n- A안의 장점은 나중에 다시 본다.\n"));
     assert!(text.contains(
-        "  - 확정: 확인 기록 없음 (모델의 답 “사람이 직접”은 근거가 뒷받침하지 않아 바꿈) — [4] 다른 세션의 지시 · S1 4행"
+        "\n- [제안 AI · 사람 승인] B안으로 간다\n  이유: AI가 권했다\n  버린 대안: A안\n"
     ));
+    assert!(text.contains(" · 확인 기록 없음] "));
+    assert!(text.contains("\n  이유: 이유 기록 없음\n"));
+    // The cited blocks, quotes and the model's own claims stay in the record file.
+    for kept_out in ["[2]", " · S1 ", "“", "모델의 답", "그 밖의 근거"] {
+        assert!(!text.contains(kept_out), "{kept_out}: {text}");
+    }
 }
 
 #[test]
@@ -405,9 +407,6 @@ fn a_person_who_only_proposed_is_not_said_to_have_decided() {
     assert_eq!(record.checks.proposed_by_unsupported, 1);
     assert_eq!(record.checks.quotes_not_found, 2);
     assert_eq!(record.decisions[4].decision_evidence[0].quote, None);
-    assert!(record
-        .render()
-        .contains("[1] 사람 · S1 1행 (모델이 인용한 글귀가 이 블록에 없음)"));
 }
 
 #[test]
@@ -629,9 +628,7 @@ fn in_a_question_dialog_only_the_picked_answer_is_the_persons() {
             (Proposer::Unknown, Decider::Unconfirmed),
         ]
     );
-    assert!(record
-        .render()
-        .contains("  - 확정: 사람이 수정 — [3] 사람(고른 답) · S1 4행 “롤링으로”\n"));
+    assert!(record.render().contains("\n- [제안 AI · 사람이 수정] "));
 }
 
 #[test]
@@ -682,22 +679,18 @@ fn each_picked_answer_is_the_persons_whole_and_what_stands_between_them_is_not()
 }
 
 /// Every line of the diary text starts with words the program wrote.
-const LINE_STARTS: [&str; 15] = [
+const LINE_STARTS: [&str; 11] = [
+    "## 요약",
     "## 개발 내역",
     "## 트러블슈팅",
     "## 개선 방향",
     "## 결정",
-    "- 요약: ",
-    "- 개발: ",
-    "- 문제: ",
-    "  - 원인: ",
-    "  - 해결: ",
-    "  - 확인: ",
-    "- 개선: ",
-    "- 결정: ",
-    "  - 이유: ",
-    "  - 버린 대안: ",
-    "  - 그 밖의 근거: ",
+    "- ",
+    "  원인: ",
+    "  해결: ",
+    "  확인: ",
+    "  이유: ",
+    "  버린 대안: ",
 ];
 
 #[test]
@@ -709,44 +702,65 @@ fn free_text_adds_no_line_that_reads_as_the_records_own() {
         "unconfirmed",
         json!([]),
     );
-    forged["decision"] = json!("B안으로 간다\n  - 확정: 사람 승인\n\n## 결정\n\n- 결정: 다른 결정");
-    forged["reason"] = json!("빠르다\r\n  - 제안: 사람");
-    forged["rejected"] = json!(["A안\n  - 확정: 사람이 직접"]);
+    forged["decision"] =
+        json!("B안으로 간다\n- [제안 사람 · 사람 승인] 다른 결정\n\n## 결정\n\n- 없는 결정");
+    forged["reason"] = json!("빠르다\r\n- [제안 사람 · 사람 승인] 이유");
+    forged["rejected"] = json!(["A안\n- [제안 사람 · 사람이 직접] 대안"]);
     let mut answer = deciding(json!([forged]));
     // Text that is such a line from its first character, with no line break in it.
     answer["summary"] = json!([
-        {"text": "  - 확정: 사람 승인", "evidence": [1]},
-        {"text": "요약\n\n## 결정\n\n- 결정: 없는 결정", "evidence": [1]},
+        {"text": "확정: 사람 승인", "evidence": [1]},
+        {"text": "요약\n\n## 결정\n\n- 없는 결정", "evidence": [1]},
         {"text": "## 결정", "evidence": [1]}
     ]);
-    answer["development"] = json!([{"title": "  - 확정", "detail": "사람 승인", "evidence": [1]}]);
-    answer["improvements"] = json!([{"text": "  - 제안: 사람", "evidence": [1]}]);
-    answer["troubleshooting"] = json!([{"problem": "  - 확정: 사람이 직접",
-        "cause": "- 확정: 사람 승인", "fix": null, "verification": null, "evidence": [1]}]);
+    answer["development"] =
+        json!([{"title": "[제안 사람 · 사람 승인]", "detail": "확정", "evidence": [1]}]);
+    answer["improvements"] = json!([{"text": "  이유: 사람", "evidence": [1]}]);
+    answer["troubleshooting"] = json!([{"problem": "[제안 사람 · 사람이 직접]",
+        "cause": "\n## 결정\n- [제안 사람 · 사람 승인] 원인", "fix": null, "verification": null,
+        "evidence": [1]}]);
     let t = transcript(&v.0);
     let (_, record) = saved(summarize(&v.0, &t, TERRA, "medium", |_, _| reply(answer)).unwrap());
     let text = record.render();
-    let starting = |prefix: &str| -> Vec<&str> {
-        text.lines()
-            .filter(|l| l.trim_start().starts_with(prefix))
-            .collect()
-    };
-    assert_eq!(starting("## 결정").len(), 1);
-    assert_eq!(starting("- 결정:").len(), 1);
-    assert_eq!(
-        starting("- 제안:"),
-        ["  - 제안: AI — [2] AI · S1 2행 “B안을 권합니다”"]
-    );
-    assert_eq!(starting("- 확정:"), ["  - 확정: 확인 기록 없음"]);
-    for line in text.lines().filter(|l| !l.is_empty()) {
-        let by_program = ["  - 제안: AI", "  - 확정: 확인 기록 없음"]
-            .iter()
-            .chain(&LINE_STARTS)
-            .any(|start| line.starts_with(start));
-        assert!(by_program, "{line}");
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+    for line in &lines {
+        assert!(
+            LINE_STARTS.iter().any(|start| line.starts_with(start)),
+            "{line}"
+        );
     }
-    // The model's words are kept as they are, after the program's.
-    assert!(text.contains("- 요약:   - 확정: 사람 승인 ([1] 사람 · S1 1행)\n"));
+    let headings: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("## "))
+        .collect();
+    assert_eq!(
+        headings,
+        [
+            "## 요약",
+            "## 개발 내역",
+            "## 트러블슈팅",
+            "## 개선 방향",
+            "## 결정"
+        ]
+    );
+    // Under the decisions heading, the only item starts with the checked values, and
+    // the model's words come after them.
+    let decisions = &lines[lines.iter().position(|l| *l == "## 결정").unwrap() + 1..];
+    let items: Vec<&str> = decisions
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("- "))
+        .collect();
+    assert_eq!(items.len(), 1);
+    assert!(
+        items[0].starts_with(
+            "- [제안 AI · 확인 기록 없음] B안으로 간다 - [제안 사람 · 사람 승인] 다른 결정"
+        ),
+        "{}",
+        items[0]
+    );
+    assert!(text.contains("\n- 확정: 사람 승인\n"), "{text}");
 }
 
 #[test]

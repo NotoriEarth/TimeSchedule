@@ -136,9 +136,8 @@ fn a_record_becomes_one_diary_entry_and_a_newer_one_replaces_its_text() {
         (entries[0].kind.as_str(), entries[0].title.as_str()),
         ("development", "하루 정리 · 2026-11-20")
     );
-    let body = &entries[0].body;
-    assert!(body.contains("- 요약: 첫 판의 요약"), "{body}");
-    assert!(body.contains("하루 기록 판 1 · gpt-6.1-terra"), "{body}");
+    // Only what a person reads: the revision, model and time stay in the file.
+    assert_eq!(entries[0].body, "## 요약\n- 첫 판의 요약\n");
     // Nothing new: nothing changes.
     assert_eq!(f.scan().unchanged, 1);
     // A newer record replaces the text of an entry nobody edited.
@@ -154,6 +153,42 @@ fn a_record_becomes_one_diary_entry_and_a_newer_one_replaces_its_text() {
     let entries = f.shown("2026-11-20");
     assert_eq!(entries[0].title, "내가 붙인 제목");
     assert!(entries[0].body.contains("셋째 판의 요약"));
+}
+
+/// Makes the entry and its receipt look as an older program left them.
+fn shown_by_an_older_program(f: &Fixture, id: &str, text: &str) {
+    let c = f.store.connection().unwrap();
+    c.execute(
+        "UPDATE diary_entries SET body=?2, source_body=?2 WHERE id=?1",
+        params![id, text],
+    )
+    .unwrap();
+    c.execute("UPDATE daily_record_entries SET shown_body=?1", [text])
+        .unwrap();
+}
+
+#[test]
+fn the_same_record_shown_another_way_takes_the_new_text_unless_the_owner_changed_it() {
+    let f = setup();
+    f.write("2026-11-20", 1, "첫 판의 요약");
+    f.scan();
+    let id = f.shown("2026-11-20").remove(0).id;
+    let old = "- 요약: 첫 판의 요약 ([1] 사람 · S1 3행)\n하루 기록 판 1 · gpt-6.1-terra · …\n";
+    shown_by_an_older_program(&f, &id, old);
+    assert_eq!(f.scan().updated, 1);
+    assert_eq!(
+        f.store.get_entry(&id).unwrap().body,
+        "## 요약\n- 첫 판의 요약\n"
+    );
+    assert_eq!(f.scan().unchanged, 1);
+    // The owner edited the old text: it stays, and the scan has nothing new each time.
+    shown_by_an_older_program(&f, &id, old);
+    f.edit(&id, |e| e.body = "직접 고친 글".into());
+    for _ in 0..2 {
+        let report = f.scan();
+        assert_eq!((report.unchanged, report.updated, report.kept), (1, 0, 0));
+    }
+    assert_eq!(f.store.get_entry(&id).unwrap().body, "직접 고친 글");
 }
 
 #[test]
