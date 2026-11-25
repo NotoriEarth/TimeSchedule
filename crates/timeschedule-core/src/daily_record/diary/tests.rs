@@ -50,6 +50,8 @@ fn setup() -> Fixture {
     }
 }
 
+/// A record file of schema 1, as made before prompt version 4: the app still shows
+/// its `summary` sentences and `improvements`.
 fn record(project: &str, key: &str, date: &str, revision: u32, summary: &str) -> String {
     json!({
         "schemaVersion": 1,
@@ -137,7 +139,7 @@ fn a_record_becomes_one_diary_entry_and_a_newer_one_replaces_its_text() {
         ("development", "하루 정리 · 2026-11-20")
     );
     // Only what a person reads: the revision, model and time stay in the file.
-    assert_eq!(entries[0].body, "## 요약\n- 첫 판의 요약\n");
+    assert_eq!(entries[0].body, "## 오늘 한 일\n- 첫 판의 요약\n");
     // Nothing new: nothing changes.
     assert_eq!(f.scan().unchanged, 1);
     // A newer record replaces the text of an entry nobody edited.
@@ -178,7 +180,7 @@ fn the_same_record_shown_another_way_takes_the_new_text_unless_the_owner_changed
     assert_eq!(f.scan().updated, 1);
     assert_eq!(
         f.store.get_entry(&id).unwrap().body,
-        "## 요약\n- 첫 판의 요약\n"
+        "## 오늘 한 일\n- 첫 판의 요약\n"
     );
     assert_eq!(f.scan().unchanged, 1);
     // The owner edited the old text: it stays, and the scan has nothing new each time.
@@ -189,6 +191,22 @@ fn the_same_record_shown_another_way_takes_the_new_text_unless_the_owner_changed
         assert_eq!((report.unchanged, report.updated, report.kept), (1, 0, 0));
     }
     assert_eq!(f.store.get_entry(&id).unwrap().body, "직접 고친 글");
+}
+
+#[test]
+fn a_record_of_schema_1_shows_its_sentences_and_improvements_under_the_new_headings() {
+    let f = setup();
+    let mut old: serde_json::Value =
+        serde_json::from_str(&record(&f.project, &f.key, "2026-11-20", 1, "첫 문장")).unwrap();
+    old["summary"] =
+        json!([{"text": "첫 문장", "evidence": []}, {"text": "둘째 문장", "evidence": []}]);
+    old["improvements"] = json!([{"text": "나중에 할 개선", "evidence": []}]);
+    fs::write(f.records(&f.key).join("2026-11-20.json"), old.to_string()).unwrap();
+    assert_eq!(f.scan().added, 1);
+    assert_eq!(
+        f.shown("2026-11-20")[0].body,
+        "## 오늘 한 일\n- 첫 문장\n- 둘째 문장\n\n## 남은 일\n- 나중에 할 개선\n"
+    );
 }
 
 #[test]

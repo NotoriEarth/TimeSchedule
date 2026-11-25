@@ -187,22 +187,22 @@ fn decision(proposed_by: &str, proposal: Value, decided_by: &str, decided: Value
 
 /// An answer with these decisions and nothing else.
 fn deciding(decisions: Value) -> Value {
-    json!({"summary": [], "development": [], "troubleshooting": [], "improvements": [],
-        "decisions": decisions})
+    json!({"overview": {"text": "하루", "evidence": [1]}, "development": [],
+        "troubleshooting": [], "nextSteps": [], "decisions": decisions})
 }
 
 fn answer() -> Value {
     json!({
-        "summary": [
-            {"text": "선택지를 비교하고 B안으로 정했다.", "evidence": [2, 3]},
-            {"text": "근거 없는 문장.", "evidence": []}
-        ],
+        "overview": {"text": "선택지를 비교하고 B안으로 정했다.", "evidence": [2, 3]},
         "development": [
             {"title": "B안 적용", "detail": "구조를 B안으로 바꿨다.", "evidence": [5]},
             {"title": "근거 없는 항목", "detail": "인용이 없다.", "evidence": []}
         ],
         "troubleshooting": [],
-        "improvements": [{"text": "A안의 장점은 나중에 다시 본다.", "evidence": [2]}],
+        "nextSteps": [
+            {"text": "A안의 장점은 나중에 다시 본다.", "evidence": [2]},
+            {"text": "근거 없는 남은 일.", "evidence": []}
+        ],
         "decisions": [
             {"decision": "B안으로 간다", "reason": "AI가 권했다", "rejected": ["A안"],
              "proposedBy": "ai", "proposalEvidence": [quote(2, "B안을 권합니다")],
@@ -293,9 +293,11 @@ fn a_record_cites_real_blocks_and_names_a_person_only_where_their_words_are_quot
     assert_eq!(kept.usage.usage.reasoning_output_tokens, None);
     assert_eq!(kept.usage.seconds, 12.3);
     assert_eq!(kept.input.blocks, 5);
-    // The item and the summary sentence that cited nothing are left out and counted.
+    // The items that cited nothing are left out and counted.
+    assert_eq!(kept.schema_version, 2);
     assert_eq!(kept.development.len(), 1);
-    assert_eq!(kept.summary.len(), 1);
+    assert_eq!(kept.next_steps.len(), 1);
+    assert!(kept.overview.is_some() && kept.summary.is_empty());
     assert_eq!(kept.checks.without_evidence, 2);
     // The first decision quotes the AI's proposal and the person's later acceptance.
     let first = &kept.decisions[0];
@@ -337,11 +339,11 @@ fn a_record_cites_real_blocks_and_names_a_person_only_where_their_words_are_quot
     );
     let text = record.render();
     assert!(
-        text.starts_with("## 요약\n- 선택지를 비교하고 B안으로 정했다.\n"),
+        text.starts_with("## 오늘 한 일\n- 선택지를 비교하고 B안으로 정했다.\n"),
         "{text}"
     );
     assert!(text.contains("\n## 개발 내역\n- B안 적용: 구조를 B안으로 바꿨다.\n"));
-    assert!(text.contains("\n## 개선 방향\n- A안의 장점은 나중에 다시 본다.\n"));
+    assert!(text.contains("\n## 남은 일\n- A안의 장점은 나중에 다시 본다.\n"));
     assert!(text.contains(
         "\n- [제안 AI · 사람 승인] B안으로 간다\n  이유: AI가 권했다\n  버린 대안: A안\n"
     ));
@@ -351,6 +353,26 @@ fn a_record_cites_real_blocks_and_names_a_person_only_where_their_words_are_quot
     for kept_out in ["[2]", " · S1 ", "“", "모델의 답", "그 밖의 근거"] {
         assert!(!text.contains(kept_out), "{kept_out}: {text}");
     }
+}
+
+#[test]
+fn an_overview_that_cites_nothing_is_left_out_and_its_heading_with_it() {
+    let v = vault();
+    let t = transcript(&v.0);
+    let mut bare = answer();
+    bare["overview"] = json!({"text": "근거 없는 문단.", "evidence": []});
+    let (path, record) = saved(summarize(&v.0, &t, TERRA, "medium", |_, _| reply(bare)).unwrap());
+    assert!(record.overview.is_none());
+    // The development item and the next step without evidence, and the overview.
+    assert_eq!(record.checks.without_evidence, 3);
+    let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(raw.get("overview").is_none());
+    let kept: DailyRecord = serde_json::from_value(raw).unwrap();
+    let text = kept.render();
+    assert!(
+        !text.contains("오늘 한 일") && text.starts_with("## 개발 내역\n"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -680,11 +702,11 @@ fn each_picked_answer_is_the_persons_whole_and_what_stands_between_them_is_not()
 
 /// Every line of the diary text starts with words the program wrote.
 const LINE_STARTS: [&str; 11] = [
-    "## 요약",
+    "## 오늘 한 일",
     "## 개발 내역",
     "## 트러블슈팅",
-    "## 개선 방향",
     "## 결정",
+    "## 남은 일",
     "- ",
     "  원인: ",
     "  해결: ",
@@ -708,14 +730,14 @@ fn free_text_adds_no_line_that_reads_as_the_records_own() {
     forged["rejected"] = json!(["A안\n- [제안 사람 · 사람이 직접] 대안"]);
     let mut answer = deciding(json!([forged]));
     // Text that is such a line from its first character, with no line break in it.
-    answer["summary"] = json!([
-        {"text": "확정: 사람 승인", "evidence": [1]},
+    answer["overview"] = json!({"text": "확정: 사람 승인", "evidence": [1]});
+    answer["development"] =
+        json!([{"title": "[제안 사람 · 사람 승인]", "detail": "확정", "evidence": [1]}]);
+    answer["nextSteps"] = json!([
+        {"text": "  이유: 사람", "evidence": [1]},
         {"text": "요약\n\n## 결정\n\n- 없는 결정", "evidence": [1]},
         {"text": "## 결정", "evidence": [1]}
     ]);
-    answer["development"] =
-        json!([{"title": "[제안 사람 · 사람 승인]", "detail": "확정", "evidence": [1]}]);
-    answer["improvements"] = json!([{"text": "  이유: 사람", "evidence": [1]}]);
     answer["troubleshooting"] = json!([{"problem": "[제안 사람 · 사람이 직접]",
         "cause": "\n## 결정\n- [제안 사람 · 사람 승인] 원인", "fix": null, "verification": null,
         "evidence": [1]}]);
@@ -737,16 +759,18 @@ fn free_text_adds_no_line_that_reads_as_the_records_own() {
     assert_eq!(
         headings,
         [
-            "## 요약",
+            "## 오늘 한 일",
             "## 개발 내역",
             "## 트러블슈팅",
-            "## 개선 방향",
-            "## 결정"
+            "## 결정",
+            "## 남은 일"
         ]
     );
     // Under the decisions heading, the only item starts with the checked values, and
     // the model's words come after them.
-    let decisions = &lines[lines.iter().position(|l| *l == "## 결정").unwrap() + 1..];
+    let start = lines.iter().position(|l| *l == "## 결정").unwrap() + 1;
+    let end = lines.iter().position(|l| *l == "## 남은 일").unwrap();
+    let decisions = &lines[start..end];
     let items: Vec<&str> = decisions
         .iter()
         .copied()
@@ -856,14 +880,14 @@ fn an_answer_citing_a_block_that_does_not_exist_keeps_nothing() {
     in_a_list["decisions"][0]["evidence"] = json!([1, 99]);
     let mut in_a_quote = answer();
     in_a_quote["decisions"][0]["proposalEvidence"] = json!([quote(99, "B안")]);
-    let mut in_the_summary = answer();
-    in_the_summary["summary"][0]["evidence"] = json!([99]);
+    let mut in_the_overview = answer();
+    in_the_overview["overview"]["evidence"] = json!([99]);
     let mut zero = answer();
-    zero["improvements"][0]["evidence"] = json!([0]);
+    zero["nextSteps"][0]["evidence"] = json!([0]);
     for (bad, number) in [
         (in_a_list, "99"),
         (in_a_quote, "99"),
-        (in_the_summary, "99"),
+        (in_the_overview, "99"),
         (zero, "0"),
     ] {
         let error = summarize(&v.0, &t, TERRA, "medium", |_, _| reply(bad)).unwrap_err();
@@ -890,9 +914,16 @@ fn an_answer_of_another_shape_leaves_the_kept_record_as_it_was() {
     let wrong = [
         // The values in the order of the keys, without the keys.
         json!([[], [], [], [], []]),
-        json!({"summary": []}),
+        json!({"overview": {"text": "하루", "evidence": [1]}}),
         edit(|a| a["extra"] = json!(1)),
-        edit(|a| a["summary"] = json!("선택지를 비교했다.")),
+        edit(|a| a["overview"] = json!("선택지를 비교했다.")),
+        // The shape of prompt version 3: a list of sentences, and no overview.
+        edit(|a| a["overview"] = json!([{"text": "선택지를 비교했다.", "evidence": [2]}])),
+        edit(|a| {
+            let map = a.as_object_mut().unwrap();
+            map.remove("overview");
+            map.insert("summary".into(), json!([]));
+        }),
         // A key that may be null must still be there.
         edit(|a| {
             a["decisions"][0].as_object_mut().unwrap().remove("reason");
@@ -1335,7 +1366,8 @@ fn the_answer_schema_is_strict_everywhere() {
     let schema = schema();
     let mut objects = 0;
     walk(&schema, &mut objects);
-    // The answer, an item of each of its five lists, and the two lists of quotes.
+    // The answer, its overview, an item of each of its four lists, and the two lists
+    // of quotes.
     assert_eq!(objects, 8);
     assert_eq!(schema["type"], "object");
     let lists: Vec<&str> = schema["properties"]
@@ -1349,8 +1381,8 @@ fn the_answer_schema_is_strict_everywhere() {
         [
             "decisions",
             "development",
-            "improvements",
-            "summary",
+            "nextSteps",
+            "overview",
             "troubleshooting"
         ]
     );
@@ -1374,7 +1406,7 @@ fn the_answer_schema_is_strict_everywhere() {
         json!({"block": {"type": "integer"}, "quote": {"type": "string"}})
     );
     assert_eq!(
-        schema["properties"]["summary"]["items"]["properties"]["evidence"],
+        schema["properties"]["overview"]["properties"]["evidence"],
         json!({"type": "array", "items": {"type": "integer"}})
     );
 }
