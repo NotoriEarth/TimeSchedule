@@ -32,13 +32,14 @@ use std::{
 
 mod claude;
 mod codex;
+pub mod record;
 
 /// Korea Standard Time. Days are split at its midnight.
 pub fn kst() -> FixedOffset {
     FixedOffset::east_opt(9 * 3600).expect("valid offset")
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Speaker {
     /// Text a person typed, or an answer they picked in a question dialog.
@@ -105,6 +106,9 @@ pub(crate) struct Item {
     /// of its last answer.
     pub group: Option<String>,
     pub text: String,
+    /// The answers of a `Picked` message, each as the person picked it. The text shows
+    /// them under their questions. No other message has any.
+    pub answers: Vec<String>,
 }
 
 impl Item {
@@ -118,6 +122,7 @@ impl Item {
             at: row.at,
             group: None,
             text: String::new(),
+            answers: Vec::new(),
         }
     }
 }
@@ -171,6 +176,11 @@ pub struct Block {
     /// 1-based number the transcript shows.
     pub number: usize,
     pub speaker: Speaker,
+    /// The answers a person picked, when the block is made of a question dialog. The
+    /// text shows each under its question; the questions are the AI's words and only
+    /// these answers are the person's. They are kept apart from the text, whole, so
+    /// that where an answer ends is never read back from text that may be cut.
+    pub picked: Option<Vec<String>>,
     /// Index into `DayTranscript::sources`.
     pub source: usize,
     /// Index into the source's `files`.
@@ -185,6 +195,10 @@ pub struct Block {
 pub struct DayTranscript {
     pub project_id: String,
     pub title: String,
+    /// The project's `repoKey` and its folder name in `originals`. The daily record
+    /// is kept under the same folder name in `daily`.
+    pub repo_key: String,
+    pub folder: String,
     pub date: NaiveDate,
     pub sources: Vec<Source>,
     pub blocks: Vec<Block>,
@@ -326,10 +340,23 @@ fn one_line(text: &str) -> String {
     plain_lines(text).replace('\n', " ")
 }
 
+/// What ends the text of a block that was cut. The program writes it, not the speaker.
+const CUT_MARK: char = '…';
+
 fn clip(text: &str, chars: usize) -> (String, bool) {
     match text.char_indices().nth(chars) {
-        Some((end, _)) => (format!("{}…", &text[..end]), true),
+        Some((end, _)) => (format!("{}{CUT_MARK}", &text[..end]), true),
         None => (text.to_owned(), false),
+    }
+}
+
+impl Block {
+    /// The text as far as it was written: without the mark that ends a cut block.
+    fn as_written(&self) -> &str {
+        match self.text.strip_suffix(CUT_MARK) {
+            Some(written) if self.clipped => written,
+            _ => &self.text,
+        }
     }
 }
 
@@ -462,7 +489,7 @@ fn merge(files: Vec<Vec<Item>>) -> (Vec<(usize, Item)>, bool) {
             // Two copies of a picked answer that hold different answers do not agree
             // either, though both say a person picked.
             let disagree = if roles == [Role::Picked; 2] {
-                kept.text != item.text
+                kept.text != item.text || kept.answers != item.answers
             } else {
                 kept.role != item.role && (picked || roles.contains(&Role::Human))
             };
@@ -693,6 +720,8 @@ pub fn day_transcript(
             blocks.push(Block {
                 number: 0,
                 speaker,
+                picked: (speaker == Speaker::Human && message.role == Role::Picked)
+                    .then_some(message.answers),
                 source,
                 file,
                 line: message.line,
@@ -709,6 +738,11 @@ pub fn day_transcript(
     Ok(DayTranscript {
         project_id: info.project_id,
         title: info.title,
+        repo_key: info.repo_key,
+        folder: dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         date,
         sources,
         blocks,
