@@ -462,6 +462,10 @@ pub type DailyInput = (String, chrono::NaiveDate, String);
 pub struct DailyMade {
     /// The days a new record was kept for, one per project and day.
     pub saved: Vec<chrono::NaiveDate>,
+    /// A dry run: the days that would ask the model, oldest first.
+    pub due: Vec<chrono::NaiveDate>,
+    /// The folder (its key) a `Which::Past` job listed its days in.
+    pub root: Option<String>,
     /// Days whose record was already made from the same input: no model was asked.
     pub unchanged: usize,
     /// Days without dialogue, or of a project with no kept chats: nothing to make.
@@ -496,16 +500,57 @@ pub fn finished_days(today: chrono::NaiveDate) -> Vec<chrono::NaiveDate> {
         .collect()
 }
 
+/// What a job did with one day.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Made {
+    /// The model was asked and a new record was kept.
+    Saved,
+    /// The latest record was made from the same input: the model was not asked.
+    Unchanged,
+    /// Another run is making this day.
+    Busy,
+    /// A dry run: this day would ask the model.
+    Due,
+}
+
+impl From<timeschedule_core::daily_record::record::Outcome> for Made {
+    fn from(outcome: timeschedule_core::daily_record::record::Outcome) -> Self {
+        use timeschedule_core::daily_record::record::Outcome;
+        match outcome {
+            Outcome::Saved { .. } => Self::Saved,
+            Outcome::Unchanged { .. } => Self::Unchanged,
+            Outcome::Busy { .. } => Self::Busy,
+        }
+    }
+}
+
+/// The days a daily record job looks at.
+#[derive(Debug, Clone, Copy)]
+pub enum Which<'a> {
+    /// Every captured project, these days: the selected day's button and the automatic mode.
+    Days(&'a [chrono::NaiveDate]),
+    /// One project (its ID), every day before `before` on which its kept sessions have rows.
+    Past {
+        project: &'a str,
+        before: chrono::NaiveDate,
+    },
+    /// One project (its ID), these days: the days a check of the past found due in the
+    /// folder `root` (`DailyMade::root` of that check). A project whose folder is another
+    /// one by now makes nothing: the days were counted in the old folder's chats.
+    ProjectDays {
+        project: &'a str,
+        days: &'a [chrono::NaiveDate],
+        root: &'a str,
+    },
+}
+
 /// How a job asks the model and decides what to leave alone.
 pub struct DailyRun<'a, M, K, G>
 where
     M: Fn(
         &std::path::Path,
         &timeschedule_core::daily_record::DayTranscript,
-    ) -> Result<
-        timeschedule_core::daily_record::record::Outcome,
-        crate::record_cli::DailyError,
-    >,
+    ) -> Result<Made, crate::record_cli::DailyError>,
     K: Fn(&timeschedule_core::daily_record::DayTranscript) -> String,
     G: Fn() -> bool,
 {
@@ -537,14 +582,20 @@ pub fn keep_originals(
 }
 
 /// One daily record job, in order: keep the newest originals of the projects whose
-/// chats are captured, make the record of each of `dates` from them, and show the new
-/// records in the diary. The projects are listed once, so the job keeps and makes the
+/// chats are captured, make the record of each day `which` names from them, and show the
+/// new records in the diary. The projects are listed once, so the job keeps and makes the
 /// same ones. A project whose originals were not all kept is left for a later job; a
 /// project with no kept chats and a day without dialogue have nothing to make; a day
 /// whose record was made from the same input is not sent again (`summarize` checks the
 /// fingerprint). Before each day the job checks that it may go on and that the
 /// project's chats are still captured. What was done stays in the result when a later
 /// step fails.
+///
+/// `Which::Past` takes its days from the kept originals once they are kept (`session_days`),
+/// so the days are those of the originals the job then reads. A project that `Past` or
+/// `ProjectDays` names and that is unknown or not captured makes nothing and is said in
+/// `failed`. A dry `run.make` that answers `Made::Due` makes no record: the day goes to
+/// `due`.
 pub fn daily_job<M, K, G>(
     store: &Storage,
     vault: impl FnOnce() -> Result<std::path::PathBuf, String>,
@@ -552,27 +603,59 @@ pub fn daily_job<M, K, G>(
         &[timeschedule_core::chat_originals::OriginalsProject],
         &std::path::Path,
     ) -> Result<timeschedule_core::chat_originals::OriginalsReport, String>,
-    dates: &[chrono::NaiveDate],
+    which: Which<'_>,
     run: DailyRun<'_, M, K, G>,
 ) -> Result<DailyMade, String>
 where
     M: Fn(
         &std::path::Path,
         &timeschedule_core::daily_record::DayTranscript,
-    ) -> Result<
-        timeschedule_core::daily_record::record::Outcome,
-        crate::record_cli::DailyError,
-    >,
+    ) -> Result<Made, crate::record_cli::DailyError>,
     K: Fn(&timeschedule_core::daily_record::DayTranscript) -> String,
     G: Fn() -> bool,
 {
     use timeschedule_core::{
         chat_originals::group_name,
-        daily_record::{day_transcript, record::Outcome},
+        daily_record::{day_transcript, session_days},
     };
     let all = store.originals_projects()?;
-    let projects: Vec<_> = all.iter().filter(|p| p.capture).collect();
     let mut made = DailyMade::default();
+    let named = match which {
+        Which::Days(_) => None,
+        Which::Past { project, .. } | Which::ProjectDays { project, .. } => Some(project),
+    };
+    let projects: Vec<_> = match named {
+        None => all.iter().filter(|p| p.capture).collect(),
+        Some(id) => match all.iter().find(|p| p.id == id) {
+            Some(p) if p.capture => {
+                match which {
+                    // The days are those of this folder's chats and of no other.
+                    Which::ProjectDays { root, .. } if p.root != root => {
+                        made.failed.push(format!(
+                            "{}: 프로젝트의 폴더가 지난 대화를 확인한 때와 달라 만들지 않았습니다. 다시 확인해 주세요.",
+                            p.title
+                        ));
+                        return Ok(made);
+                    }
+                    Which::Past { .. } => made.root = Some(p.root.clone()),
+                    _ => {}
+                }
+                vec![p]
+            }
+            Some(p) => {
+                made.failed.push(format!(
+                    "{}: 채팅 자동 수집이 꺼져 있어 하루 정리를 만들지 않았습니다.",
+                    p.title
+                ));
+                return Ok(made);
+            }
+            None => {
+                made.failed
+                    .push("알 수 없는 프로젝트라 하루 정리를 만들지 않았습니다.".into());
+                return Ok(made);
+            }
+        },
+    };
     if projects.is_empty() {
         return Ok(made);
     }
@@ -608,7 +691,10 @@ where
             Ok(_) => {}
             // Capture is on but no chat was found yet: nothing to make.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                made.empty += dates.len();
+                made.empty += match which {
+                    Which::Days(days) | Which::ProjectDays { days, .. } => days.len(),
+                    Which::Past { .. } => 0,
+                };
                 continue;
             }
             Err(e) => {
@@ -619,7 +705,39 @@ where
                 continue;
             }
         }
-        for date in dates {
+        let dates: Vec<chrono::NaiveDate> = match which {
+            Which::Days(days) | Which::ProjectDays { days, .. } => days.to_vec(),
+            Which::Past { before, .. } => {
+                if !(run.keep_going)() {
+                    made.stopped = true;
+                    break 'projects;
+                }
+                match session_days(&vault, folder, &run.keep_going) {
+                    Ok(listed) => {
+                        if listed.stopped {
+                            made.stopped = true;
+                            break 'projects;
+                        }
+                        made.failed.extend(
+                            listed
+                                .unread
+                                .iter()
+                                .map(|line| format!("{}: {line}", project.title)),
+                        );
+                        listed
+                            .days
+                            .into_iter()
+                            .filter(|day| *day < before)
+                            .collect()
+                    }
+                    Err(e) => {
+                        made.failed.push(format!("{}: {e}", project.title));
+                        continue;
+                    }
+                }
+            }
+        };
+        for date in &dates {
             // Still captured, and for the same folder: after a move the records of the
             // old folder would not be shown.
             let captured = store.originals_projects().map(|now| {
@@ -645,6 +763,15 @@ where
                     continue;
                 }
             };
+            // A folder moved from another project keeps that project's ID: the diary
+            // would refuse the record after the model was asked.
+            if transcript.project_id != project.id {
+                made.failed.push(format!(
+                    "{}: 보관 폴더가 다른 프로젝트의 것이라 남은 하루 정리를 만들지 않았습니다.",
+                    project.title
+                ));
+                continue 'projects;
+            }
             if transcript.blocks.is_empty() {
                 // Warnings with no dialogue mean files that could not be read, not a
                 // day without dialogue.
@@ -663,9 +790,10 @@ where
                 continue;
             }
             match (run.make)(&vault, &transcript) {
-                Ok(Outcome::Saved { .. }) => made.saved.push(*date),
-                Ok(Outcome::Unchanged { .. }) => made.unchanged += 1,
-                Ok(Outcome::Busy { .. }) => made.busy += 1,
+                Ok(Made::Saved) => made.saved.push(*date),
+                Ok(Made::Unchanged) => made.unchanged += 1,
+                Ok(Made::Busy) => made.busy += 1,
+                Ok(Made::Due) => made.due.push(*date),
                 Err(e) => {
                     made.failed
                         .push(format!("{} {date}: {}", project.title, e.message));
@@ -969,7 +1097,7 @@ mod tests {
             &store,
             || panic!("the store was looked for"),
             |_: &[_], _: &std::path::Path| panic!("originals were kept"),
-            &days,
+            Which::Days(&days),
             run(true),
         )
         .unwrap();
@@ -986,16 +1114,37 @@ mod tests {
                 ..Default::default()
             })
         };
-        let made = daily_job(&store, || Ok(vault.clone()), incomplete, &days, run(true)).unwrap();
+        let made = daily_job(
+            &store,
+            || Ok(vault.clone()),
+            incomplete,
+            Which::Days(&days),
+            run(true),
+        )
+        .unwrap();
         assert_eq!(made.unkept, ["작업"]);
         assert!(made.failed.is_empty() && made.empty == 0);
         // Kept whole but no chat found yet: nothing to make, and no error.
-        let made = daily_job(&store, || Ok(vault.clone()), whole, &days, run(true)).unwrap();
+        let made = daily_job(
+            &store,
+            || Ok(vault.clone()),
+            whole,
+            Which::Days(&days),
+            run(true),
+        )
+        .unwrap();
         assert_eq!((made.empty, made.failed.len()), (7, 0));
         // Kept chats whose list cannot be read: each day says why.
         let key = store.originals_projects().unwrap().remove(0).root;
         std::fs::create_dir_all(vault.join("originals").join(group_name(&key))).unwrap();
-        let made = daily_job(&store, || Ok(vault.clone()), whole, &days[..2], run(true)).unwrap();
+        let made = daily_job(
+            &store,
+            || Ok(vault.clone()),
+            whole,
+            Which::Days(&days[..2]),
+            run(true),
+        )
+        .unwrap();
         assert_eq!(made.failed.len(), 2);
         assert!(
             made.failed[0].starts_with("작업 2026-11-18: "),
@@ -1004,22 +1153,491 @@ mod tests {
         );
         assert!(made.failed_inputs.is_empty(), "no model was asked");
         // A job told to stop makes nothing more.
-        let made = daily_job(&store, || Ok(vault.clone()), whole, &days, run(false)).unwrap();
+        let made = daily_job(
+            &store,
+            || Ok(vault.clone()),
+            whole,
+            Which::Days(&days),
+            run(false),
+        )
+        .unwrap();
         assert!(made.stopped && made.failed.is_empty());
         // A store or originals that cannot be reached stop the job with the reason.
         let missing = daily_job(
             &store,
             || Err("문서 저장소 없음".into()),
             whole,
-            &days,
+            Which::Days(&days),
             run(true),
         );
         assert_eq!(missing.unwrap_err(), "문서 저장소 없음");
         let unkeepable = |_: &[_], _: &std::path::Path| Err("Codex 사용자 폴더 없음".to_string());
         // Originals that cannot be kept at all: nothing is made, and the job says why.
-        let made = daily_job(&store, || Ok(vault.clone()), unkeepable, &days, run(true)).unwrap();
+        let made = daily_job(
+            &store,
+            || Ok(vault.clone()),
+            unkeepable,
+            Which::Days(&days),
+            run(true),
+        )
+        .unwrap();
         assert_eq!(made.failed, ["원문 보관 실패: Codex 사용자 폴더 없음"]);
         assert_eq!(made.unkept, ["작업"]);
+    }
+    /// Two captured projects, each with kept sessions, in a made-up document store.
+    struct Past {
+        _dir: crate::record_inbox::tests::TestDir,
+        store: Storage,
+        vault: std::path::PathBuf,
+        /// `(ID, title, folder)` of the two projects.
+        a: (String, String, String),
+        b: (String, String, String),
+    }
+    fn keep_sessions(
+        past: &Past,
+        project: &(String, String, String),
+        sessions: &[(&str, &[&str])],
+    ) {
+        use timeschedule_core::chat_originals::group_name;
+        let root = past
+            .store
+            .originals_projects()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == project.0)
+            .unwrap()
+            .root;
+        let dir = past.vault.join("originals").join(group_name(&root));
+        std::fs::create_dir_all(dir.join("claude/C--x")).unwrap();
+        std::fs::write(
+            dir.join("project.json"),
+            serde_json::json!({"schemaVersion":1,"projectId":project.0,"title":project.1,"repoKey":root})
+                .to_string(),
+        )
+        .unwrap();
+        let mut index = String::new();
+        for (name, times) in sessions {
+            let file = format!("claude/C--x/{name}.jsonl.zst");
+            let body: String = times
+                .iter()
+                .map(|at| {
+                    format!(
+                        "{}\n",
+                        serde_json::json!({"type":"user","timestamp":at,"cwd":"C:\\x",
+                            "sessionId":name,"origin":{"kind":"human"},"turnOrigin":"human",
+                            "message":{"role":"user","content":format!("{at}의 요청")}})
+                    )
+                })
+                .collect();
+            let bytes = if *name == "bad" {
+                b"not a zstd file".to_vec()
+            } else {
+                zstd::encode_all(body.as_bytes(), 3).unwrap()
+            };
+            std::fs::write(dir.join(&file), bytes).unwrap();
+            let modified = chrono::DateTime::parse_from_rfc3339(times.last().unwrap())
+                .unwrap()
+                .timestamp_nanos_opt()
+                .unwrap();
+            index.push_str(
+                &serde_json::json!({"file":file,"tool":"claude","session":name,"cwd":"C:\\x",
+                    "client":"claude-desktop","started":times[0],"source":"x","sourceSize":1,
+                    "sourceModified":modified,"archivedAt":"2026-11-26T00:00:00Z"})
+                .to_string(),
+            );
+            index.push('\n');
+        }
+        std::fs::write(dir.join("index.jsonl"), index).unwrap();
+    }
+    fn past() -> Past {
+        let dir = crate::record_inbox::tests::TestDir::new();
+        let store = Storage::open(":memory:").unwrap();
+        let mut made = Vec::new();
+        for title in ["가 프로젝트", "나 프로젝트"] {
+            let repo = dir.0.join(format!("repo-{}", made.len()));
+            std::fs::create_dir_all(&repo).unwrap();
+            let mut project = Form::new(Kind::Project, String::new(), None);
+            project.title = title.into();
+            project.repo_path = repo.to_string_lossy().into_owned();
+            project.save(&store).unwrap();
+            let id = store
+                .list_projects()
+                .unwrap()
+                .into_iter()
+                .find(|p| p.title == title)
+                .unwrap()
+                .id;
+            store.set_chat_capture(&id, true).unwrap();
+            made.push((id, title.to_string(), repo.to_string_lossy().into_owned()));
+        }
+        let vault = dir.0.join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let b = made.pop().unwrap();
+        let a = made.pop().unwrap();
+        Past {
+            _dir: dir,
+            store,
+            vault,
+            a,
+            b,
+        }
+    }
+    /// A session on 11-10 and, past Korean midnight, 11-12, and another on 11-25.
+    const A_SESSIONS: &[(&str, &[&str])] = &[
+        ("s1", &["2026-11-10T01:00:00Z", "2026-11-11T16:00:00Z"]),
+        ("s2", &["2026-11-25T01:00:00Z"]),
+    ];
+    fn day(text: &str) -> chrono::NaiveDate {
+        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+    }
+    type Asked = std::cell::RefCell<Vec<(String, chrono::NaiveDate)>>;
+    fn asking<'a>(
+        asked: &'a Asked,
+        skip: &'a std::collections::HashSet<DailyInput>,
+        keep_going: impl Fn() -> bool + 'a,
+    ) -> DailyRun<
+        'a,
+        impl Fn(
+                &std::path::Path,
+                &timeschedule_core::daily_record::DayTranscript,
+            ) -> Result<Made, crate::record_cli::DailyError>
+            + 'a,
+        impl Fn(&timeschedule_core::daily_record::DayTranscript) -> String + 'a,
+        impl Fn() -> bool + 'a,
+    > {
+        DailyRun {
+            make: move |_: &std::path::Path, t: &timeschedule_core::daily_record::DayTranscript| {
+                asked.borrow_mut().push((t.title.clone(), t.date));
+                Ok(Made::Saved)
+            },
+            key: |_: &_| String::new(),
+            skip,
+            keep_going,
+        }
+    }
+    fn whole(
+        _: &[timeschedule_core::chat_originals::OriginalsProject],
+        _: &std::path::Path,
+    ) -> Result<timeschedule_core::chat_originals::OriginalsReport, String> {
+        Ok(Default::default())
+    }
+    #[test]
+    fn the_past_days_of_one_project_are_the_days_its_sessions_have_rows_before_today() {
+        let past = past();
+        keep_sessions(&past, &past.a, A_SESSIONS);
+        keep_sessions(&past, &past.b, &[("s3", &["2026-11-10T01:00:00Z"])]);
+        let (asked, skip) = (Asked::default(), Default::default());
+        let made = daily_job(
+            &past.store,
+            || Ok(past.vault.clone()),
+            whole,
+            Which::Past {
+                project: &past.a.0,
+                before: day("2026-11-25"),
+            },
+            asking(&asked, &skip, || true),
+        )
+        .unwrap();
+        // The days with rows, not the days between; not the day before which it stops,
+        // and nothing of the other captured project.
+        assert_eq!(made.saved, [day("2026-11-10"), day("2026-11-12")]);
+        assert!(made.failed.is_empty(), "{:?}", made.failed);
+        assert_eq!(
+            *asked.borrow(),
+            [
+                ("가 프로젝트".to_string(), day("2026-11-10")),
+                ("가 프로젝트".to_string(), day("2026-11-12")),
+            ]
+        );
+        assert!(!made.stopped);
+    }
+    #[test]
+    fn a_dry_run_lists_the_days_that_would_ask_the_model_and_writes_nothing() {
+        use timeschedule_core::{
+            daily_record::{day_transcript, record::summarize},
+            terra::{Reply, Usage},
+        };
+        let past = past();
+        keep_sessions(&past, &past.a, A_SESSIONS);
+        // 11-10 was made already, from this very input.
+        let model = timeschedule_core::terra::MODEL;
+        let made_before = day_transcript(&past.vault, &past.a.2, day("2026-11-10")).unwrap();
+        let answer = serde_json::json!({"overview": {"text": "하루", "evidence": [1]},
+            "development": [], "troubleshooting": [], "nextSteps": [], "decisions": []});
+        summarize(&past.vault, &made_before, model, "medium", |_, _| {
+            Ok(Reply {
+                text: answer.to_string(),
+                usage: Usage::default(),
+                seconds: 1.0,
+            })
+        })
+        .unwrap();
+        let folder = past.vault.join("daily").join(&made_before.folder);
+        let written = |dir: &std::path::Path| {
+            let mut names: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = written(&folder);
+        let skip = Default::default();
+        let made = daily_job(
+            &past.store,
+            || Ok(past.vault.clone()),
+            whole,
+            Which::Past {
+                project: &past.a.0,
+                before: day("2026-11-25"),
+            },
+            DailyRun {
+                make: |vault: &std::path::Path, t: &_| {
+                    crate::record_cli::would_summarize_day(vault, t, model)
+                },
+                key: |_: &_| String::new(),
+                skip: &skip,
+                keep_going: || true,
+            },
+        )
+        .unwrap();
+        assert_eq!(made.due, [day("2026-11-12")]);
+        assert_eq!(made.unchanged, 1, "the day made before is left out");
+        assert!(made.saved.is_empty() && made.failed_inputs.is_empty());
+        assert_eq!(written(&folder), before, "a dry run writes no record");
+        let usage = std::fs::read_to_string(folder.join("usage.jsonl")).unwrap();
+        assert_eq!(usage.lines().count(), 1, "and asks the model nothing");
+    }
+    #[test]
+    fn the_confirmed_days_are_made_and_no_others() {
+        let past = past();
+        keep_sessions(&past, &past.a, A_SESSIONS);
+        // The other captured project has dialogue on the same day: it was not asked about.
+        keep_sessions(&past, &past.b, A_SESSIONS);
+        let (asked, skip) = (Asked::default(), Default::default());
+        let days = [day("2026-11-12")];
+        // The check says which folder it counted the days in.
+        let checked = daily_job(
+            &past.store,
+            || Ok(past.vault.clone()),
+            whole,
+            Which::Past {
+                project: &past.a.0,
+                before: day("2026-11-25"),
+            },
+            asking(&asked, &skip, || true),
+        )
+        .unwrap();
+        let root = root_of(&past, &past.a.0);
+        assert_eq!(checked.root.as_deref(), Some(root.as_str()));
+        asked.borrow_mut().clear();
+        let made = daily_job(
+            &past.store,
+            || Ok(past.vault.clone()),
+            whole,
+            Which::ProjectDays {
+                project: &past.a.0,
+                days: &days,
+                root: &root,
+            },
+            asking(&asked, &skip, || true),
+        )
+        .unwrap();
+        assert_eq!(made.saved, days);
+        assert_eq!(*asked.borrow(), [(past.a.1.clone(), day("2026-11-12"))]);
+    }
+    #[test]
+    fn days_counted_in_another_folder_are_not_made() {
+        let past = past();
+        keep_sessions(&past, &past.a, A_SESSIONS);
+        let (asked, skip) = (Asked::default(), Default::default());
+        let days = [day("2026-11-12")];
+        // The project's folder was another one when the days were counted.
+        let made = daily_job(
+            &past.store,
+            || panic!("the store was looked for"),
+            |_: &[_], _: &std::path::Path| panic!("originals were kept"),
+            Which::ProjectDays {
+                project: &past.a.0,
+                days: &days,
+                root: "c:/another/folder",
+            },
+            asking(&asked, &skip, || true),
+        )
+        .unwrap();
+        assert!(asked.borrow().is_empty(), "the model was asked");
+        assert!(made.saved.is_empty());
+        assert_eq!(made.failed.len(), 1, "{:?}", made.failed);
+        assert!(made.failed[0].contains("폴더가"), "{}", made.failed[0]);
+    }
+    /// The folder key of a project, as the job reads it.
+    fn root_of(past: &Past, id: &str) -> String {
+        past.store
+            .originals_projects()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.id == id)
+            .unwrap()
+            .root
+    }
+    #[test]
+    fn a_project_that_is_not_captured_or_not_known_makes_nothing_and_says_so() {
+        let past = past();
+        past.store.set_chat_capture(&past.b.0, false).unwrap();
+        let (asked, skip) = (Asked::default(), Default::default());
+        let days = [day("2026-11-12")];
+        let root = root_of(&past, &past.b.0);
+        for which in [
+            Which::Past {
+                project: &past.b.0,
+                before: day("2026-11-25"),
+            },
+            Which::ProjectDays {
+                project: &past.b.0,
+                days: &days,
+                root: &root,
+            },
+            Which::Past {
+                project: "no-such-project",
+                before: day("2026-11-25"),
+            },
+        ] {
+            let made = daily_job(
+                &past.store,
+                || panic!("the store was looked for"),
+                |_: &[_], _: &std::path::Path| panic!("originals were kept"),
+                which,
+                asking(&asked, &skip, || true),
+            )
+            .unwrap();
+            assert_eq!(made.failed.len(), 1);
+            assert!(made.saved.is_empty() && made.due.is_empty());
+        }
+        assert!(asked.borrow().is_empty());
+    }
+    #[test]
+    fn a_file_that_cannot_be_read_is_said_and_the_other_days_are_still_made() {
+        let past = past();
+        keep_sessions(
+            &past,
+            &past.a,
+            &[
+                ("s1", &["2026-11-10T01:00:00Z"]),
+                ("bad", &["2026-11-11T01:00:00Z"]),
+            ],
+        );
+        let (asked, skip) = (Asked::default(), Default::default());
+        let made = daily_job(
+            &past.store,
+            || Ok(past.vault.clone()),
+            whole,
+            Which::Past {
+                project: &past.a.0,
+                before: day("2026-11-25"),
+            },
+            asking(&asked, &skip, || true),
+        )
+        .unwrap();
+        assert_eq!(made.saved, [day("2026-11-10")]);
+        assert_eq!(made.failed.len(), 1, "{:?}", made.failed);
+        assert!(
+            made.failed[0].starts_with("가 프로젝트: claude/C--x/bad.jsonl.zst: "),
+            "{:?}",
+            made.failed
+        );
+    }
+    #[test]
+    fn the_stop_flag_ends_the_past_days_between_days() {
+        let past = past();
+        keep_sessions(&past, &past.a, A_SESSIONS);
+        let (asked, skip) = (Asked::default(), Default::default());
+        // Asked before the listing and before each day: once a day is made, it is told to stop.
+        let made = daily_job(
+            &past.store,
+            || Ok(past.vault.clone()),
+            whole,
+            Which::Past {
+                project: &past.a.0,
+                before: day("2026-11-25"),
+            },
+            asking(&asked, &skip, || asked.borrow().is_empty()),
+        )
+        .unwrap();
+        assert_eq!(made.saved, [day("2026-11-10")]);
+        assert!(made.stopped);
+    }
+    #[test]
+    fn a_stop_before_the_listing_makes_nothing() {
+        let past = past();
+        keep_sessions(&past, &past.a, A_SESSIONS);
+        let (asked, skip) = (Asked::default(), Default::default());
+        let made = daily_job(
+            &past.store,
+            || Ok(past.vault.clone()),
+            whole,
+            Which::Past {
+                project: &past.a.0,
+                before: day("2026-11-25"),
+            },
+            asking(&asked, &skip, || false),
+        )
+        .unwrap();
+        assert!(made.stopped && made.saved.is_empty() && made.due.is_empty());
+        assert!(asked.borrow().is_empty());
+    }
+    #[test]
+    fn a_kept_folder_of_another_project_is_not_sent_to_the_model() {
+        for which in [0, 1] {
+            let past = past();
+            keep_sessions(&past, &past.a, A_SESSIONS);
+            // The folder was moved from another project: it still names that one.
+            let root = past
+                .store
+                .originals_projects()
+                .unwrap()
+                .into_iter()
+                .find(|p| p.id == past.a.0)
+                .unwrap()
+                .root;
+            let meta = past
+                .vault
+                .join("originals")
+                .join(timeschedule_core::chat_originals::group_name(&root))
+                .join("project.json");
+            std::fs::write(
+                &meta,
+                serde_json::json!({"schemaVersion":1,"projectId":past.b.0,
+                    "title":"나 프로젝트","repoKey":root})
+                .to_string(),
+            )
+            .unwrap();
+            let (asked, skip) = (Asked::default(), Default::default());
+            let days = [day("2026-11-10"), day("2026-11-12")];
+            let counted_in = root_of(&past, &past.a.0);
+            let made = daily_job(
+                &past.store,
+                || Ok(past.vault.clone()),
+                whole,
+                if which == 0 {
+                    Which::Past {
+                        project: &past.a.0,
+                        before: day("2026-11-25"),
+                    }
+                } else {
+                    Which::ProjectDays {
+                        project: &past.a.0,
+                        days: &days,
+                        root: &counted_in,
+                    }
+                },
+                asking(&asked, &skip, || true),
+            )
+            .unwrap();
+            assert!(asked.borrow().is_empty(), "the model was asked");
+            assert!(made.saved.is_empty() && made.due.is_empty());
+            assert_eq!(made.failed.len(), 1, "{:?}", made.failed);
+            assert!(made.failed[0].starts_with("가 프로젝트: "));
+        }
     }
     #[test]
     fn a_scan_part_that_cannot_start_does_not_hide_the_others() {

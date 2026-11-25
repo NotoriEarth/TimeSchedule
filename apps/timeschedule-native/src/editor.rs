@@ -276,6 +276,8 @@ pub struct Editor {
     pub confirmation: Option<Confirmation>,
     pub picker: Option<EditorPicker>,
     pub error: String,
+    /// The folder dialog of the project editor is open for this editor.
+    pub picking_repo: bool,
     undo: Vec<(String, text_editor::Cursor)>,
     redo: Vec<(String, text_editor::Cursor)>,
 }
@@ -291,6 +293,7 @@ impl Editor {
             confirmation: None,
             picker: None,
             error: String::new(),
+            picking_repo: false,
             undo: vec![],
             redo: vec![],
         }

@@ -476,6 +476,26 @@ pub(crate) fn summarize_day(
     })
 }
 
+/// What `summarize_day` would do with the transcript, without doing it: no model is
+/// asked and nothing is written. `Unchanged` when the latest record was made from this
+/// input, an error when the day is too large to send, `Due` when the model would be asked.
+pub(crate) fn would_summarize_day(
+    vault: &Path,
+    transcript: &timeschedule_core::daily_record::DayTranscript,
+    model: &str,
+) -> Result<crate::worker::Made, DailyError> {
+    use timeschedule_core::daily_record::record::{check_size, is_current};
+    let unasked = |message| DailyError {
+        message,
+        asked: false,
+    };
+    if is_current(vault, transcript, model, DAILY_EFFORT).map_err(unasked)? {
+        return Ok(crate::worker::Made::Unchanged);
+    }
+    check_size(transcript.summary().chars).map_err(unasked)?;
+    Ok(crate::worker::Made::Due)
+}
+
 /// Runs the record command line in `args` (`record ...`) and returns the exit code.
 ///
 /// The outcome is printed, and written to `--result` when the arguments say beyond
@@ -538,6 +558,48 @@ mod tests {
         /// How many times this thread has looked up the document store of a `daily` run.
         pub(super) static STORE_LOOKUPS: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn a_dry_look_at_a_day_too_large_to_send_is_an_error_that_asked_nothing() {
+        use timeschedule_core::daily_record::{Block, DayTranscript, Source, Speaker};
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-20T01:00:00+09:00").unwrap();
+        let blocks = (1..=60)
+            .map(|number| Block {
+                number,
+                speaker: Speaker::Human,
+                picked: None,
+                source: 0,
+                file: 0,
+                line: number,
+                at,
+                text: "가".repeat(8000),
+                clipped: false,
+            })
+            .collect();
+        let transcript = DayTranscript {
+            project_id: "p".into(),
+            title: "작업".into(),
+            repo_key: "c:/work".into(),
+            folder: "work".into(),
+            date: chrono::NaiveDate::from_ymd_opt(2026, 11, 20).unwrap(),
+            sources: vec![Source {
+                tag: "S1".into(),
+                files: vec!["f".into()],
+                tool: "claude".into(),
+                client: "x".into(),
+                session: "s".into(),
+                agent_run: false,
+            }],
+            blocks,
+            warnings: Vec::new(),
+            latest_archived: None,
+        };
+        let dir = TestDir::new();
+        let error = would_summarize_day(&dir.0, &transcript, "m").unwrap_err();
+        assert!(error.message.contains("너무 큽니다"), "{}", error.message);
+        assert!(!error.asked);
+        assert!(!dir.0.join("daily").exists(), "nothing was written");
     }
 
     fn enqueue_args(dir: &TestDir) -> Vec<String> {
