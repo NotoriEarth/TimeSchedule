@@ -6,7 +6,7 @@ fn export_links_initial_and_inline_citations_and_preserves_an_edited_edition() {
     let (db, project, chat) = fixture();
     let session = uuid::Uuid::new_v4().to_string();
     let root = std::env::temp_dir().join(format!("ts-links-{session}"));
-    let review = db.review_chat(&project, &chat).unwrap();
+    let review = reviewed(&db, &project, &chat);
     db.confirm_chat_candidates(&review, &[Kind::Design, Kind::Troubleshooting])
         .unwrap();
     db.save_portfolio_answer(&project, None, "").unwrap();
@@ -119,18 +119,24 @@ fn fixture() -> (Storage, String, String) {
     (db, project, chat)
 }
 
+/// Candidates of both kinds, from a fixed model answer that cites the `BODY` passages.
+/// The design problem is the user's correction, which also states their role.
+fn reviewed(db: &Storage, project: &str, chat: &str) -> Review {
+    db.review_chat_with_inference(project, chat, |_| {
+        Ok(serde_json::json!({
+            "design":{"title":"공유 설정","problem":3,"solution":4,"reason":5,"test":0,"limit":0},
+            "troubleshooting":{"title":"종료 회귀 검증","problem":6,"solution":8,"reason":0,"test":7,"limit":8}
+        })
+        .to_string())
+    })
+    .unwrap()
+}
+
 #[test]
-fn review_uses_corrected_evidence_and_only_inserts_checked_items() {
+fn confirm_inserts_only_checked_items_and_keeps_edits_and_deletions() {
     let (db, p, chat) = fixture();
-    let review = db.review_chat(&p, &chat).unwrap();
+    let review = reviewed(&db, &p, &chat);
     assert_eq!(review.candidates.len(), 2);
-    let design = &review.candidates[0].body;
-    assert!(
-        design.contains("원문 14행")
-            && design.contains("원문 21행")
-            && !design.contains("원문 16행")
-    );
-    assert!(!design.contains("# fail") && review.candidates[1].body.contains("# fail 1"));
     assert!(db.confirm_chat_candidates(&review, &[]).is_err());
     assert_eq!(db.portfolio_panel(&p).unwrap().experiences, 0);
     assert_eq!(
@@ -182,7 +188,9 @@ fn legacy_citation_reuses_same_entry_and_ignores_unchosen_role() {
         })
         .unwrap();
     for pass in 0..2 {
-        let review = db.review_chat(&p, &chat).unwrap();
+        let review = reviewed(&db, &p, &chat);
+        // The candidate quotes the role, so the answer check below is not vacuous.
+        assert!(review.candidates[0].body.contains("개인 기여는 보류"));
         let result = db
             .confirm_chat_candidates(&review, &[Kind::Design])
             .unwrap();
@@ -195,8 +203,12 @@ fn legacy_citation_reuses_same_entry_and_ignores_unchosen_role() {
 #[test]
 fn stale_or_wrong_project_review_cannot_save() {
     let (db, p, chat) = fixture();
-    let review = db.review_chat(&p, &chat).unwrap();
-    assert!(db.review_chat("different", &chat).is_err());
+    let review = reviewed(&db, &p, &chat);
+    assert!(db
+        .review_chat_with_inference("different", &chat, |_| panic!(
+            "read another project's chat"
+        ))
+        .is_err());
     db.connection()
         .unwrap()
         .execute(
@@ -207,7 +219,6 @@ fn stale_or_wrong_project_review_cannot_save() {
     assert!(db
         .confirm_chat_candidates(&review, &[Kind::Design])
         .is_err());
-    assert!(db.review_chat(&p, &chat).unwrap().candidates.is_empty());
     assert_eq!(db.portfolio_panel(&p).unwrap().experiences, 0);
 }
 
