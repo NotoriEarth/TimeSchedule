@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, Field, Message, NativeAction, Page},
+    app::{App, Field, Message, NativeAction, Page, Past},
     editor::{Confirmation, EditorPicker, Form, Kind},
     theme,
 };
@@ -497,6 +497,48 @@ pub(crate) fn records(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .into()
 }
+/// The question the owner is asked before the past days are made. Each day asks the model once.
+pub(crate) fn past_days_question(days: &[NaiveDate]) -> String {
+    let count = days.len();
+    let (Some(first), Some(last)) = (days.first(), days.last()) else {
+        return String::new();
+    };
+    format!(
+        "지난 대화가 {count}일 있습니다 ({first} ~ {last}). 모두 정리하면 모델을 {count}번 부릅니다."
+    )
+}
+/// What the project screen says about making the daily records of the days before the
+/// capture was turned on: the button, the question with its count, or the progress.
+fn past_days_panel<'a>(app: &'a App, project: &str) -> Element<'a, Message> {
+    match app.past_days.get(project) {
+        Some(Past::Due | Past::Checking) => quiet("지난 대화 확인 중…"),
+        Some(Past::Ask(days, _)) => column![
+            text(past_days_question(days)).size(13),
+            row![
+                button(text("지금 모두 정리").size(13))
+                    .padding([7, 10])
+                    .style(theme::secondary)
+                    .on_press_maybe(
+                        app.past_days_can_start()
+                            .then(|| Message::MakePastDays(project.to_owned()))
+                    ),
+                control("나중에", Message::DismissPastDays(project.to_owned()))
+            ]
+            .spacing(6)
+        ]
+        .spacing(6)
+        .into(),
+        Some(Past::Making) => row![
+            quiet("지난 대화 정리 중…"),
+            control("정리 멈추기", Message::StopPastDays(project.to_owned()))
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+        _ if app.daily_making => quiet("하루 정리 만드는 중…"),
+        _ => control("지난 대화 정리", Message::CheckPastDays(project.to_owned())).into(),
+    }
+}
 pub(crate) fn projects(app: &App) -> Element<'_, Message> {
     let mut list = column![control("모든 프로젝트", Message::Project(None))].spacing(5);
     for p in &app.snapshot.projects {
@@ -545,6 +587,9 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
                 },
                 Message::SetChatCapture(p.id.clone(), !watching),
             ));
+        }
+        if watching {
+            panel = panel.push(past_days_panel(app, &p.id));
         }
         if !app.snapshot.reviewable_chats.is_empty() {
             panel = panel.push(crate::chat_review_ui::panel(app, &p.id));
@@ -974,7 +1019,27 @@ pub(crate) fn editor_view(app: &App) -> Element<'_, Message> {
         ));
     }
     if form.kind == Kind::Project {
-        fields = fields.push(input("로컬 Git 저장소 경로", &form.repo_path, Field::Repo));
+        // The button sits beside the field. The editor is at least 650 px wide, which
+        // leaves the field room for a path.
+        fields = fields.push(
+            column![
+                quiet("로컬 Git 저장소 경로"),
+                row![
+                    text_input("로컬 Git 저장소 경로", &form.repo_path)
+                        .on_input(|v| Message::Field(Field::Repo(v)))
+                        .padding(8)
+                        .size(14)
+                        .width(Length::Fill),
+                    button(text("폴더 찾기").size(13))
+                        .padding([8, 10])
+                        .style(theme::secondary)
+                        .on_press_maybe((!e.picking_repo).then_some(Message::PickRepoFolder))
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center)
+            ]
+            .spacing(5),
+        );
     }
     if !e.error.is_empty() {
         fields = fields.push(text(&e.error).size(13).style(theme::danger));

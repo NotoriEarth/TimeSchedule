@@ -771,6 +771,14 @@ struct Latest {
     fingerprint: String,
 }
 
+impl Latest {
+    /// Whether this record was made from the input with `fingerprint`: asking the model
+    /// again would be asking the same question.
+    fn made_from(&self, fingerprint: &str) -> bool {
+        self.fingerprint == fingerprint
+    }
+}
+
 fn read_latest(path: &Path) -> Result<Option<Latest>, String> {
     #[derive(Deserialize)]
     struct Kept {
@@ -863,6 +871,33 @@ fn log_usage(dir: &Path, line: &UsageLine) -> Result<(), String> {
     result.map_err(|e| format!("사용량 기록을 쓰지 못했습니다({}): {e}", path.display()))
 }
 
+/// Refuses a day whose transcript of `chars` characters is too large to send in one call.
+pub fn check_size(chars: usize) -> Result<(), String> {
+    let estimate = estimated_tokens(chars);
+    if estimate > MAX_ESTIMATED_TOKENS {
+        return Err(format!(
+            "이날의 대화록이 너무 큽니다(추정 입력 {estimate}토큰, 한도 {MAX_ESTIMATED_TOKENS}). 날을 나누는 기능은 아직 없습니다."
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the latest kept record of the transcript's day was made from this input, so
+/// that `summarize` would not call the model. It only reads: no lock is taken and
+/// nothing is written, so it can run while another run makes the day. A record file or
+/// folder that is a link is refused as `summarize` refuses it.
+pub fn is_current(
+    vault: &Path,
+    transcript: &DayTranscript,
+    model: &str,
+    effort: &str,
+) -> Result<bool, String> {
+    let dir = day_dir(vault, transcript)?;
+    let path = dir.join(format!("{}.json", transcript.date));
+    let fingerprint = fingerprint(transcript, model, effort);
+    Ok(read_latest(&path)?.is_some_and(|latest| latest.made_from(&fingerprint)))
+}
+
 /// Makes and keeps the record of `transcript`, unless the latest kept one was made
 /// from the same input. `infer` sends the prompt with the schema to the model.
 ///
@@ -884,12 +919,7 @@ pub fn summarize(
         return Err("이날의 대화가 없어 하루 기록을 만들지 않았습니다.".into());
     }
     let summary = transcript.summary();
-    let estimate = estimated_tokens(summary.chars);
-    if estimate > MAX_ESTIMATED_TOKENS {
-        return Err(format!(
-            "이날의 대화록이 너무 큽니다(추정 입력 {estimate}토큰, 한도 {MAX_ESTIMATED_TOKENS}). 날을 나누는 기능은 아직 없습니다."
-        ));
-    }
+    check_size(summary.chars)?;
     let dir = day_dir(vault, transcript)?;
     let date = transcript.date.to_string();
     let path = dir.join(format!("{date}.json"));
@@ -910,7 +940,7 @@ pub fn summarize(
     let previous = read_latest(&path)?;
     let mut revision = 1;
     if let Some(previous) = &previous {
-        if previous.fingerprint == fingerprint {
+        if previous.made_from(&fingerprint) {
             return Ok(Outcome::Unchanged {
                 path,
                 revision: previous.revision,

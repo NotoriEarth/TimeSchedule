@@ -30,6 +30,7 @@
 | --- | --- | --- |
 | 자료 발췌 초안 | ‘근거 요약’ 옆의 ‘자료 발췌 초안’ 버튼. 기록 편집기의 종류 목록에는 ‘포트폴리오 초안’이라는 이름이 남아 있다. | `views::projects`, `Message::Draft(true)`, `views::KIND_LABELS` |
 | 로컬 채팅 자동 수집 | 저장소가 연결된 프로젝트에서 ‘Codex·Claude Code 채팅 자동 수집 켜기’ 또는 ‘채팅 자동 수집 끄기’ | `views::projects`, `Message::SetChatCapture` |
+| 지난 대화 정리 영역 | 채팅 자동 수집이 켜진 프로젝트의 ‘채팅 자동 수집 끄기’ 바로 아래. 상태에 따라 ‘지난 대화 정리’ 버튼, ‘지난 대화 확인 중…’, ‘지난 대화가 N일 있습니다 (…). 모두 정리하면 모델을 N번 부릅니다.’와 ‘지금 모두 정리’·‘나중에’, ‘지난 대화 정리 중…’과 ‘정리 멈추기’가 나옴. 다른 하루 정리 작업이 도는 동안에는 ‘하루 정리 만드는 중…’ | `views::past_days_panel`, `app.past_days`(프로젝트 ID별 `Past`: `Due`·`Checking`·`Ask`·`Making`), `Message::CheckPastDays(ID)`, `MakePastDays(ID)`, `DismissPastDays(ID)`, `StopPastDays` |
 | 채팅에서 경험 검토 | 수집된 채팅이 있으면 ‘채팅에서 경험 검토 · Terra’에서 채팅을 선택한다. 설계·트러블슈팅 후보에 체크한 뒤 ‘확인한 후보만 이력에 저장’을 누른다. | `chat_review_ui::panel` |
 | 경험 선택과 Markdown 생성 | ‘포트폴리오 경험’에서 ‘경험 선택’으로 기록을 고른다. ‘백엔드 포트폴리오 · Markdown 생성’ 버튼 옆에 ‘기존 v2 재사용 완료’처럼 실제 판본 번호가 표시된다. | `portfolio_ui::panel`, `portfolio_ui::Action::Export` |
 
@@ -62,7 +63,7 @@
 | 일정 편집기 | 달력·빠른 일정 창의 ‘+ 일정’ 또는 기존 일정 수정. 날짜, 하루 종일, 시작·종료 시간, 완료 | `Kind::Event`, `form.date`, `form.all_day`, `form.start`, `form.end`, `form.completed` |
 | 날짜 미정 일정 편집기 | 날짜 미정 화면의 ‘+ 일정’. 제목은 ‘일정 추가’이고 날짜는 선택 입력 | `Kind::Task`, `form.date` |
 | 기록 편집기 | ‘+ 기록’ 또는 기록 수정. 짧은 작업명, 카테고리, 기록 종류, 프로젝트, 출처 링크 | `Kind::Entry`, `form.short_title`, `form.category_id`, `form.entry_kind`, `form.project_id`, `form.source_url` |
-| 프로젝트 편집기 | ‘+ 프로젝트’ 또는 ‘프로젝트 수정’. 프로젝트 이름·설명, 달력용 짧은 프로젝트명, 로컬 Git 저장소 경로 | `Kind::Project`, `form.title`, `form.body`, `form.project_short_name`, `form.repo_path` |
+| 프로젝트 편집기 | ‘+ 프로젝트’ 또는 ‘프로젝트 수정’. 프로젝트 이름·설명, 달력용 짧은 프로젝트명, 로컬 Git 저장소 경로. 경로 입력란 오른쪽의 ‘폴더 찾기’ 버튼이 Windows 폴더 선택창을 열고, 고른 폴더를 입력란에 넣음 | `Kind::Project`, `form.title`, `form.body`, `form.project_short_name`, `form.repo_path`, `Message::PickRepoFolder`, `Message::RepoFolderPicked` |
 | 메모 편집기 | 노트 화면의 ‘+ 메모’ 또는 기존 메모 제목. 제목과 본문 편집 | `Kind::Note`, `form.title`, `form.body` |
 | 편집기 날짜 입력 / 날짜 선택기 | 연·월·일을 나눠 입력하는 날짜 필드와 달력 아이콘으로 여는 선택기 | `date_input::input`, `EditorPicker::Date`, `Message::PickEditorDate` |
 | 편집기 시간 선택기 | ‘하루 종일’을 해제했을 때의 시작·종료 시간 입력과 선택 목록 | `time_input::view`, `Message::OpenTimePicker`, `Message::PickEditorTime` |

@@ -3,7 +3,7 @@
 use chrono::NaiveDate;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use timeschedule_core::daily_record::{day_transcript, DayTranscript, Speaker};
+use timeschedule_core::daily_record::{day_transcript, session_days, DayTranscript, Speaker};
 
 const PROJECT: &str = "11111111-2222-4333-8444-555555555555";
 
@@ -1947,4 +1947,151 @@ fn a_person_message_in_the_older_codex_form_is_reported_not_lost_quietly() {
         .warnings
         .iter()
         .all(|w| !w.contains("user_message")));
+}
+
+#[test]
+fn the_days_with_rows_come_from_every_kept_dialogue_file_and_a_bad_file_hides_nothing() {
+    let v = vault(&[
+        codex_file(
+            "codex/2026/11/24/rollout-a.jsonl.zst",
+            "a",
+            vec![
+                codex_meta("Codex Desktop", json!("vscode")),
+                codex_user("2026-11-24T14:59:00Z", "u1", true, "자정 전"),
+                // 00:01 in Korea on the next day.
+                codex_ai("2026-11-24T15:01:00Z", "a1", "자정 뒤"),
+            ],
+        ),
+        claude_file(
+            "claude/C--work/c.jsonl.zst",
+            vec![
+                claude_user("2026-11-20T01:00:00Z", typed(), "다른 도구의 날"),
+                // A row with no time adds no day, and neither does one with a time that
+                // is not one.
+                without_time(claude_user("2026-11-02T01:00:00Z", typed(), "시각 없음")),
+                json!({"type":"user","timestamp":"어제","sessionId":"c"}),
+            ],
+        ),
+        // Beside a session, not a dialogue: its rows say nothing about the project's days.
+        claude_file(
+            "claude/C--work/c/tool-results/t.jsonl.zst",
+            vec![claude_user("2026-11-03T01:00:00Z", typed(), "도구 결과")],
+        ),
+        codex_file(
+            "codex/2026/11/10/rollout-bad.jsonl.zst",
+            "bad",
+            vec![codex_meta("Codex Desktop", json!("vscode"))],
+        ),
+    ]);
+    let group = v.0.join("originals").join("c--work-0000000000000000");
+    std::fs::write(
+        group.join("codex/2026/11/10/rollout-bad.jsonl.zst"),
+        b"not a zstd file",
+    )
+    .unwrap();
+    let listed = session_days(&v.0, PROJECT, &|| true).unwrap();
+    let days: Vec<String> = listed.days.iter().map(|d| d.to_string()).collect();
+    assert_eq!(days, ["2026-11-20", "2026-11-24", "2026-11-25"]);
+    assert_eq!(listed.unread.len(), 1, "{:?}", listed.unread);
+    assert!(
+        listed.unread[0].starts_with("codex/2026/11/10/rollout-bad.jsonl.zst: "),
+        "{:?}",
+        listed.unread
+    );
+}
+
+#[test]
+fn the_days_of_a_project_with_no_kept_chats_are_an_error_like_its_day_transcript() {
+    let v = vault(&[]);
+    assert_eq!(
+        session_days(&v.0, PROJECT, &|| true).unwrap(),
+        timeschedule_core::daily_record::SessionDays::default()
+    );
+    assert!(session_days(&v.0, "no-such-project", &|| true).is_err());
+}
+
+/// A day listed can have no dialogue: only the tool rows of it are kept.
+#[test]
+fn a_listed_day_can_still_have_no_dialogue() {
+    let v = vault(&[codex_file(
+        "codex/2026/11/24/rollout-a.jsonl.zst",
+        "a",
+        vec![
+            codex_meta("Codex Desktop", json!("vscode")),
+            codex_item(
+                "2026-11-24T01:00:00Z",
+                json!({"type":"CommandExecution","id":"c1","command":"ls"}),
+            ),
+        ],
+    )]);
+    let listed = session_days(&v.0, PROJECT, &|| true).unwrap();
+    assert_eq!(listed.days.len(), 1);
+    assert!(day(&v.0, "2026-11-24").blocks.is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn a_kept_file_behind_a_link_is_refused_in_the_days_as_it_is_in_the_transcript() {
+    let v = vault(&[codex_file(
+        "codex/2026/11/24/rollout-a.jsonl.zst",
+        "a",
+        vec![
+            codex_meta("Codex Desktop", json!("vscode")),
+            codex_user("2026-11-24T01:00:00Z", "u1", true, "링크 뒤의 글"),
+        ],
+    )]);
+    let group = v.0.join("originals").join("c--work-0000000000000000");
+    let moved = v.0.join("elsewhere");
+    std::fs::rename(group.join("codex"), &moved).unwrap();
+    junction(&group.join("codex"), &moved);
+    let listed = session_days(&v.0, PROJECT, &|| true).unwrap();
+    assert!(listed.days.is_empty());
+    assert_eq!(listed.unread.len(), 1, "{:?}", listed.unread);
+}
+
+/// The rows of a file with no time take the index's start as their time, so the day of
+/// that start is listed and `day_transcript` has the dialogue of it.
+#[test]
+fn the_start_in_the_index_is_a_day_of_a_file_whose_rows_have_no_time() {
+    let v = vault(&[Kept {
+        file: "claude/C--work/c.jsonl.zst",
+        tool: "claude",
+        session: "c",
+        client: "claude-desktop",
+        started: "2026-11-22T01:00:00Z",
+        modified: "2026-11-22T10:00:00Z",
+        rows: vec![without_time(claude_user(
+            "2026-11-22T01:00:00Z",
+            typed(),
+            "시각 없는 글",
+        ))],
+    }]);
+    let listed = session_days(&v.0, PROJECT, &|| true).unwrap();
+    let days: Vec<String> = listed.days.iter().map(|d| d.to_string()).collect();
+    assert_eq!(days, ["2026-11-22"]);
+    assert!(!day(&v.0, "2026-11-22").blocks.is_empty());
+}
+
+#[test]
+fn the_days_stop_before_the_file_when_asked_to() {
+    let v = vault(&[
+        claude_file(
+            "claude/C--work/a.jsonl.zst",
+            vec![claude_user("2026-11-24T01:00:00Z", typed(), "첫 파일")],
+        ),
+        claude_file(
+            "claude/C--work/b.jsonl.zst",
+            vec![claude_user("2026-11-25T01:00:00Z", typed(), "둘째 파일")],
+        ),
+    ]);
+    let asked = std::cell::Cell::new(0);
+    let listed = session_days(&v.0, PROJECT, &|| {
+        asked.set(asked.get() + 1);
+        asked.get() <= 1
+    })
+    .unwrap();
+    assert!(listed.stopped);
+    assert_eq!(asked.get(), 2, "asked before each file, never after a no");
+    assert_eq!(listed.days.len(), 1);
+    assert!(!session_days(&v.0, PROJECT, &|| true).unwrap().stopped);
 }

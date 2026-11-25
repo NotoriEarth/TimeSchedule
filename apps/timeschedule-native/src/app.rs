@@ -7,7 +7,7 @@ use iced::widget::text_editor;
 use iced::{window, Element, Size, Subscription, Task};
 use raw_window_handle::RawWindowHandle;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
 };
@@ -135,6 +135,120 @@ pub struct NativeReport {
     pub position: Option<(i32, i32)>,
     pub size: Option<(u32, u32)>,
 }
+/// What the running daily record job was started for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DailyKind {
+    /// The automatic mode's finished days.
+    Auto,
+    /// The selected day's button.
+    Button,
+    /// The dry run that says which past days of this project (ID) would ask the model.
+    PastCheck(String),
+    /// The past days of this project (ID) the owner confirmed.
+    Past(String),
+}
+
+impl DailyKind {
+    /// The project (ID) a past-days job is for.
+    fn past_project(&self) -> Option<&str> {
+        match self {
+            Self::PastCheck(project) | Self::Past(project) => Some(project),
+            Self::Auto | Self::Button => None,
+        }
+    }
+}
+
+/// What makes the record of a day in a daily job.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Maker {
+    /// Asks the model and keeps the record.
+    Real,
+    /// Says what would happen; asks and writes nothing.
+    Dry,
+}
+
+impl Maker {
+    /// Only the check of the past days is dry: the other kinds make the records.
+    fn of(kind: &DailyKind) -> Self {
+        match kind {
+            DailyKind::PastCheck(_) => Self::Dry,
+            DailyKind::Auto | DailyKind::Button | DailyKind::Past(_) => Self::Real,
+        }
+    }
+    fn make(
+        self,
+        vault: &std::path::Path,
+        transcript: &timeschedule_core::daily_record::DayTranscript,
+    ) -> Result<worker::Made, crate::record_cli::DailyError> {
+        let model = timeschedule_core::terra::MODEL;
+        match self {
+            Self::Real => {
+                crate::record_cli::summarize_day(vault, transcript, model).map(worker::Made::from)
+            }
+            Self::Dry => crate::record_cli::would_summarize_day(vault, transcript, model),
+        }
+    }
+}
+
+/// Where the making of one project's past days stands. A project not in
+/// `App::past_days` is idle. At most one project is `Checking` or `Making`, because one
+/// daily job runs at a time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Past {
+    /// A check is owed: it starts when no chat scan and no daily job runs.
+    Due,
+    /// The dry run is running.
+    Checking,
+    /// The owner is asked: these days would each ask the model once. They were counted in
+    /// the chats of the folder with this key, and are made only while it is the
+    /// project's folder.
+    Ask(Vec<NaiveDate>, String),
+    /// The confirmed days are being made.
+    Making,
+}
+
+impl Past {
+    /// A daily job runs for this state.
+    fn running(&self) -> bool {
+        matches!(self, Self::Checking | Self::Making)
+    }
+}
+
+/// What a daily record job is asked to make.
+enum DailyScope {
+    Days(Vec<NaiveDate>),
+    Past {
+        project: String,
+        before: NaiveDate,
+    },
+    ProjectDays {
+        project: String,
+        days: Vec<NaiveDate>,
+        root: String,
+    },
+}
+
+impl DailyScope {
+    fn which(&self) -> worker::Which<'_> {
+        match self {
+            Self::Days(days) => worker::Which::Days(days),
+            Self::Past { project, before } => worker::Which::Past {
+                project,
+                before: *before,
+            },
+            Self::ProjectDays {
+                project,
+                days,
+                root,
+            } => worker::Which::ProjectDays {
+                project,
+                days,
+                root,
+            },
+        }
+    }
+}
+
 /// One tick is 500 ms. The record inbox is polled every minute.
 const RECORDS_POLL_TICKS: u32 = 120;
 /// Chat files are read and kept every hour, and when the projects screen opens.
@@ -164,6 +278,17 @@ pub enum Message {
     /// Make the daily record of this day now (the selected day's button).
     MakeDaily(NaiveDate),
     DailyMade(Result<worker::DailyMade, String>),
+    /// Look for the past days of this project (ID) whose daily record is due.
+    CheckPastDays(String),
+    /// Make the past days the owner was asked about for this project (ID).
+    MakePastDays(String),
+    DismissPastDays(String),
+    /// End the making of this project's (ID) past days after the day it is on.
+    StopPastDays(String),
+    /// Open the folder dialog for the project editor's Git folder.
+    PickRepoFolder,
+    /// The answer of the folder dialog opened by the editor of this generation.
+    RepoFolderPicked(u64, Option<PathBuf>),
     RecordsDrained(Result<crate::record_inbox::DrainReport, String>),
     Navigate(Page),
     Month(i32),
@@ -321,9 +446,13 @@ pub struct App {
     /// An automatic job met projects it could not keep whole (another run was keeping
     /// them). It is tried again when a chat scan ends, and only then.
     daily_retry_after_scan: bool,
-    /// The records being made were asked for with the button, so the notice line says
-    /// what happened even when nothing was made.
-    daily_by_button: bool,
+    /// What the running job is for. The button's and the past days' notice lines say what
+    /// happened even when nothing was made; the automatic mode's does not.
+    daily_kind: DailyKind,
+    /// Where the past days of a project stand (project screen).
+    pub past_days: BTreeMap<String, Past>,
+    /// Set to end the making of the past days after the day it is on.
+    past_stop: Arc<std::sync::atomic::AtomicBool>,
     /// Inputs that failed; the automatic mode does not send them again until the
     /// dialogue changes or the app starts again.
     daily_failed: std::collections::HashSet<worker::DailyInput>,
@@ -478,7 +607,9 @@ impl App {
             daily_making: false,
             daily_auto_due: true,
             daily_retry_after_scan: false,
-            daily_by_button: false,
+            daily_kind: DailyKind::Auto,
+            past_days: BTreeMap::new(),
+            past_stop: Default::default(),
             daily_failed: Default::default(),
             daily_auto: Arc::new(std::sync::atomic::AtomicBool::new(daily_auto)),
             records_processing: false,
@@ -669,8 +800,9 @@ impl App {
             },
         }
     }
-    /// Makes the daily records of `dates`, unless records are being made.
-    fn make_daily(&mut self, dates: Vec<NaiveDate>, by_button: bool) -> Task<Message> {
+    /// Makes the daily records `scope` names for a job of `kind`, unless records are
+    /// being made. `daily_making` says whether the job started.
+    fn make_daily(&mut self, kind: DailyKind, scope: DailyScope) -> Task<Message> {
         if self.daily_making {
             return Task::none();
         }
@@ -682,21 +814,24 @@ impl App {
             return Task::none();
         };
         // Only an automatic job is the automatic mode's turn.
-        if !by_button {
+        if kind == DailyKind::Auto {
             self.daily_auto_due = false;
             self.daily_retry_after_scan = false;
         }
         self.daily_making = true;
-        self.daily_by_button = by_button;
+        self.daily_kind = kind.clone();
+        self.past_stop
+            .store(false, std::sync::atomic::Ordering::Release);
         let data_dir = self.data_dir.clone();
-        // The button tries every time; the automatic mode leaves failed inputs alone
-        // and stops between days once it is no longer chosen.
-        let skip = if by_button {
-            Default::default()
-        } else {
+        // The button and the past days try every time; the automatic mode leaves failed
+        // inputs alone and stops between days once it is no longer chosen.
+        let skip = if kind == DailyKind::Auto {
             self.daily_failed.clone()
+        } else {
+            Default::default()
         };
         let auto = self.daily_auto.clone();
+        let stop = self.past_stop.clone();
         worker::job(
             store,
             move |s| {
@@ -704,23 +839,103 @@ impl App {
                     s,
                     || crate::record_original::originals_vault(&data_dir),
                     worker::keep_originals,
-                    &dates,
+                    scope.which(),
                     worker::DailyRun {
                         make: |vault: &std::path::Path, transcript: &_| {
-                            crate::record_cli::summarize_day(
-                                vault,
-                                transcript,
-                                timeschedule_core::terra::MODEL,
-                            )
+                            Maker::of(&kind).make(vault, transcript)
                         },
                         key: crate::record_cli::daily_input_key,
                         skip: &skip,
-                        keep_going: || by_button || auto.load(std::sync::atomic::Ordering::Acquire),
+                        keep_going: || match &kind {
+                            DailyKind::Auto => auto.load(std::sync::atomic::Ordering::Acquire),
+                            // The check reads every past day and the making asks the
+                            // model for each: both end early when asked to.
+                            DailyKind::PastCheck(_) | DailyKind::Past(_) => {
+                                !stop.load(std::sync::atomic::Ordering::Acquire)
+                            }
+                            DailyKind::Button => true,
+                        },
                     },
                 )
             },
             Message::DailyMade,
         )
+    }
+    /// Whether a past-days job can start now: no chat scan keeps originals and no daily
+    /// job runs.
+    pub(crate) fn past_days_can_start(&self) -> bool {
+        !self.chat_scanning && !self.daily_making
+    }
+    /// Forgets where the past days of `project` stand and ends the job running for it
+    /// after the day in progress. For a project whose capture was turned off or that was
+    /// deleted.
+    fn forget_past_days(&mut self, project: &str) {
+        self.past_days.remove(project);
+        if self.daily_making && self.daily_kind.past_project() == Some(project) {
+            self.past_stop
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+    /// Starts the check of the first project whose check is owed, when no chat scan and no
+    /// daily job runs. `None` when none is owed or it cannot start now; it stays owed.
+    fn start_past_check(&mut self) -> Option<Task<Message>> {
+        if !self.past_days_can_start() {
+            return None;
+        }
+        let project = self
+            .past_days
+            .iter()
+            .find_map(|(id, state)| (*state == Past::Due).then(|| id.clone()))?;
+        let task = self.make_daily(
+            DailyKind::PastCheck(project.clone()),
+            DailyScope::Past {
+                project: project.clone(),
+                before: kst_today(),
+            },
+        );
+        if !self.daily_making {
+            return None;
+        }
+        self.past_days.insert(project, Past::Checking);
+        Some(task)
+    }
+    /// Turns what a check of `project` found into its state. `checking` says the project
+    /// was still being checked: capture turned off meanwhile removed it.
+    fn past_check_done(&mut self, project: String, checking: bool, made: &worker::DailyMade) {
+        if !checking || made.stopped {
+            return;
+        }
+        if made.due.is_empty() {
+            if made.failed.is_empty() {
+                self.notice = if made.unkept.is_empty() {
+                    "정리할 지난 대화가 없습니다.".into()
+                } else {
+                    "채팅 원문을 다 보관하지 못해 지난 대화를 확인하지 못했습니다. 잠시 뒤 다시 눌러 주세요."
+                        .into()
+                };
+                // Their days are not in the count.
+                if made.unplaced > 0 {
+                    self.notice.push_str(&unplaced_note(made.unplaced));
+                }
+            }
+            return;
+        }
+        let title = self
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == project)
+            .map_or("프로젝트", |p| p.title.as_str());
+        self.notice = format!(
+            "{title}: 지난 대화 {}일을 정리할 수 있습니다. 프로젝트 화면에서 확인해 주세요.",
+            made.due.len()
+        );
+        // The folder the days were counted in goes with them.
+        let Some(root) = made.root.clone() else {
+            return;
+        };
+        self.past_days
+            .insert(project, Past::Ask(made.due.clone(), root));
     }
     /// Reads the AI apps' chat files for the projects that capture chats, unless a scan runs.
     fn scan_chats(&mut self) -> Task<Message> {
@@ -992,6 +1207,12 @@ impl App {
         }
     }
     fn exit_when_idle(&mut self) -> Task<Message> {
+        // Quitting does not wait for dozens of days: the check of the past days and their
+        // making stop after the day in progress.
+        if self.daily_making && self.daily_kind.past_project().is_some() {
+            self.past_stop
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         if self.widget_ui.save_due.is_some() {
             self.quit_when_idle = true;
             return self.save_preferences();
@@ -1107,6 +1328,7 @@ impl App {
                     | Message::RecordsDrained(_)
                     | Message::ChatsScanned(_)
                     | Message::DailyMade(_)
+                    | Message::RepoFolderPicked(..)
                     | Message::NativeDone(..)
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Finished(_))
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Loaded(..))
@@ -1177,7 +1399,17 @@ impl App {
                 {
                     match store.set_chat_capture(&id, enabled) {
                         Ok(()) => {
-                            return Task::batch([self.refresh(), Task::done(Message::ScanChats)])
+                            if enabled {
+                                // The sessions already kept for the folder are checked
+                                // once the scan has kept the newest ones. What is being
+                                // checked or made is left alone.
+                                if !self.past_days.get(&id).is_some_and(Past::running) {
+                                    self.past_days.insert(id.clone(), Past::Due);
+                                }
+                            } else {
+                                self.forget_past_days(&id);
+                            }
+                            return Task::batch([self.refresh(), Task::done(Message::ScanChats)]);
                         }
                         Err(e) => self.error = e,
                     }
@@ -1203,10 +1435,24 @@ impl App {
                 }
                 // At start and every hour, and a job that waits for a scan. The job
                 // keeps the newest originals itself.
-                if (self.daily_auto_due || self.daily_retry_after_scan)
+                // The scan a retry waited for has ended: the retry is a turn now, so it is
+                // still owed when a job that runs at this moment ends.
+                if self.daily_retry_after_scan {
+                    self.daily_retry_after_scan = false;
+                    self.daily_auto_due = true;
+                }
+                // The automatic turn goes first; a check of the past days that is owed
+                // starts when no automatic turn does.
+                if self.daily_auto_due
                     && self.preferences.daily_record == preferences::DailyRecordMode::Auto
                 {
-                    tasks.push(self.make_daily(worker::finished_days(kst_today()), false));
+                    tasks.push(self.make_daily(
+                        DailyKind::Auto,
+                        DailyScope::Days(worker::finished_days(kst_today())),
+                    ));
+                }
+                if let Some(check) = self.start_past_check() {
+                    tasks.push(check);
                 }
                 return Task::batch(tasks);
             }
@@ -1221,9 +1467,99 @@ impl App {
                     return self.save_preferences();
                 }
             }
-            Message::MakeDaily(date) => return self.make_daily(vec![date], true),
+            Message::MakeDaily(date) => {
+                return self.make_daily(DailyKind::Button, DailyScope::Days(vec![date]))
+            }
+            Message::CheckPastDays(id) => {
+                // A check or the making in progress is not replaced.
+                if self.past_days.get(&id).is_some_and(Past::running) {
+                    return Task::none();
+                }
+                self.past_days.insert(id, Past::Due);
+                if let Some(check) = self.start_past_check() {
+                    return check;
+                }
+            }
+            Message::MakePastDays(id) => {
+                // Not during a chat scan either: the job would meet the scan at the
+                // project's lock, make nothing, and the answer would be used up.
+                if let (Some(Past::Ask(days, root)), true) =
+                    (self.past_days.get(&id), self.past_days_can_start())
+                {
+                    let (days, root) = (days.clone(), root.clone());
+                    let task = self.make_daily(
+                        DailyKind::Past(id.clone()),
+                        DailyScope::ProjectDays {
+                            project: id.clone(),
+                            days,
+                            root,
+                        },
+                    );
+                    if self.daily_making {
+                        self.past_days.insert(id, Past::Making);
+                        return task;
+                    }
+                }
+            }
+            Message::DismissPastDays(id) => {
+                if matches!(self.past_days.get(&id), Some(Past::Ask(..))) {
+                    self.past_days.remove(&id);
+                }
+            }
+            Message::StopPastDays(id) => {
+                // Only the making it was pressed for: a press that arrives after that job
+                // ended must not stop the job that started since.
+                if self.daily_making && self.daily_kind == DailyKind::Past(id) {
+                    self.past_stop
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+            Message::PickRepoFolder => {
+                let Some(e) = self
+                    .editor
+                    .as_mut()
+                    .filter(|e| e.form.kind == Kind::Project && !e.saving && !e.picking_repo)
+                else {
+                    return Task::none();
+                };
+                e.picking_repo = true;
+                let generation = e.generation;
+                let start = PathBuf::from(e.form.repo_path.trim());
+                return Task::perform(
+                    async move {
+                        let mut dialog = rfd::AsyncFileDialog::new();
+                        if start.is_dir() {
+                            dialog = dialog.set_directory(start);
+                        }
+                        dialog
+                            .pick_folder()
+                            .await
+                            .map(|folder| folder.path().to_path_buf())
+                    },
+                    move |folder| Message::RepoFolderPicked(generation, folder),
+                );
+            }
+            Message::RepoFolderPicked(generation, folder) => {
+                // Only the editor that asked takes the answer, not one opened since, even
+                // when its own dialog is open. A cancelled dialog changes nothing.
+                if let Some(e) = self.editor.as_mut().filter(|e| {
+                    e.generation == generation && e.picking_repo && e.form.kind == Kind::Project
+                }) {
+                    e.picking_repo = false;
+                    if let Some(folder) = folder {
+                        e.form.repo_path = folder.to_string_lossy().into_owned();
+                    }
+                }
+            }
             Message::DailyMade(result) => {
                 self.daily_making = false;
+                let kind = self.daily_kind.clone();
+                // The job is over, however it ended: no project stays checked or made. Capture
+                // turned off meanwhile removed the project of the job already.
+                let running = kind
+                    .past_project()
+                    .is_some_and(|id| self.past_days.get(id).is_some_and(Past::running));
+                self.past_days.retain(|_, state| !state.running());
                 let mut tasks = Vec::new();
                 let mut retry_after_scan = false;
                 match result {
@@ -1236,35 +1572,75 @@ impl App {
                             .retain(|(_, day, _)| *day >= oldest && *day < today);
                         if !made.failed.is_empty() {
                             self.error = format!("하루 정리 실패 · {}", made.failed.join(" / "));
-                            if self.daily_by_button && made.unplaced > 0 {
+                            if kind != DailyKind::Auto && made.unplaced > 0 {
                                 self.error.push_str(&unplaced_note(made.unplaced));
                             }
                         }
                         // An automatic job that met a project another run was keeping
                         // tries again after the next chat scan, not at once.
-                        retry_after_scan = !self.daily_by_button && !made.unkept.is_empty();
-                        if let Some(notice) = daily_notice(&made, self.daily_by_button) {
-                            self.notice = notice;
+                        retry_after_scan = kind == DailyKind::Auto && !made.unkept.is_empty();
+                        // The question of a project is asked again after days were made: it
+                        // must not promise calls for days that were just made.
+                        if matches!(kind, DailyKind::Auto | DailyKind::Button)
+                            && !made.saved.is_empty()
+                        {
+                            for state in self.past_days.values_mut() {
+                                if matches!(state, Past::Ask(..)) {
+                                    *state = Past::Due;
+                                }
+                            }
+                        }
+                        match &kind {
+                            DailyKind::PastCheck(id) => {
+                                self.past_check_done(id.clone(), running, &made)
+                            }
+                            DailyKind::Past(id) => {
+                                if let Some(notice) = past_notice(&made) {
+                                    self.notice = notice;
+                                }
+                                // Originals that could not all be kept (a chat scan
+                                // held the project): no day was made, so the answer
+                                // is not used up and the days are counted again.
+                                if running && !made.unkept.is_empty() {
+                                    self.past_days.insert(id.clone(), Past::Due);
+                                }
+                            }
+                            DailyKind::Auto | DailyKind::Button => {
+                                if let Some(notice) = daily_notice(&made, kind == DailyKind::Button)
+                                {
+                                    self.notice = notice;
+                                }
+                            }
                         }
                         // The job showed its new records in the diary already.
                         if made.shown > 0 {
                             tasks.push(self.refresh());
                         }
                     }
-                    Err(e) => self.error = format!("하루 정리 실패 · {e}"),
+                    Err(e) => {
+                        self.error = format!("하루 정리 실패 · {e}");
+                    }
                 }
                 // Set first, so an automatic job started below covers it.
                 if retry_after_scan {
                     self.daily_retry_after_scan = true;
                 }
-                // An automatic turn that came while this job ran. Not while a chat scan
-                // keeps originals: the two would meet at a project's lock, and the scan
-                // starts the turn when it ends.
+                // The automatic turn goes first; a check of the past days that is owed
+                // starts when no automatic turn does.
                 if self.daily_auto_due
+                    // An automatic turn that came while this job ran. Not while a chat scan
+                    // keeps originals: the two would meet at a project's lock, and the scan
+                    // starts the turn when it ends.
                     && !self.chat_scanning
                     && self.preferences.daily_record == preferences::DailyRecordMode::Auto
                 {
-                    tasks.push(self.make_daily(worker::finished_days(kst_today()), false));
+                    tasks.push(self.make_daily(
+                        DailyKind::Auto,
+                        DailyScope::Days(worker::finished_days(kst_today())),
+                    ));
+                }
+                if let Some(check) = self.start_past_check() {
+                    tasks.push(check);
                 }
                 return Task::batch(tasks);
             }
@@ -1927,6 +2303,17 @@ impl App {
                                 }
                             }
                         }
+                        // A deleted project has no past days to ask about. A saved one
+                        // keeps its question: the confirmed days are made only while
+                        // the project's folder is the one they were counted in.
+                        let project = self
+                            .editor
+                            .as_ref()
+                            .filter(|e| e.form.kind == Kind::Project && e.deleting)
+                            .and_then(|e| e.form.id.clone());
+                        if let Some(project) = project {
+                            self.forget_past_days(&project);
+                        }
                         self.editor = None;
                         self.editor_in_quick = false;
                         self.editor_generation += 1;
@@ -1936,6 +2323,7 @@ impl App {
                     Err(error) => {
                         if let Some(e) = &mut self.editor {
                             e.saving = false;
+                            e.deleting = false;
                             e.confirmation = None;
                             e.error = error;
                         }
@@ -2140,6 +2528,7 @@ impl App {
         }
         editor.picker = None;
         editor.saving = true;
+        editor.deleting = delete;
         editor.error.clear();
         let form = editor.form.clone();
         let generation = editor.generation;
@@ -2223,6 +2612,23 @@ fn daily_notice(made: &worker::DailyMade, by_button: bool) -> Option<String> {
     })
 }
 
+/// What the notice line says after the confirmed past days were made. A job that was
+/// stopped with days left says so, and what it made until then.
+fn past_notice(made: &worker::DailyMade) -> Option<String> {
+    if !made.stopped {
+        return daily_notice(made, true);
+    }
+    let made_so_far = if made.saved.is_empty() {
+        None
+    } else {
+        daily_notice(made, true)
+    };
+    Some(match made_so_far {
+        Some(done) => format!("지난 대화 정리를 멈췄습니다. {done}"),
+        None => "지난 대화 정리를 멈췄습니다.".into(),
+    })
+}
+
 /// Said by the button when files could not be read before it was known whose they are.
 fn unplaced_note(count: usize) -> String {
     format!(" 어느 프로젝트의 것인지 모르는 채팅 파일 {count}개는 읽지 못했습니다.")
@@ -2302,7 +2708,9 @@ mod tests {
             daily_making: false,
             daily_auto_due: true,
             daily_retry_after_scan: false,
-            daily_by_button: false,
+            daily_kind: DailyKind::Auto,
+            past_days: BTreeMap::new(),
+            past_stop: Default::default(),
             daily_failed: Default::default(),
             daily_auto: Default::default(),
             records_processing: false,
@@ -3212,7 +3620,7 @@ mod tests {
         let day = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
         let _ = app.update(Message::MakeDaily(day));
         // One job keeps the newest originals and makes the day.
-        assert!(app.daily_making && app.daily_by_button);
+        assert!(app.daily_making && app.daily_kind == DailyKind::Button);
         assert!(
             app.daily_auto_due,
             "the button does not take the automatic turn"
@@ -3316,6 +3724,616 @@ mod tests {
             originals: Ok(Default::default()),
             daily: Ok(Default::default()),
         }
+    }
+    /// A project with a folder, open on the project screen, whose capture is turned on.
+    fn capturing(dir: &crate::record_inbox::tests::TestDir, app: &mut App) -> String {
+        let repo = dir.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = app.store.clone().unwrap();
+        let mut project = Form::new(Kind::Project, String::new(), None);
+        project.title = "작업".into();
+        project.repo_path = repo.to_string_lossy().into_owned();
+        project.save(&store).unwrap();
+        let listed = store.list_projects().unwrap();
+        let id = listed[0].id.clone();
+        // What the project screen has loaded.
+        app.snapshot.projects = listed;
+        app.project = Some(id.clone());
+        let _ = app.update(Message::SetChatCapture(id.clone(), true));
+        id
+    }
+    fn due(days: &[&str]) -> worker::DailyMade {
+        worker::DailyMade {
+            due: days
+                .iter()
+                .map(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").unwrap())
+                .collect(),
+            root: Some("root".into()),
+            ..Default::default()
+        }
+    }
+    /// A second project with a folder, open on the project screen, whose capture is turned on.
+    fn capturing_another(dir: &crate::record_inbox::tests::TestDir, app: &mut App) -> String {
+        let repo = dir.0.join("repo-two");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = app.store.clone().unwrap();
+        let mut project = Form::new(Kind::Project, String::new(), None);
+        project.title = "둘째".into();
+        project.repo_path = repo.to_string_lossy().into_owned();
+        project.save(&store).unwrap();
+        let listed = store.list_projects().unwrap();
+        let id = listed
+            .iter()
+            .find(|p| p.title == "둘째")
+            .unwrap()
+            .id
+            .clone();
+        app.snapshot.projects = listed;
+        app.project = Some(id.clone());
+        let _ = app.update(Message::SetChatCapture(id.clone(), true));
+        id
+    }
+    fn nothing_runs_for_the_past_days(app: &App) -> bool {
+        app.past_days.values().all(|state| !state.running())
+    }
+    #[test]
+    fn turning_capture_on_checks_the_past_days_once_the_scan_has_ended() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        assert_eq!(app.past_days.get(&id), Some(&Past::Due));
+        // The scan that keeps the newest sessions runs first.
+        let _ = app.update(Message::ScanChats);
+        assert!(app.chat_scanning && !app.daily_making);
+        assert_eq!(app.past_days.get(&id), Some(&Past::Due));
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(app.daily_making && app.daily_kind == DailyKind::PastCheck(id.clone()));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Checking));
+        // Days are due: the owner is asked, and the notice names the project and the count.
+        let _ = app.update(Message::DailyMade(Ok(due(&["2026-11-10", "2026-11-12"]))));
+        assert!(!app.daily_making);
+        let days = [
+            NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 11, 12).unwrap(),
+        ]
+        .to_vec();
+        assert_eq!(
+            app.past_days.get(&id),
+            Some(&Past::Ask(days.clone(), "root".into()))
+        );
+        assert!(app.notice.contains("작업") && app.notice.contains("2일"));
+        assert_eq!(
+            crate::views::past_days_question(&days),
+            "지난 대화가 2일 있습니다 (2026-11-10 ~ 2026-11-12). 모두 정리하면 모델을 2번 부릅니다."
+        );
+        // Not now: nothing is made and the question is gone.
+        let _ = app.update(Message::DismissPastDays(id));
+        assert!(app.past_days.is_empty());
+    }
+    #[test]
+    fn a_check_with_nothing_due_says_so_and_asks_nothing() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Checking));
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        assert!(app.past_days.is_empty());
+        assert_eq!(app.notice, "정리할 지난 대화가 없습니다.");
+    }
+    #[test]
+    fn the_confirmed_past_days_are_made_and_can_be_stopped() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        let _ = app.update(Message::DailyMade(Ok(due(&["2026-11-10"]))));
+        let _ = app.update(Message::MakePastDays(id.clone()));
+        assert!(app.daily_making && app.daily_kind == DailyKind::Past(id.clone()));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Making));
+        // Stopping is asked for with a flag that the job reads between its days.
+        assert!(!app.past_stop.load(std::sync::atomic::Ordering::Acquire));
+        // A press meant for another project's making does not stop this one.
+        let _ = app.update(Message::StopPastDays("another".into()));
+        assert!(!app.past_stop.load(std::sync::atomic::Ordering::Acquire));
+        let _ = app.update(Message::StopPastDays(id.clone()));
+        assert!(app.past_stop.load(std::sync::atomic::Ordering::Acquire));
+        let stopped = worker::DailyMade {
+            saved: vec![NaiveDate::from_ymd_opt(2026, 11, 10).unwrap()],
+            stopped: true,
+            ..Default::default()
+        };
+        let _ = app.update(Message::DailyMade(Ok(stopped)));
+        assert!(app.past_days.is_empty());
+        assert!(
+            app.notice.starts_with("지난 대화 정리를 멈췄습니다."),
+            "{}",
+            app.notice
+        );
+        assert!(app.notice.contains("11월 10일"), "{}", app.notice);
+        // A job that ends whole says what the button says.
+        let whole = worker::DailyMade {
+            unchanged: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            past_notice(&whole),
+            Some("대화가 바뀌지 않아 하루 정리를 새로 만들지 않았습니다.".into())
+        );
+    }
+    #[test]
+    fn a_stop_that_arrives_after_its_making_ended_does_not_stop_the_next_check() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert_eq!(app.daily_kind, DailyKind::PastCheck(id.clone()));
+        // The press was for a making of the same project that is over.
+        let _ = app.update(Message::StopPastDays(id.clone()));
+        assert!(
+            !app.past_stop.load(std::sync::atomic::Ordering::Acquire),
+            "the check goes on"
+        );
+    }
+    #[test]
+    fn the_confirmed_days_wait_for_a_chat_scan_to_end_and_the_question_stays() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        let _ = app.update(Message::DailyMade(Ok(due(&["2026-11-10"]))));
+        let asked = app.past_days.get(&id).cloned();
+        assert!(matches!(asked, Some(Past::Ask(..))));
+        // Opening the project screen again reads the chat files.
+        let _ = app.update(Message::ScanChats);
+        assert!(app.chat_scanning && !app.past_days_can_start());
+        let _ = app.update(Message::MakePastDays(id.clone()));
+        assert!(!app.daily_making, "no job meets the scan at the lock");
+        assert_eq!(app.past_days.get(&id).cloned(), asked);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        let _ = app.update(Message::MakePastDays(id.clone()));
+        assert!(app.daily_making && app.daily_kind == DailyKind::Past(id));
+    }
+    #[test]
+    fn a_saved_project_keeps_its_question_and_a_deleted_one_is_forgotten() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        let close = |app: &mut App, delete: bool| {
+            let mut form = Form::new(Kind::Project, String::new(), None);
+            form.id = Some(id.clone());
+            app.editor_generation += 1;
+            let generation = app.editor_generation;
+            let mut editor = Editor::new(form, generation);
+            // The confirmation may be closed by then; the running save says it.
+            editor.deleting = delete;
+            app.editor = Some(editor);
+            let _ = app.update(Message::Saved(generation, Ok(())));
+        };
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        let _ = app.update(Message::DailyMade(Ok(due(&["2026-11-10"]))));
+        let asked = app.past_days.get(&id).cloned();
+        // The question goes with the folder it was counted in.
+        assert!(matches!(&asked, Some(Past::Ask(_, root)) if root == "root"));
+        // Saving the project, whatever was edited, keeps the question: the job makes the
+        // days only while the project's folder is that one.
+        close(&mut app, false);
+        assert_eq!(app.past_days.get(&id).cloned(), asked);
+        // The making goes on as well.
+        let _ = app.update(Message::MakePastDays(id.clone()));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Making));
+        close(&mut app, false);
+        assert!(!app.past_stop.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Making));
+        // A deleted project is forgotten and the job running for it ends.
+        close(&mut app, true);
+        assert!(app.past_stop.load(std::sync::atomic::Ordering::Acquire));
+        assert!(app.past_days.is_empty());
+    }
+    #[test]
+    fn a_check_that_does_not_say_its_folder_asks_nothing() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        let found = worker::DailyMade {
+            root: None,
+            ..due(&["2026-11-10"])
+        };
+        let _ = app.update(Message::DailyMade(Ok(found)));
+        assert!(!app.past_days.contains_key(&id), "{:?}", app.past_days);
+    }
+    #[test]
+    fn a_making_that_could_not_keep_the_originals_counts_the_days_again() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        let _ = app.update(Message::DailyMade(Ok(due(&["2026-11-10"]))));
+        let _ = app.update(Message::MakePastDays(id.clone()));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Making));
+        // A chat scan held the project while the job kept the originals: no day was made.
+        let held = worker::DailyMade {
+            unkept: vec!["작업".into()],
+            ..Default::default()
+        };
+        let _ = app.update(Message::DailyMade(Ok(held)));
+        // The answer is not used up: the days are counted again and asked about.
+        assert!(app.daily_making && app.daily_kind == DailyKind::PastCheck(id.clone()));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Checking));
+    }
+    #[test]
+    fn a_retry_whose_scan_ended_during_a_check_runs_when_the_check_ends() {
+        use timeschedule_desktop::preferences::DailyRecordMode;
+        let (dir, mut app) = scanning_app();
+        let _ = app.update(Message::SetDailyMode(DailyRecordMode::Auto));
+        let id = capturing(&dir, &mut app);
+        // The automatic job met a project another run was keeping: it waits for a scan.
+        app.daily_auto_due = false;
+        app.daily_retry_after_scan = true;
+        app.daily_making = true;
+        app.daily_kind = DailyKind::PastCheck(id.clone());
+        app.past_days.insert(id.clone(), Past::Checking);
+        // That scan ends while the check runs.
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(app.daily_auto_due && !app.daily_retry_after_scan);
+        assert_eq!(app.daily_kind, DailyKind::PastCheck(id.clone()));
+        // The check ends: the automatic turn is still owed and starts.
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        assert!(app.daily_making && app.daily_kind == DailyKind::Auto);
+    }
+    #[test]
+    fn a_check_that_found_nothing_says_which_files_it_could_not_place() {
+        let (dir, mut app) = scanning_app();
+        let _id = capturing(&dir, &mut app);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        let nothing = worker::DailyMade {
+            unplaced: 2,
+            ..Default::default()
+        };
+        let _ = app.update(Message::DailyMade(Ok(nothing)));
+        assert!(app.notice.starts_with("정리할 지난 대화가 없습니다."));
+        assert!(app.notice.contains("2개"), "{}", app.notice);
+    }
+    #[test]
+    fn the_flag_is_cleared_when_the_next_job_starts_and_quitting_sets_it_for_the_past_days() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        app.past_stop
+            .store(true, std::sync::atomic::Ordering::Release);
+        app.past_days.insert(
+            id.clone(),
+            Past::Ask(
+                vec![NaiveDate::from_ymd_opt(2026, 11, 10).unwrap()],
+                "root".into(),
+            ),
+        );
+        let _ = app.update(Message::MakePastDays(id));
+        assert!(app.daily_making);
+        assert!(!app.past_stop.load(std::sync::atomic::Ordering::Acquire));
+        // Quitting does not wait for the days left.
+        let _ = app.exit_when_idle();
+        assert!(app.quit_when_idle);
+        assert!(app.past_stop.load(std::sync::atomic::Ordering::Acquire));
+    }
+    #[test]
+    fn the_automatic_turn_goes_before_a_check_that_is_owed() {
+        use timeschedule_desktop::preferences::DailyRecordMode;
+        let (dir, mut app) = scanning_app();
+        let _ = app.update(Message::SetDailyMode(DailyRecordMode::Auto));
+        let id = capturing(&dir, &mut app);
+        assert!(app.daily_auto_due);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        // The turn goes first and the check stays owed.
+        assert!(app.daily_making && app.daily_kind == DailyKind::Auto);
+        assert!(!app.daily_auto_due);
+        assert_eq!(app.past_days.get(&id), Some(&Past::Due));
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        assert!(app.daily_making && app.daily_kind == DailyKind::PastCheck(id.clone()));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Checking));
+        // The retry after a scan goes first as well.
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        app.daily_retry_after_scan = true;
+        app.past_days.insert(id.clone(), Past::Due);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(app.daily_making && app.daily_kind == DailyKind::Auto);
+        assert!(!app.daily_retry_after_scan);
+        assert_eq!(app.past_days.get(&id), Some(&Past::Due));
+        // A turn that came while another job ran goes before the check when that ends.
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Checking));
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        app.past_days.insert(id.clone(), Past::Due);
+        let _ = app.update(Message::MakeDaily(
+            NaiveDate::from_ymd_opt(2026, 11, 20).unwrap(),
+        ));
+        app.daily_auto_due = true;
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        assert!(app.daily_making && app.daily_kind == DailyKind::Auto);
+        assert_eq!(app.past_days.get(&id), Some(&Past::Due));
+    }
+    #[test]
+    fn a_question_is_counted_again_after_the_automatic_or_the_button_job_saved_days() {
+        for button in [true, false] {
+            let (dir, mut app) = scanning_app();
+            let id = capturing(&dir, &mut app);
+            let other = capturing_another(&dir, &mut app);
+            let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+            app.past_days
+                .insert(id.clone(), Past::Ask(vec![day], "root".into()));
+            app.past_days
+                .insert(other.clone(), Past::Ask(vec![day], "root".into()));
+            let _ = app.update(Message::MakeDaily(day));
+            // Nothing saved: the counts stand.
+            let _ = app.update(Message::DailyMade(Ok(Default::default())));
+            assert_eq!(
+                app.past_days.get(&id),
+                Some(&Past::Ask(vec![day], "root".into()))
+            );
+            let _ = app.update(Message::MakeDaily(day));
+            let saved = worker::DailyMade {
+                saved: vec![day],
+                ..Default::default()
+            };
+            if !button {
+                app.daily_kind = DailyKind::Auto;
+            }
+            let _ = app.update(Message::DailyMade(Ok(saved)));
+            // Every question goes back to a check; the first starts, the other waits.
+            let states: Vec<_> = app.past_days.values().cloned().collect();
+            assert!(states.contains(&Past::Checking) && states.contains(&Past::Due));
+            assert!(app.daily_making && matches!(app.daily_kind, DailyKind::PastCheck(_)));
+        }
+    }
+    #[test]
+    fn several_projects_wait_or_are_asked_at_once() {
+        let (dir, mut app) = scanning_app();
+        let one = capturing(&dir, &mut app);
+        let two = capturing_another(&dir, &mut app);
+        assert_eq!(app.past_days.get(&one), Some(&Past::Due));
+        assert_eq!(app.past_days.get(&two), Some(&Past::Due));
+        // One check at a time, the first project in order.
+        let first = app.past_days.keys().next().cloned().unwrap();
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(app.daily_making && app.daily_kind == DailyKind::PastCheck(first.clone()));
+        let second = app
+            .past_days
+            .keys()
+            .find(|k| **k != first)
+            .cloned()
+            .unwrap();
+        assert_eq!(app.past_days.get(&second), Some(&Past::Due));
+        // The first is asked and the second is checked next.
+        let _ = app.update(Message::DailyMade(Ok(due(&["2026-11-10"]))));
+        assert!(matches!(app.past_days.get(&first), Some(Past::Ask(..))));
+        assert_eq!(app.past_days.get(&second), Some(&Past::Checking));
+        let _ = app.update(Message::DailyMade(Ok(due(&["2026-11-11", "2026-11-12"]))));
+        assert!(matches!(app.past_days.get(&first), Some(Past::Ask(d, _)) if d.len() == 1));
+        assert!(matches!(app.past_days.get(&second), Some(Past::Ask(d, _)) if d.len() == 2));
+        assert!(!app.daily_making);
+    }
+    #[test]
+    fn the_past_days_button_checks_at_once_when_nothing_runs_and_waits_when_something_does() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        app.past_days.clear();
+        let _ = app.update(Message::CheckPastDays(id.clone()));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Checking));
+        assert!(app.daily_making && app.daily_kind == DailyKind::PastCheck(id.clone()));
+        // A check in progress is not replaced by another press, and another project's
+        // press waits.
+        let _ = app.update(Message::CheckPastDays(id.clone()));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Checking));
+        let _ = app.update(Message::CheckPastDays("other".into()));
+        assert_eq!(app.past_days.get("other"), Some(&Past::Due));
+        assert!(app.daily_kind == DailyKind::PastCheck(id.clone()));
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        assert_eq!(app.past_days.get("other"), Some(&Past::Checking));
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        assert!(app.past_days.is_empty());
+        // With a daily job running (the button's), the check is owed until it ends.
+        let _ = app.update(Message::MakeDaily(
+            NaiveDate::from_ymd_opt(2026, 11, 20).unwrap(),
+        ));
+        let _ = app.update(Message::CheckPastDays(id.clone()));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Due));
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        assert_eq!(app.past_days.get(&id), Some(&Past::Checking));
+    }
+    #[test]
+    fn turning_capture_off_ends_what_the_past_days_state_names() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        assert_eq!(app.past_days.get(&id), Some(&Past::Due));
+        let _ = app.update(Message::SetChatCapture(id.clone(), false));
+        assert!(app.past_days.is_empty());
+        // A question is gone as well.
+        let _ = app.update(Message::SetChatCapture(id.clone(), true));
+        app.past_days
+            .insert(id.clone(), Past::Ask(vec![], "root".into()));
+        let _ = app.update(Message::SetChatCapture(id, false));
+        assert!(app.past_days.is_empty());
+    }
+    #[test]
+    fn turning_capture_off_stops_the_running_job_of_that_project_only() {
+        let (dir, mut app) = scanning_app();
+        let id = capturing(&dir, &mut app);
+        let other = capturing_another(&dir, &mut app);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        let checked = match &app.daily_kind {
+            DailyKind::PastCheck(p) => p.clone(),
+            kind => panic!("{kind:?}"),
+        };
+        let (running, idle) = if checked == id {
+            (id, other)
+        } else {
+            (other, id)
+        };
+        fn stopped(app: &App) -> bool {
+            app.past_stop.load(std::sync::atomic::Ordering::Acquire)
+        }
+        // Another project's capture is not this job's.
+        app.project = Some(idle.clone());
+        let _ = app.update(Message::SetChatCapture(idle.clone(), false));
+        assert!(!stopped(&app));
+        // Its own: the job ends after the day in progress, and turning it on again before
+        // it ends leaves a fresh check owed.
+        app.project = Some(running.clone());
+        let _ = app.update(Message::SetChatCapture(running.clone(), false));
+        assert!(stopped(&app));
+        assert!(app.past_days.is_empty());
+        let _ = app.update(Message::SetChatCapture(running.clone(), true));
+        assert_eq!(app.past_days.get(&running), Some(&Past::Due));
+        let ended = worker::DailyMade {
+            stopped: true,
+            ..Default::default()
+        };
+        let _ = app.update(Message::DailyMade(Ok(ended)));
+        assert!(app.daily_making && app.daily_kind == DailyKind::PastCheck(running.clone()));
+        assert_eq!(app.past_days.get(&running), Some(&Past::Checking));
+        assert!(!stopped(&app), "the new check starts with the flag cleared");
+        // The same for the making.
+        let _ = app.update(Message::DailyMade(Ok(due(&["2026-11-10"]))));
+        let _ = app.update(Message::MakePastDays(running.clone()));
+        assert_eq!(app.past_days.get(&running), Some(&Past::Making));
+        let _ = app.update(Message::SetChatCapture(running.clone(), false));
+        assert!(stopped(&app));
+        assert!(!app.past_days.contains_key(&running));
+    }
+    #[test]
+    fn no_job_that_ended_leaves_a_project_checked_or_made() {
+        let results = || -> Vec<Result<worker::DailyMade, String>> {
+            vec![
+                Ok(Default::default()),
+                Ok(due(&["2026-11-10"])),
+                Ok(worker::DailyMade {
+                    stopped: true,
+                    ..Default::default()
+                }),
+                Ok(worker::DailyMade {
+                    failed: vec!["작업: 실패".into()],
+                    unkept: vec!["작업".into()],
+                    ..Default::default()
+                }),
+                Err("끝".into()),
+            ]
+        };
+        for check in [true, false] {
+            for result in results() {
+                let (dir, mut app) = scanning_app();
+                let id = capturing(&dir, &mut app);
+                if check {
+                    let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+                    assert_eq!(app.past_days.get(&id), Some(&Past::Checking));
+                } else {
+                    app.past_days
+                        .insert(id.clone(), Past::Ask(vec![NaiveDate::MIN], "root".into()));
+                    let _ = app.update(Message::MakePastDays(id.clone()));
+                    assert_eq!(app.past_days.get(&id), Some(&Past::Making));
+                }
+                // A making that could not keep the originals made no day: its days are
+                // counted again at once. Nothing else leaves a job running.
+                let recount = !check && matches!(&result, Ok(made) if !made.unkept.is_empty());
+                let _ = app.update(Message::DailyMade(result));
+                assert_eq!(app.daily_making, recount);
+                if recount {
+                    assert_eq!(app.daily_kind, DailyKind::PastCheck(id.clone()));
+                    assert_eq!(app.past_days.get(&id), Some(&Past::Checking));
+                } else {
+                    assert!(nothing_runs_for_the_past_days(&app), "{:?}", app.past_days);
+                }
+            }
+        }
+    }
+    #[test]
+    fn only_the_check_of_the_past_days_is_dry() {
+        let id = || "p".to_string();
+        assert_eq!(Maker::of(&DailyKind::PastCheck(id())), Maker::Dry);
+        for kind in [DailyKind::Auto, DailyKind::Button, DailyKind::Past(id())] {
+            assert_eq!(Maker::of(&kind), Maker::Real, "{kind:?}");
+        }
+    }
+    #[test]
+    fn the_automatic_and_the_button_jobs_keep_their_notices_after_the_past_days_arrived() {
+        let (_dir, mut app) = scanning_app();
+        let day = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        let _ = app.update(Message::MakeDaily(day));
+        let held = worker::DailyMade {
+            unkept: vec!["작업".into()],
+            ..Default::default()
+        };
+        let _ = app.update(Message::DailyMade(Ok(held)));
+        assert!(
+            app.notice.contains("원문을 다 보관하지 못해"),
+            "{}",
+            app.notice
+        );
+        assert!(!app.daily_retry_after_scan, "only an automatic job retries");
+    }
+    #[test]
+    fn the_folder_dialog_fills_the_open_project_editor_and_a_cancel_changes_nothing() {
+        let (_dir, mut app) = scanning_app();
+        let _ = app.open_form(Form::new(Kind::Project, String::new(), None));
+        let g = app.editor.as_ref().unwrap().generation;
+        assert!(!app.editor.as_ref().unwrap().dirty());
+        let _ = app.update(Message::PickRepoFolder);
+        assert!(app.editor.as_ref().unwrap().picking_repo);
+        // Cancelled: the field and the pending mark are as they were.
+        let _ = app.update(Message::RepoFolderPicked(g, None));
+        let e = app.editor.as_ref().unwrap();
+        assert_eq!(e.form.repo_path, "");
+        assert!(!e.picking_repo && !e.dirty());
+        // Chosen into a clean form: the path is in the field, and the footer's
+        // "미저장 변경" (it shows when `dirty`) is on.
+        let _ = app.update(Message::PickRepoFolder);
+        let _ = app.update(Message::RepoFolderPicked(
+            g,
+            Some(PathBuf::from("C:\\work\\새 저장소")),
+        ));
+        let e = app.editor.as_ref().unwrap();
+        assert_eq!(e.form.repo_path, "C:\\work\\새 저장소");
+        assert!(e.dirty());
+        // An answer nobody asked this editor for is dropped, and so is one that comes
+        // after the editor was closed.
+        let _ = app.update(Message::RepoFolderPicked(
+            g,
+            Some(PathBuf::from("C:\\other")),
+        ));
+        assert_eq!(
+            app.editor.as_ref().unwrap().form.repo_path,
+            "C:\\work\\새 저장소"
+        );
+        app.editor = None;
+        let _ = app.update(Message::RepoFolderPicked(
+            g,
+            Some(PathBuf::from("C:\\other")),
+        ));
+        assert!(app.editor.is_none());
+    }
+    #[test]
+    fn the_answer_of_a_closed_editor_is_not_taken_by_a_newer_one_with_its_dialog_open() {
+        let (_dir, mut app) = scanning_app();
+        let _ = app.open_form(Form::new(Kind::Project, String::new(), None));
+        let old = app.editor.as_ref().unwrap().generation;
+        let _ = app.update(Message::PickRepoFolder);
+        app.editor = None;
+        let _ = app.open_form(Form::new(Kind::Project, String::new(), None));
+        let new = app.editor.as_ref().unwrap().generation;
+        assert_ne!(old, new);
+        let _ = app.update(Message::PickRepoFolder);
+        let _ = app.update(Message::RepoFolderPicked(
+            old,
+            Some(PathBuf::from("C:\\old")),
+        ));
+        let e = app.editor.as_ref().unwrap();
+        assert_eq!(e.form.repo_path, "");
+        assert!(e.picking_repo, "its own dialog is still open");
+        let _ = app.update(Message::RepoFolderPicked(
+            new,
+            Some(PathBuf::from("C:\\new")),
+        ));
+        let e = app.editor.as_ref().unwrap();
+        assert_eq!(e.form.repo_path, "C:\\new");
+        assert!(!e.picking_repo && e.dirty());
+    }
+    #[test]
+    fn only_the_project_editor_opens_the_folder_dialog() {
+        let (_dir, mut app) = scanning_app();
+        let _ = app.open_form(Form::new(Kind::Note, String::new(), None));
+        let _ = app.update(Message::PickRepoFolder);
+        assert!(!app.editor.as_ref().unwrap().picking_repo);
     }
     #[test]
     fn chat_files_are_read_hourly_while_the_record_inbox_is_polled_every_minute() {

@@ -6,7 +6,8 @@ use timeschedule_core::{
     daily_record::{
         day_transcript,
         record::{
-            fingerprint, schema, summarize, DailyRecord, Decider, Decision, Outcome, Proposer,
+            fingerprint, is_current, schema, summarize, DailyRecord, Decider, Decision, Outcome,
+            Proposer,
         },
         DayTranscript, Speaker,
     },
@@ -1445,4 +1446,46 @@ fn a_record_put_in_place_while_the_model_answers_is_not_replaced() {
         log.lines().last().unwrap().contains("\"save_failed\""),
         "{log}"
     );
+}
+
+#[test]
+fn a_kept_record_is_current_for_the_same_input_and_not_once_the_dialogue_changes() {
+    let v = vault();
+    let t = transcript(&v.0);
+    // Nothing kept yet: not current, and looking wrote nothing.
+    assert!(!is_current(&v.0, &t, TERRA, "medium").unwrap());
+    assert!(!v.0.join("daily").exists());
+    saved(summarize(&v.0, &t, TERRA, "medium", |_, _| reply(answer())).unwrap());
+    let before = std::fs::read(v.day()).unwrap();
+    assert!(is_current(&v.0, &t, TERRA, "medium").unwrap());
+    // Another model or effort would ask another question.
+    assert!(!is_current(&v.0, &t, "another-model", "medium").unwrap());
+    assert!(!is_current(&v.0, &t, TERRA, "high").unwrap());
+    // The dialogue changed.
+    let mut changed = t.clone();
+    changed.blocks[0].text.push_str(" (고침)");
+    assert!(!is_current(&v.0, &changed, TERRA, "medium").unwrap());
+    // It agrees with `summarize`: the same input is not asked again.
+    let again = summarize(&v.0, &t, TERRA, "medium", |_, _| panic!("asked again"));
+    assert!(matches!(again.unwrap(), Outcome::Unchanged { .. }));
+    assert_eq!(std::fs::read(v.day()).unwrap(), before);
+    assert!(v.usage().len() == 1, "looking made no model call");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_record_folder_behind_a_link_is_refused_when_looking_as_when_making() {
+    let v = vault();
+    let t = transcript(&v.0);
+    let elsewhere = v.0.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(v.0.join("daily"))
+        .arg(&elsewhere)
+        .output()
+        .unwrap();
+    assert!(made.status.success());
+    assert!(is_current(&v.0, &t, TERRA, "medium").is_err());
+    assert!(summarize(&v.0, &t, TERRA, "medium", |_, _| panic!("asked")).is_err());
 }

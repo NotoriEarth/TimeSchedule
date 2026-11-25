@@ -4470,3 +4470,82 @@ fn project_chat_review_requires_checked_candidates_and_preserves_them_on_reread(
         assert_eq!(store.portfolio_panel(&project).unwrap().experiences, 1);
     }
 }
+
+#[test]
+#[ignore = "manual previews of the past-days area and the project editor's folder row"]
+fn render_past_days_previews() {
+    use timeschedule_core::diary::ProjectInput;
+    let output = PathBuf::from(std::env::var_os("TIMESCHEDULE_PREVIEW_DIR").unwrap());
+    std::fs::create_dir_all(&output).unwrap();
+    let dir = crate::record_inbox::tests::TestDir::new();
+    let mut app = fixture();
+    let store = app.store.clone().unwrap();
+    let project = store
+        .save_project(ProjectInput {
+            id: None,
+            title: "midi".into(),
+            description: "MIDI 편집 프로그램".into(),
+            repo_path: dir.0.to_string_lossy().into_owned(),
+        })
+        .unwrap()
+        .id;
+    // The capture is on for an empty folder: no session is read.
+    store.set_chat_capture(&project, true).unwrap();
+    run_message(&mut app, Message::Project(Some(project.clone())));
+    let days: Vec<NaiveDate> = [20, 22, 23, 24]
+        .iter()
+        .map(|d| NaiveDate::from_ymd_opt(2026, 11, *d).unwrap())
+        .collect();
+    let size = Size::new(1160., 820.);
+    let frame = |app: &App, name: &str| {
+        let mut element = crate::views::view(app, app.manager);
+        let mut renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        render_scaled_frame(
+            app,
+            &mut element,
+            &mut tree,
+            &node,
+            &mut renderer,
+            size,
+            &output.join(format!("{name}.png")),
+            1.,
+        );
+    };
+    app.manager_size = size;
+    for (name, state, making) in [
+        ("past-1-button", None, false),
+        ("past-2-checking", Some(Past::Checking), true),
+        (
+            "past-3-ask",
+            Some(Past::Ask(days.clone(), "root".into())),
+            false,
+        ),
+        ("past-4-making", Some(Past::Making), true),
+        ("past-5-other-job", None, true),
+    ] {
+        app.past_days.clear();
+        app.past_days.extend(state.map(|s| (project.clone(), s)));
+        app.daily_making = making;
+        frame(&app, name);
+    }
+    app.past_days.clear();
+    app.daily_making = false;
+    let _ = app.update(Message::New(Kind::Project, None));
+    frame(&app, "editor-1-empty");
+    let generation = app.editor.as_ref().unwrap().generation;
+    let _ = app.update(Message::RepoFolderPicked(generation, None));
+    app.editor.as_mut().unwrap().picking_repo = true;
+    let _ = app.update(Message::RepoFolderPicked(
+        generation,
+        Some(PathBuf::from(
+            r"C:\LSH\PROJECTS\some-rather-long-folder-name\nested\repository-with-a-long-name",
+        )),
+    ));
+    frame(&app, "editor-2-picked");
+}

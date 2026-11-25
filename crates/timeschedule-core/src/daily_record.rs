@@ -361,17 +361,40 @@ impl Block {
     }
 }
 
+/// The kept file of `entry`, decompressed. Both readers of kept files open them here, so
+/// the rules about which path may be read are one.
+fn open_kept(dir: &Path, entry: &Entry) -> Result<impl std::io::BufRead, String> {
+    let path = kept_path(dir, &entry.file).map_err(|e| e.to_string())?;
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let decoder = zstd::stream::read::Decoder::new(file).map_err(|e| e.to_string())?;
+    Ok(BufReader::new(decoder))
+}
+
+/// The rows of the project's `index.jsonl`: every kept file, not only dialogue.
+fn read_index(dir: &Path) -> Result<Vec<Entry>, String> {
+    let index = dir.join("index.jsonl");
+    if linked(&index)? {
+        return Err(LINKED.into());
+    }
+    let index =
+        fs::read_to_string(index).map_err(|e| format!("보관 목록을 읽지 못했습니다: {e}"))?;
+    let mut entries = Vec::new();
+    for row in index.lines().filter(|l| !l.trim().is_empty()) {
+        entries.push(
+            serde_json::from_str::<Entry>(row).map_err(|e| format!("보관 목록 형식 오류: {e}"))?,
+        );
+    }
+    Ok(entries)
+}
+
 /// One kept file, read for the day from `day.0` to before `day.1`.
 fn read_file(
     dir: &Path,
     entry: &Entry,
     day: (DateTime<FixedOffset>, DateTime<FixedOffset>),
 ) -> Result<Parsed, String> {
-    let path = kept_path(dir, &entry.file).map_err(|e| e.to_string())?;
-    let file = fs::File::open(path).map_err(|e| e.to_string())?;
-    let decoder = zstd::stream::read::Decoder::new(file).map_err(|e| e.to_string())?;
     let mut rows = Rows {
-        input: BufReader::new(decoder),
+        input: open_kept(dir, entry)?,
         buf: Vec::new(),
         line: 0,
         clock: DateTime::parse_from_rfc3339(&entry.started)
@@ -544,6 +567,81 @@ fn last_answer(day: Vec<Dated>) -> Option<Dated> {
     Some((file, first, at))
 }
 
+/// The days (Korean time) on which the kept dialogue files of a project have a dated row.
+///
+/// A day listed here can still have no dialogue: a file with only tool rows has rows on
+/// the day and no block, and `day_transcript` then returns no blocks. A job that makes
+/// the record of each listed day counts such a day as empty and does not ask the model.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionDays {
+    /// Sorted, each day once.
+    pub days: Vec<NaiveDate>,
+    /// `<file>: <reason>` for a dialogue file that could not be read. Its days are not
+    /// in `days`; the files that could be read are counted.
+    pub unread: Vec<String>,
+    /// `go_on` said no before a file: `days` holds what the files before it gave.
+    pub stopped: bool,
+}
+
+/// The days on which the kept dialogue files of `project` have a row with a time.
+/// `project` is a project ID or an absolute folder path, as for `day_transcript`.
+///
+/// It opens the same files as `day_transcript` does, by the same rules (no link, no path
+/// outside the project folder, rows over 8 MiB not read), and reads only each row's
+/// `timestamp`. A row without a readable time adds no day, but the day of the index's
+/// `started` does: `day_transcript` gives a file's rows without a time that time.
+/// `go_on` is asked before each file; when it says no, what is listed so far is returned
+/// with `stopped` set.
+pub fn session_days(
+    vault: &Path,
+    project: &str,
+    go_on: &dyn Fn() -> bool,
+) -> Result<SessionDays, String> {
+    #[derive(Deserialize)]
+    struct Stamp<'a> {
+        #[serde(borrow)]
+        timestamp: Option<std::borrow::Cow<'a, str>>,
+    }
+    let (dir, _) = project_dir(vault, project)?;
+    let entries = read_index(&dir)?;
+    let mut days = std::collections::BTreeSet::new();
+    let mut unread = Vec::new();
+    let mut buf = Vec::new();
+    let mut stopped = false;
+    for entry in entries.iter().filter(|e| is_dialogue(e)) {
+        if !go_on() {
+            stopped = true;
+            break;
+        }
+        let result = open_kept(&dir, entry).and_then(|mut input| {
+            let mut seen = std::collections::BTreeSet::new();
+            if let Ok(started) = DateTime::parse_from_rfc3339(&entry.started) {
+                seen.insert(started.with_timezone(&kst()).date_naive());
+            }
+            while line(&mut input, &mut buf)? {
+                let at = serde_json::from_slice::<Stamp>(&buf)
+                    .ok()
+                    .and_then(|row| row.timestamp)
+                    .and_then(|t| DateTime::parse_from_rfc3339(&t).ok());
+                if let Some(at) = at {
+                    seen.insert(at.with_timezone(&kst()).date_naive());
+                }
+            }
+            Ok(seen)
+        });
+        // A file that failed half way is read by no one: its days are not counted.
+        match result {
+            Ok(seen) => days.extend(seen),
+            Err(reason) => unread.push(format!("{}: {reason}", entry.file)),
+        }
+    }
+    Ok(SessionDays {
+        days: days.into_iter().collect(),
+        unread,
+        stopped,
+    })
+}
+
 /// The dialogue of `project` on `date` (Korean time) from the originals in `vault`.
 pub fn day_transcript(
     vault: &Path,
@@ -556,18 +654,7 @@ pub fn day_transcript(
         .single()
         .expect("fixed offset");
     let end = start + chrono::Duration::days(1);
-    let index = dir.join("index.jsonl");
-    if linked(&index)? {
-        return Err(LINKED.into());
-    }
-    let index =
-        fs::read_to_string(index).map_err(|e| format!("보관 목록을 읽지 못했습니다: {e}"))?;
-    let mut entries = Vec::new();
-    for row in index.lines().filter(|l| !l.trim().is_empty()) {
-        entries.push(
-            serde_json::from_str::<Entry>(row).map_err(|e| format!("보관 목록 형식 오류: {e}"))?,
-        );
-    }
+    let entries = read_index(&dir)?;
     let latest_archived = entries.iter().map(|e| e.archived_at.clone()).max();
     let mut sessions: Vec<Vec<&Entry>> = Vec::new();
     let mut known = HashMap::new();

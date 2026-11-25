@@ -1,6 +1,6 @@
 [package]
 name = "timeschedule-native"
-version = "0.36.0"
+version = "0.37.0"
 edition = "2021"
 publish = false
 
@@ -21,6 +21,8 @@ toml_edit = "=0.25.17"
 base64 = "=0.23.1"
 http-body-util = "=0.1.5"
 uuid = { version = "1", features = ["v4"] }
+# The native folder dialog of the project editor. No async runtime feature: the dialog runs on its own thread.
+rfd = { version = "0.18", default-features = false }
 timeschedule-core = { path = "../../crates/timeschedule-core" }
 timeschedule-desktop = { path = "../../crates/timeschedule-desktop" }
 
@@ -30,6 +32,7 @@ iced_tiny_skia = { version = "=0.14.1", default-features = false }
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std"] }
 png = "0.18"
 softbuffer = { version = "=0.4.8", default-features = false }
+zstd = "0.13"
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_LibraryLoader"] }
