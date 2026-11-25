@@ -12,7 +12,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Border, Element, Length};
 use timeschedule_core::dates::{calendar_days, week_after_sunday};
-use timeschedule_desktop::preferences::AppTheme;
+use timeschedule_desktop::preferences::{AppTheme, DailyRecordMode};
 use views::{control, quiet, title};
 
 const WEEKDAYS: [&str; 7] = ["일", "월", "화", "수", "목", "금", "토"];
@@ -455,6 +455,30 @@ fn month(app: &App) -> Element<'_, Message> {
     }
 }
 
+/// The selected day's buttons. In the button mode of 하루 정리 the day's record is made
+/// by a button on its own row, since a third button does not fit beside the other two in
+/// the 270-wide panel; it is off while records are being made.
+fn date_actions<'a>(app: &'a App, key: &str) -> Column<'a, Message> {
+    let mut actions = column![row![
+        control("+ 일정", Message::New(Kind::Event, Some(key.to_owned()))),
+        control("+ 기록", Message::New(Kind::Entry, Some(key.to_owned())))
+    ]
+    .spacing(6)]
+    .spacing(6);
+    if app.preferences.daily_record == DailyRecordMode::Button {
+        let working = app.daily_making;
+        let label = if working {
+            "하루 정리 만드는 중…"
+        } else {
+            "하루 정리 만들기"
+        };
+        actions = actions.push(
+            control(label, Message::MakeDaily(app.selected))
+                .on_press_maybe((!working).then_some(Message::MakeDaily(app.selected))),
+        );
+    }
+    actions
+}
 fn date_details(app: &App) -> Column<'_, Message> {
     let key = app.selected.to_string();
     let mut details = column![
@@ -464,11 +488,7 @@ fn date_details(app: &App) -> Column<'_, Message> {
             app.selected.day()
         ))
         .size(26),
-        row![
-            control("+ 일정", Message::New(Kind::Event, Some(key.clone()))),
-            control("+ 기록", Message::New(Kind::Entry, Some(key.clone())))
-        ]
-        .spacing(6)
+        date_actions(app, &key)
     ]
     .spacing(10);
     if let Some(day) = app.snapshot.days.iter().find(|d| d.date == key) {

@@ -10,6 +10,19 @@ pub enum AppTheme {
     Midnight,
 }
 
+/// How daily records are made: 설정 › 하루 정리 만드는 방식.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum DailyRecordMode {
+    /// The app makes the finished days of the last week by itself.
+    Auto,
+    /// Only for the selected day, when its button is pressed. An unknown value reads
+    /// as this, so no model is called by surprise.
+    #[default]
+    #[serde(other)]
+    Button,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Preferences {
@@ -20,6 +33,7 @@ pub struct Preferences {
     pub widget_opacity: u8,
     pub theme: AppTheme,
     pub widget: crate::widget_preferences::WidgetPreferences,
+    pub daily_record: DailyRecordMode,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -31,6 +45,7 @@ impl Default for Preferences {
             widget_opacity: 82,
             theme: AppTheme::Midnight,
             widget: Default::default(),
+            daily_record: DailyRecordMode::Button,
         }
     }
 }
@@ -279,6 +294,19 @@ mod tests {
         assert_eq!(json["widgetX"], -1200);
         assert_eq!(json["widgetOpacity"], 65);
         assert_eq!(json["widgetVisible"], false);
+    }
+    #[test]
+    fn the_daily_record_mode_is_the_button_unless_auto_was_chosen() {
+        let old: Preferences = serde_json::from_str(r#"{"widgetX":-400}"#).unwrap();
+        assert_eq!(old.daily_record, DailyRecordMode::Button);
+        for (input, expected) in [("auto", "auto"), ("button", "button"), ("later", "button")] {
+            let prefs: Preferences =
+                serde_json::from_value(serde_json::json!({"dailyRecord": input})).unwrap();
+            assert_eq!(
+                serde_json::to_value(prefs).unwrap()["dailyRecord"],
+                expected
+            );
+        }
     }
     #[test]
     fn light_theme_round_trips_and_unknown_theme_falls_back() {

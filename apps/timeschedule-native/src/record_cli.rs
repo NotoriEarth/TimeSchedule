@@ -335,7 +335,7 @@ fn daily(options: &HashMap<&str, &str>, store: Store) -> Result<serde_json::Valu
     use timeschedule_core::{
         daily_record::{
             day_transcript, kst,
-            record::{estimated_tokens, summarize, Outcome},
+            record::{estimated_tokens, Outcome},
         },
         terra,
     };
@@ -383,27 +383,7 @@ fn daily(options: &HashMap<&str, &str>, store: Store) -> Result<serde_json::Valu
         return Ok(out);
     }
     let model = options.get("--model").copied().unwrap_or(terra::MODEL);
-    let outcome = summarize(
-        &vault,
-        &transcript,
-        model,
-        DAILY_EFFORT,
-        |prompt, schema| {
-            terra::run(
-                prompt,
-                &terra::Call {
-                    model,
-                    effort: DAILY_EFFORT,
-                    schema: Some(schema),
-                    timeout: std::time::Duration::from_secs(600),
-                    answer_limit: 1 << 20,
-                    read_usage: true,
-                    // The answer is checked as the model wrote it.
-                    unfence: false,
-                },
-            )
-        },
-    )?;
+    let outcome = summarize_day(&vault, &transcript, model).map_err(|e| e.message)?;
     let warned = !transcript.warnings.is_empty();
     match outcome {
         Outcome::Saved { path, record } => {
@@ -435,6 +415,66 @@ fn daily(options: &HashMap<&str, &str>, store: Store) -> Result<serde_json::Valu
 
 /// The daily record asks for a summary of one day, not hard reasoning.
 const DAILY_EFFORT: &str = "medium";
+
+/// What says that the daily record of `transcript` would be asked the same question
+/// again: the fingerprint `summarize` compares, for the model the app uses.
+pub(crate) fn daily_input_key(
+    transcript: &timeschedule_core::daily_record::DayTranscript,
+) -> String {
+    timeschedule_core::daily_record::record::fingerprint(
+        transcript,
+        timeschedule_core::terra::MODEL,
+        DAILY_EFFORT,
+    )
+}
+
+/// Why a daily record was not made, and whether the model had been asked by then: a
+/// refused answer or a failed call has used the model, a lock or a file that could not
+/// be read has not.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct DailyError {
+    pub message: String,
+    pub asked: bool,
+}
+
+/// Has `model` make the daily record of `transcript` through the logged-in Codex CLI,
+/// checked and kept below `vault`. The command line and the app's 하루 정리 both make
+/// records here.
+pub(crate) fn summarize_day(
+    vault: &Path,
+    transcript: &timeschedule_core::daily_record::DayTranscript,
+    model: &str,
+) -> Result<timeschedule_core::daily_record::record::Outcome, DailyError> {
+    use timeschedule_core::terra;
+    let asked = std::cell::Cell::new(false);
+    timeschedule_core::daily_record::record::summarize(
+        vault,
+        transcript,
+        model,
+        DAILY_EFFORT,
+        |prompt, schema| {
+            let reply = terra::run(
+                prompt,
+                &terra::Call {
+                    model,
+                    effort: DAILY_EFFORT,
+                    schema: Some(schema),
+                    timeout: std::time::Duration::from_secs(600),
+                    answer_limit: 1 << 20,
+                    read_usage: true,
+                    // The answer is checked as the model wrote it.
+                    unfence: false,
+                },
+            );
+            asked.set(reply.as_ref().map_or_else(|failed| failed.sent, |_| true));
+            reply
+        },
+    )
+    .map_err(|message| DailyError {
+        message,
+        asked: asked.get(),
+    })
+}
 
 /// Runs the record command line in `args` (`record ...`) and returns the exit code.
 ///

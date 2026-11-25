@@ -160,6 +160,10 @@ pub enum Message {
     SetChatCapture(String, bool),
     ScanChats,
     ChatsScanned(Result<worker::ChatScan, String>),
+    SetDailyMode(preferences::DailyRecordMode),
+    /// Make the daily record of this day now (the selected day's button).
+    MakeDaily(NaiveDate),
+    DailyMade(Result<worker::DailyMade, String>),
     RecordsDrained(Result<crate::record_inbox::DrainReport, String>),
     Navigate(Page),
     Month(i32),
@@ -309,6 +313,22 @@ pub struct App {
     chat_scanning: bool,
     /// The hourly chat scan is owed. It stays owed until a scan can start.
     chat_scan_due: bool,
+    /// Daily records are being made.
+    pub daily_making: bool,
+    /// In the automatic mode, the finished days are to be made after the next chat
+    /// scan: at start and every hour, not each time the project screen opens.
+    daily_auto_due: bool,
+    /// An automatic job met projects it could not keep whole (another run was keeping
+    /// them). It is tried again when a chat scan ends, and only then.
+    daily_retry_after_scan: bool,
+    /// The records being made were asked for with the button, so the notice line says
+    /// what happened even when nothing was made.
+    daily_by_button: bool,
+    /// Inputs that failed; the automatic mode does not send them again until the
+    /// dialogue changes or the app starts again.
+    daily_failed: std::collections::HashSet<worker::DailyInput>,
+    /// Whether the automatic mode is chosen, read by a run between its days.
+    daily_auto: Arc<std::sync::atomic::AtomicBool>,
     records_processing: bool,
     pub manager_visible: bool,
     prefs_saving: bool,
@@ -390,6 +410,7 @@ impl App {
         if let Some(error) = crate::DPI_INIT_ERROR.get() {
             errors.push(error.clone());
         }
+        let daily_auto = prefs.daily_record == preferences::DailyRecordMode::Auto;
         let mut app = Self {
             widget_ui: crate::widget_settings::State::new(&prefs, today),
             calendar: Default::default(),
@@ -454,6 +475,12 @@ impl App {
             records_due: false,
             chat_scanning: false,
             chat_scan_due: false,
+            daily_making: false,
+            daily_auto_due: true,
+            daily_retry_after_scan: false,
+            daily_by_button: false,
+            daily_failed: Default::default(),
+            daily_auto: Arc::new(std::sync::atomic::AtomicBool::new(daily_auto)),
             records_processing: false,
             manager_visible: true,
             prefs_saving: false,
@@ -641,6 +668,59 @@ impl App {
                 None
             },
         }
+    }
+    /// Makes the daily records of `dates`, unless records are being made.
+    fn make_daily(&mut self, dates: Vec<NaiveDate>, by_button: bool) -> Task<Message> {
+        if self.daily_making {
+            return Task::none();
+        }
+        let Some(store) = self
+            .store
+            .clone()
+            .filter(|_| self._instance.is_some() && !self.quit_when_idle)
+        else {
+            return Task::none();
+        };
+        // Only an automatic job is the automatic mode's turn.
+        if !by_button {
+            self.daily_auto_due = false;
+            self.daily_retry_after_scan = false;
+        }
+        self.daily_making = true;
+        self.daily_by_button = by_button;
+        let data_dir = self.data_dir.clone();
+        // The button tries every time; the automatic mode leaves failed inputs alone
+        // and stops between days once it is no longer chosen.
+        let skip = if by_button {
+            Default::default()
+        } else {
+            self.daily_failed.clone()
+        };
+        let auto = self.daily_auto.clone();
+        worker::job(
+            store,
+            move |s| {
+                worker::daily_job(
+                    s,
+                    || crate::record_original::originals_vault(&data_dir),
+                    worker::keep_originals,
+                    &dates,
+                    worker::DailyRun {
+                        make: |vault: &std::path::Path, transcript: &_| {
+                            crate::record_cli::summarize_day(
+                                vault,
+                                transcript,
+                                timeschedule_core::terra::MODEL,
+                            )
+                        },
+                        key: crate::record_cli::daily_input_key,
+                        skip: &skip,
+                        keep_going: || by_button || auto.load(std::sync::atomic::Ordering::Acquire),
+                    },
+                )
+            },
+            Message::DailyMade,
+        )
     }
     /// Reads the AI apps' chat files for the projects that capture chats, unless a scan runs.
     fn scan_chats(&mut self) -> Task<Message> {
@@ -921,6 +1001,7 @@ impl App {
             || self.native_busy
             || self.mcp_setup.busy
             || self.chat_scanning
+            || self.daily_making
         {
             self.quit_when_idle = true;
             self.notice = "진행 중인 저장·Git·설정 작업을 마친 뒤 종료합니다.".into();
@@ -1025,6 +1106,7 @@ impl App {
                     | Message::RecordsDue
                     | Message::RecordsDrained(_)
                     | Message::ChatsScanned(_)
+                    | Message::DailyMade(_)
                     | Message::NativeDone(..)
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Finished(_))
                     | Message::McpSetup(crate::mcp_setup_ui::Action::Loaded(..))
@@ -1104,6 +1186,7 @@ impl App {
             Message::ScanChats => return self.scan_chats(),
             Message::ChatsScanned(result) => {
                 self.chat_scanning = false;
+                let mut tasks = Vec::new();
                 match result {
                     Ok(scan) => {
                         let problems = scan.problems();
@@ -1113,11 +1196,77 @@ impl App {
                         let notices = scan.notices();
                         if !notices.is_empty() {
                             self.notice = notices.join(" ");
-                            return self.refresh();
+                            tasks.push(self.refresh());
                         }
                     }
                     Err(e) => self.error = format!("로컬 채팅 수집 실패 · {e}"),
                 }
+                // At start and every hour, and a job that waits for a scan. The job
+                // keeps the newest originals itself.
+                if (self.daily_auto_due || self.daily_retry_after_scan)
+                    && self.preferences.daily_record == preferences::DailyRecordMode::Auto
+                {
+                    tasks.push(self.make_daily(worker::finished_days(kst_today()), false));
+                }
+                return Task::batch(tasks);
+            }
+            Message::SetDailyMode(mode) => {
+                if self.preferences.daily_record != mode {
+                    self.preferences.daily_record = mode;
+                    self.daily_auto.store(
+                        mode == preferences::DailyRecordMode::Auto,
+                        std::sync::atomic::Ordering::Release,
+                    );
+                    self.daily_auto_due = true;
+                    return self.save_preferences();
+                }
+            }
+            Message::MakeDaily(date) => return self.make_daily(vec![date], true),
+            Message::DailyMade(result) => {
+                self.daily_making = false;
+                let mut tasks = Vec::new();
+                let mut retry_after_scan = false;
+                match result {
+                    Ok(made) => {
+                        // Only the days the automatic mode still looks at are remembered.
+                        let today = kst_today();
+                        let oldest = today - chrono::Days::new(7);
+                        self.daily_failed.extend(made.failed_inputs.iter().cloned());
+                        self.daily_failed
+                            .retain(|(_, day, _)| *day >= oldest && *day < today);
+                        if !made.failed.is_empty() {
+                            self.error = format!("하루 정리 실패 · {}", made.failed.join(" / "));
+                            if self.daily_by_button && made.unplaced > 0 {
+                                self.error.push_str(&unplaced_note(made.unplaced));
+                            }
+                        }
+                        // An automatic job that met a project another run was keeping
+                        // tries again after the next chat scan, not at once.
+                        retry_after_scan = !self.daily_by_button && !made.unkept.is_empty();
+                        if let Some(notice) = daily_notice(&made, self.daily_by_button) {
+                            self.notice = notice;
+                        }
+                        // The job showed its new records in the diary already.
+                        if made.shown > 0 {
+                            tasks.push(self.refresh());
+                        }
+                    }
+                    Err(e) => self.error = format!("하루 정리 실패 · {e}"),
+                }
+                // Set first, so an automatic job started below covers it.
+                if retry_after_scan {
+                    self.daily_retry_after_scan = true;
+                }
+                // An automatic turn that came while this job ran. Not while a chat scan
+                // keeps originals: the two would meet at a project's lock, and the scan
+                // starts the turn when it ends.
+                if self.daily_auto_due
+                    && !self.chat_scanning
+                    && self.preferences.daily_record == preferences::DailyRecordMode::Auto
+                {
+                    tasks.push(self.make_daily(worker::finished_days(kst_today()), false));
+                }
+                return Task::batch(tasks);
             }
             Message::RecordsDue => {
                 self.records_due = true;
@@ -1259,6 +1408,7 @@ impl App {
                     && !self.native_busy
                     && !self.mcp_setup.busy
                     && !self.chat_scanning
+                    && !self.daily_making
                 {
                     self.quit_when_idle = false;
                     return self.request_close(CloseIntent::Application);
@@ -1270,6 +1420,7 @@ impl App {
                 }
                 if self.ticks % CHAT_SCAN_TICKS == 0 {
                     self.chat_scan_due = true;
+                    self.daily_auto_due = true;
                 }
                 if let Some(message) = self.record_sync.poll(&self.data_dir) {
                     self.log(&message);
@@ -2006,6 +2157,77 @@ impl App {
     }
 }
 
+/// Today in Korea, where the day transcript counts its days.
+fn kst_today() -> NaiveDate {
+    chrono::Utc::now()
+        .with_timezone(&timeschedule_core::daily_record::kst())
+        .date_naive()
+}
+
+/// What the notice line says after daily records were made. The automatic mode says
+/// only what it made; the button also says why nothing was made.
+fn daily_notice(made: &worker::DailyMade, by_button: bool) -> Option<String> {
+    use chrono::Datelike;
+    if !made.saved.is_empty() {
+        let mut dates = made.saved.clone();
+        dates.sort();
+        dates.dedup();
+        let days: Vec<String> = dates
+            .iter()
+            .map(|d| format!("{}월 {}일", d.month(), d.day()))
+            .collect();
+        let days = days.join(", ");
+        // One record per project and day: two projects on one day are two records.
+        let done = if made.saved.len() > dates.len() {
+            format!(
+                "하루 정리 {}건({days})을 만들었습니다. 곧 다이어리에 보입니다.",
+                made.saved.len()
+            )
+        } else {
+            format!("하루 정리 {days}을 만들었습니다. 곧 다이어리에 보입니다.")
+        };
+        // The button says which projects it could not make yet.
+        let mut notice = done;
+        if by_button && !made.unkept.is_empty() {
+            notice.push_str(&format!(
+                " 원문을 다 보관하지 못한 프로젝트({})는 만들지 않았습니다.",
+                made.unkept.join(", ")
+            ));
+        }
+        if by_button && made.unplaced > 0 {
+            notice.push_str(&unplaced_note(made.unplaced));
+        }
+        return Some(notice);
+    }
+    if !by_button || !made.failed.is_empty() {
+        return None;
+    }
+    let reason = if !made.unkept.is_empty() {
+        format!(
+            "채팅 원문을 다 보관하지 못해 하루 정리를 만들지 않았습니다({}). 잠시 뒤 다시 눌러 주세요.",
+            made.unkept.join(", ")
+        )
+    } else if made.busy > 0 {
+        "다른 실행이 이날의 하루 정리를 만들고 있습니다. 잠시 뒤 다시 눌러 주세요.".into()
+    } else if made.unchanged > 0 {
+        "대화가 바뀌지 않아 하루 정리를 새로 만들지 않았습니다.".into()
+    } else if made.empty > 0 {
+        "이날은 대화가 없어 하루 정리를 만들지 않았습니다.".into()
+    } else {
+        "채팅 자동 수집을 켠 프로젝트가 없어 하루 정리를 만들지 않았습니다.".into()
+    };
+    Some(if made.unplaced > 0 {
+        reason + &unplaced_note(made.unplaced)
+    } else {
+        reason
+    })
+}
+
+/// Said by the button when files could not be read before it was known whose they are.
+fn unplaced_note(count: usize) -> String {
+    format!(" 어느 프로젝트의 것인지 모르는 채팅 파일 {count}개는 읽지 못했습니다.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2077,6 +2299,12 @@ mod tests {
             records_due: false,
             chat_scanning: false,
             chat_scan_due: false,
+            daily_making: false,
+            daily_auto_due: true,
+            daily_retry_after_scan: false,
+            daily_by_button: false,
+            daily_failed: Default::default(),
+            daily_auto: Default::default(),
             records_processing: false,
             manager_visible: true,
             prefs_saving: false,
@@ -2955,6 +3183,139 @@ mod tests {
         app._instance = Some(InstanceLock::acquire(&dir.0).unwrap());
         app.data_dir = dir.0.clone();
         (dir, app)
+    }
+    #[test]
+    fn the_automatic_mode_makes_the_finished_days_after_the_start_and_hourly_scans_only() {
+        use timeschedule_desktop::preferences::DailyRecordMode;
+        let (_dir, mut app) = scanning_app();
+        // The button mode never makes records after a scan.
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(!app.daily_making);
+        let _ = app.update(Message::SetDailyMode(DailyRecordMode::Auto));
+        assert_eq!(app.preferences.daily_record, DailyRecordMode::Auto);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(app.daily_making, "the start's scan makes the finished days");
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        assert!(!app.daily_making);
+        // A scan that is not the hourly one (opening the project screen) does not.
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(!app.daily_making);
+        app.ticks = CHAT_SCAN_TICKS - 1;
+        app.loading = false;
+        let _ = app.update(Message::Tick);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(app.daily_making, "the hourly scan does");
+    }
+    #[test]
+    fn the_button_makes_its_day_once_at_a_time_and_says_what_happened() {
+        let (_dir, mut app) = scanning_app();
+        let day = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        let _ = app.update(Message::MakeDaily(day));
+        // One job keeps the newest originals and makes the day.
+        assert!(app.daily_making && app.daily_by_button);
+        assert!(
+            app.daily_auto_due,
+            "the button does not take the automatic turn"
+        );
+        let made = worker::DailyMade {
+            unchanged: 1,
+            ..Default::default()
+        };
+        let _ = app.update(Message::DailyMade(Ok(made.clone())));
+        assert!(!app.daily_making);
+        assert_eq!(
+            app.notice,
+            "대화가 바뀌지 않아 하루 정리를 새로 만들지 않았습니다."
+        );
+        // The automatic mode is quiet about days it did not need to make.
+        assert_eq!(daily_notice(&made, false), None);
+        let saved = worker::DailyMade {
+            saved: vec![day, day],
+            ..Default::default()
+        };
+        assert_eq!(
+            daily_notice(&saved, false).unwrap(),
+            "하루 정리 2건(11월 20일)을 만들었습니다. 곧 다이어리에 보입니다."
+        );
+        let unkept = worker::DailyMade {
+            unkept: vec!["작업".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            daily_notice(&unkept, true).unwrap(),
+            "채팅 원문을 다 보관하지 못해 하루 정리를 만들지 않았습니다(작업). 잠시 뒤 다시 눌러 주세요."
+        );
+    }
+    #[test]
+    fn a_daily_run_that_ends_under_an_open_confirmation_still_ends() {
+        let (_dir, mut app) = scanning_app();
+        let day = NaiveDate::from_ymd_opt(2026, 11, 20).unwrap();
+        let _ = app.update(Message::MakeDaily(day));
+        assert!(app.daily_making);
+        let _ = app.open_form(Form::new(Kind::Note, String::new(), None));
+        app.editor.as_mut().unwrap().form.title = "미저장".into();
+        let _ = app.update(Message::CloseWindow(app.manager));
+        assert!(app.editor.as_ref().unwrap().confirmation.is_some());
+        let _ = app.update(Message::DailyMade(Ok(Default::default())));
+        assert!(
+            !app.daily_making,
+            "the run's end is not dropped by the dialog"
+        );
+    }
+    #[test]
+    fn the_automatic_mode_remembers_failed_inputs_of_the_last_week_only() {
+        use timeschedule_desktop::preferences::DailyRecordMode;
+        let (_dir, mut app) = scanning_app();
+        let _ = app.update(Message::SetDailyMode(DailyRecordMode::Auto));
+        assert!(app.daily_auto.load(std::sync::atomic::Ordering::Acquire));
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(app.daily_making && !app.daily_auto_due);
+        let recent = kst_today() - chrono::Days::new(1);
+        let input = ("p".to_string(), recent, "fp".to_string());
+        app.daily_failed.insert((
+            "p".into(),
+            kst_today() - chrono::Days::new(30),
+            "old".into(),
+        ));
+        let failed = worker::DailyMade {
+            failed: vec!["작업: 답 형식 오류".into()],
+            failed_inputs: vec![input.clone()],
+            ..Default::default()
+        };
+        let _ = app.update(Message::DailyMade(Ok(failed)));
+        assert_eq!(app.daily_failed.len(), 1);
+        assert!(app.daily_failed.contains(&input));
+        assert_eq!(app.error, "하루 정리 실패 · 작업: 답 형식 오류");
+        // Choosing the button stops a job between its days.
+        let _ = app.update(Message::SetDailyMode(DailyRecordMode::Button));
+        assert!(!app.daily_auto.load(std::sync::atomic::Ordering::Acquire));
+    }
+    #[test]
+    fn an_automatic_job_that_met_a_held_project_waits_for_the_next_scan() {
+        use timeschedule_desktop::preferences::DailyRecordMode;
+        let (_dir, mut app) = scanning_app();
+        let _ = app.update(Message::SetDailyMode(DailyRecordMode::Auto));
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(app.daily_making);
+        let held = worker::DailyMade {
+            unkept: vec!["작업".into()],
+            ..Default::default()
+        };
+        let _ = app.update(Message::DailyMade(Ok(held.clone())));
+        // Not again at once: the project may still be held.
+        assert!(!app.daily_making && app.daily_retry_after_scan && !app.daily_auto_due);
+        let _ = app.update(Message::ChatsScanned(Ok(empty_scan())));
+        assert!(app.daily_making && !app.daily_retry_after_scan);
+        // Held again: still only after the next scan, never in a loop of jobs.
+        let _ = app.update(Message::DailyMade(Ok(held)));
+        assert!(!app.daily_making && app.daily_retry_after_scan);
+    }
+    fn empty_scan() -> worker::ChatScan {
+        worker::ChatScan {
+            excerpts: Ok(Default::default()),
+            originals: Ok(Default::default()),
+            daily: Ok(Default::default()),
+        }
     }
     #[test]
     fn chat_files_are_read_hourly_while_the_record_inbox_is_polled_every_minute() {

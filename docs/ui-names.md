@@ -41,6 +41,7 @@
 | --- | --- | --- |
 | 월간 달력 날짜 칸 | 월간 다이어리의 날짜 숫자와 그날의 항목. 맨 왼쪽 ‘주’ 열의 화살표로 주간 다이어리를 엶 | `shell::calendar`, `app.selected`, `Message::OpenWeek` |
 | 선택 날짜 패널 | 월간 달력 오른쪽의 ‘○월 ○일’, ‘+ 일정’, ‘+ 기록’ 영역. 창이 좁으면 달력 아래에 표시 | `shell::date_details`, `app.selected` |
+| 하루 정리 만들기 버튼 | 선택 날짜 패널의 ‘+ 일정’ ‘+ 기록’ 아래 줄. 설정의 하루 정리 방식이 ‘버튼으로 만들기’일 때만 보이고, 고른 날짜의 하루 정리를 만듦 | `shell::date_actions`, `Message::MakeDaily` |
 | 주간 날짜 칸 | 주간 다이어리에서 각 날짜의 일정과 기록을 스크롤하는 칸 | `views::day`, `Message::SelectDay` |
 | 바탕화면 위젯 | Windows 바탕화면에 붙는 달력. 자체 연·월 제목, 오늘·다이어리·설정 버튼과 날짜 칸이 있음 | `app.widget`, `app.widget_month`, `desktop_widget::view` |
 | 위젯 이동·크기 손잡이 | 위젯의 ‘이동’ 손잡이와 모서리의 ↘ 손잡이 | `Message::DragWidget`, `Message::ResizeWidget` |
@@ -73,6 +74,7 @@
 | --- | --- | --- |
 | 화면 모드 | 설정의 ‘화면 모드’ 또는 왼쪽 메뉴의 밝은 모드·어두운 모드 전환 | `app.preferences.theme`, `shell::theme_toggle` |
 | 다이어리 저장 위치 | 설정의 ‘내 컴퓨터에 보관하는 다이어리’ 아래 데이터 저장 경로 | `app.data_dir`, `views::settings` |
+| 하루 정리 만드는 방식 | 설정의 ‘하루 정리 만드는 방식’. ‘버튼으로 만들기’(기본)와 ‘자동으로 만들기’ 중 하나를 고름 | `app.preferences.daily_record`, `views::daily_mode_choice`, `Message::SetDailyMode` |
 | 로컬 일정 MCP 연결 설정 | 설정의 ‘로컬 일정 MCP’. 서버 상태, 앱별 연결 현황, 토큰 관리, 연결 설정 | `app.mcp_setup`, `mcp_setup_ui::board`, `mcp_setup_ui::token_panel`, `mcp_setup_ui::view` |
 | 위젯 표시·위치 설정 | 설정의 ‘바탕화면 위젯’. 연결 상태, 표시·숨기기, 위치 복구·잠금, 배경 불투명도 | `views::settings`, `NativeAction`, `app.preferences.widget_opacity` |
 | 위젯 모양 설정 | 같은 설정 화면의 ‘크기와 표시 기간’, ‘글꼴과 간격’, ‘위젯 색상’ | `widget_settings::view`, `app.widget_ui`, `app.preferences.widget` |

@@ -46,6 +46,16 @@ pub struct OriginalsReport {
     pub archived: usize,
     pub unchanged: usize,
     pub failed: usize,
+    /// Projects another process was keeping at the time: nothing of them was kept.
+    pub locked: usize,
+    /// The captured projects whose session files were not all kept by this run, by ID:
+    /// a file failed or another process held the project. What is kept of them may be
+    /// older than their chat files.
+    #[serde(skip)]
+    pub incomplete: Vec<String>,
+    /// Files and folders that could not be read before their project was known.
+    #[serde(skip)]
+    pub unplaced: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
@@ -88,6 +98,9 @@ pub fn archive(
         ..Default::default()
     };
     for (index, project) in projects.iter().enumerate() {
+        if discovery.incomplete.contains(&index) && !report.incomplete.contains(&project.id) {
+            report.incomplete.push(project.id.clone());
+        }
         let files: Vec<&Found> = discovery
             .found
             .iter()
@@ -101,10 +114,21 @@ pub fn archive(
                 report.archived += done.archived;
                 report.unchanged += done.unchanged;
                 report.failed += done.failed;
+                report.locked += done.locked;
+                if (done.failed > 0 || done.locked > 0) && !report.incomplete.contains(&project.id)
+                {
+                    report.incomplete.push(project.id.clone());
+                }
             }
-            Err(_) => report.failed += files.len(),
+            Err(_) => {
+                report.failed += files.len();
+                if !report.incomplete.contains(&project.id) {
+                    report.incomplete.push(project.id.clone());
+                }
+            }
         }
     }
+    report.unplaced = discovery.failed.saturating_sub(discovery.placed);
     Ok(report)
 }
 
@@ -207,7 +231,12 @@ fn archive_project(
     match lock.try_lock() {
         Ok(()) => {}
         // Another process is keeping this project right now.
-        Err(fs::TryLockError::WouldBlock) => return Ok(OriginalsReport::default()),
+        Err(fs::TryLockError::WouldBlock) => {
+            return Ok(OriginalsReport {
+                locked: 1,
+                ..Default::default()
+            })
+        }
         Err(fs::TryLockError::Error(e)) => return Err(e.to_string()),
     }
     let claimed = claimed(&dir, project)?;

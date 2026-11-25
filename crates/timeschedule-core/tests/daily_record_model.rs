@@ -1005,6 +1005,7 @@ fn every_call_is_in_the_usage_log_whatever_became_of_its_answer() {
                 ..Usage::default()
             },
             seconds: 3.04,
+            sent: true,
         })
     });
     assert!(failed.is_err());
