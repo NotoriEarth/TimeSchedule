@@ -13,7 +13,7 @@ use timeschedule_core::{
     diary::{EntrySummary, SearchHit},
     storage::Task,
 };
-use timeschedule_desktop::preferences::DailyRecordMode;
+use timeschedule_desktop::preferences::{AppTheme, DailyRecordMode};
 
 pub(crate) const EDITOR_SIZE: iced::Size = iced::Size::new(650.0, 560.0);
 
@@ -775,8 +775,7 @@ fn settings_sections(app: &App) -> Row<'_, Message> {
 fn settings_general(app: &App) -> Element<'_, Message> {
     column![
         subtitle("화면 모드"),
-        quiet("Midnight · 어두운 모드 / Porcelain · 밝은 모드"),
-        container(crate::shell::theme_toggle(app)).width(220),
+        theme_choice(app),
         quiet("선택한 모드는 다음 실행에도 유지됩니다."),
         space().height(SECTION_GAP),
         subtitle("내 컴퓨터에 보관하는 다이어리"),
@@ -809,8 +808,38 @@ fn settings_records(app: &App) -> Element<'_, Message> {
     .spacing(15)
     .into()
 }
+/// The two screen modes, the one in use highlighted.
+fn theme_choice(app: &App) -> Element<'_, Message> {
+    let choice = |label: &'static str, mode: AppTheme| {
+        control(label, Message::SetTheme(mode)).style(if app.preferences.theme == mode {
+            theme::primary
+        } else {
+            theme::secondary
+        })
+    };
+    row![
+        choice("어두운 모드", AppTheme::Midnight),
+        choice("밝은 모드", AppTheme::Porcelain),
+    ]
+    .spacing(6)
+    .into()
+}
 fn settings_mcp(app: &App) -> Element<'_, Message> {
-    column![
+    let open = app
+        .mcp_advanced
+        .unwrap_or_else(|| crate::mcp_setup_ui::advanced_needed(&app.mcp_setup));
+    let advanced = row![
+        subtitle("고급"),
+        quiet("인증 토큰 · AI 연결 도우미"),
+        space().width(Length::Fill),
+        control(
+            if open { "접기" } else { "펼치기" },
+            Message::McpAdvanced(!open)
+        ),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center);
+    let mut c = column![
         subtitle("로컬 일정 MCP"),
         crate::mcp_setup_ui::server_line(&app.mcp_status, app.mcp_endpoint().is_some()),
         row![
@@ -831,11 +860,16 @@ fn settings_mcp(app: &App) -> Element<'_, Message> {
             &app.mcp_clients(),
             chrono::Local::now()
         ),
-        crate::mcp_setup_ui::token_panel(&app.mcp_setup),
-        crate::mcp_setup_ui::view(&app.mcp_setup),
+        space().height(SECTION_GAP),
+        advanced,
     ]
-    .spacing(15)
-    .into()
+    .spacing(15);
+    if open {
+        c = c
+            .push(crate::mcp_setup_ui::token_panel(&app.mcp_setup))
+            .push(crate::mcp_setup_ui::view(&app.mcp_setup));
+    }
+    c.into()
 }
 fn settings_widget(app: &App) -> Element<'_, Message> {
     // Keep controls and scroll content mounted during native requests.

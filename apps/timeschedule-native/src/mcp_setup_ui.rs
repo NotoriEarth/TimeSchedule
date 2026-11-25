@@ -443,6 +443,21 @@ pub fn board<'a>(
         .into()
 }
 
+/// Whether the advanced part (token and helper) should open by itself: the token was
+/// replaced at start or a reissue failed, a registration is being prepared or checked,
+/// or the server runs and no AI app is registered yet.
+pub fn advanced_needed(state: &State) -> bool {
+    matches!(state.token, TokenPanel::Recovered | TokenPanel::Failed(_))
+        || state.busy
+        || state.preview.is_some()
+        || !state.status.is_empty()
+        || (!state.checking
+            && state
+                .registrations
+                .iter()
+                .all(|r| matches!(r, Registration::Missing)))
+}
+
 const TOKEN_DETAIL_HEIGHT: f32 = 34.0;
 /// The token panel: what reissuing does, a two-step button, and the outcome.
 /// The header and the two-line detail have fixed heights, so no state moves

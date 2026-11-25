@@ -75,10 +75,10 @@
 | 부를 이름 | 화면에서 찾는 법 · 기능 | 코드에서 찾는 법 |
 | --- | --- | --- |
 | 설정 영역 버튼 | 설정 제목 아래 줄의 ‘일반’, ‘기록과 하루 정리’, ‘바탕화면 위젯’, ‘AI 연결 (MCP)’. 고른 버튼이 강조되고, 다른 화면에 다녀와도 마지막 영역이 유지됨 | `views::settings_sections`, `SettingsSection`, `Message::SettingsSection` |
-| 화면 모드 | 설정 ‘일반’의 ‘화면 모드’ 또는 왼쪽 메뉴의 밝은 모드·어두운 모드 전환 | `app.preferences.theme`, `shell::theme_toggle` |
+| 화면 모드 | 설정 ‘일반’의 ‘화면 모드’에 있는 ‘어두운 모드’·‘밝은 모드’ 두 버튼(쓰는 쪽이 강조됨), 또는 왼쪽 메뉴 아래의 전환 버튼(바꿀 모드 이름이 보임) | `app.preferences.theme`, `views::theme_choice`, `Message::SetTheme`, `shell::theme_toggle` |
 | 다이어리 저장 위치 | 설정 ‘일반’의 ‘내 컴퓨터에 보관하는 다이어리’ 아래 데이터 저장 경로. 같은 영역에 ‘창 닫기’ 안내와 버전 | `app.data_dir`, `views::settings_general` |
 | 하루 정리 만드는 방식 | 설정 ‘기록과 하루 정리’의 ‘하루 정리 만드는 방식’. ‘버튼으로 만들기’(기본)와 ‘자동으로 만들기’ 중 하나를 고름 | `app.preferences.daily_record`, `views::daily_mode_choice`, `Message::SetDailyMode` |
-| 로컬 일정 MCP 연결 설정 | 설정 ‘AI 연결 (MCP)’의 ‘로컬 일정 MCP’. 서버 상태, 앱별 연결 현황, 토큰 관리, 연결 설정 | `views::settings_mcp`, `app.mcp_setup`, `mcp_setup_ui::board`, `mcp_setup_ui::token_panel`, `mcp_setup_ui::view` |
+| 로컬 일정 MCP 연결 설정 | 설정 ‘AI 연결 (MCP)’의 ‘로컬 일정 MCP’. 서버 상태와 앱별 연결 현황이 보이고, 그 아래 ‘고급’(‘펼치기’·‘접기’) 안에 인증 토큰과 AI 연결 도우미가 있음. ‘고급’은 서버가 켜져 있는데 등록된 AI 앱이 하나도 없을 때도 저절로 펼쳐짐. 직접 접거나 펼치면 그 선택을 따르고, 고급 안에서 무엇이든 시작하면(토큰 재발급, 앱 선택, 미리보기 등) 접을 때까지 펼쳐 둠. 저절로 한 번 펼쳐지면 상태가 바뀌어도 다시 접히지 않음. 연결 현황 줄의 ‘다시 등록’·‘등록 준비’·‘검사’·‘다시 확인’을 누르거나 재발급이 실패하면, 또는 시작할 때 토큰을 새로 바꾸면 접어 두었더라도 펼쳐짐 | `views::settings_mcp`, `app.mcp_advanced`, `mcp_setup_ui::advanced_needed`, `app.mcp_setup`, `mcp_setup_ui::board`, `mcp_setup_ui::token_panel`, `mcp_setup_ui::view` |
 | 위젯 표시·위치 설정 | 설정 ‘바탕화면 위젯’의 ‘표시와 위치’. 연결 상태, 표시·숨기기, 위치 복구·잠금. 위젯 오류는 이 영역에서는 연결 상태 칸에, 다른 영역과 화면에서는 위쪽 알림 줄에 보임 | `views::settings_widget`, `NativeAction`, `shell::view`의 `native_errors` |
 | 위젯 모양 설정 | 같은 영역의 ‘크기와 표시 기간’, ‘글꼴과 간격’, ‘색상과 불투명도’(배경 불투명도 슬라이더와 색상) | `widget_settings::view`, `app.widget_ui`, `app.preferences.widget`, `app.preferences.widget_opacity` |
 | 문서 저장소 안내 | 설정 ‘기록과 하루 정리’의 ‘문서 저장소와 외부 연결’. 자동 개발 기록의 보관 경로와 외부 연결에 관한 설명 | `views::settings` · [문서 저장소 동작](document-vault.md) |

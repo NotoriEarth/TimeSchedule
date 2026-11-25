@@ -306,7 +306,7 @@ fn helper_arguments(args: &[String]) -> Result<(&Path, Option<&str>), String> {
 /// destination, so the token stays here.
 pub(crate) fn helper_auth_headers(args: &[String]) -> Result<String, String> {
     let (dir, url) = helper_arguments(args)?;
-    let url = url.ok_or("0.13.1 이전에 만든 등록이라 인증 정보를 보낼 주소를 확인할 수 없습니다. TimeSchedule 설정 → AI 연결 (MCP) → AI 연결 도우미에서 다시 등록하세요. 인증 정보는 보내지 않았습니다.")?;
+    let url = url.ok_or("0.13.1 이전에 만든 등록이라 인증 정보를 보낼 주소를 확인할 수 없습니다. TimeSchedule 설정 → AI 연결 (MCP) → 고급 → AI 연결 도우미에서 다시 등록하세요. 인증 정보는 보내지 않았습니다.")?;
     auth_headers(dir, url)
 }
 

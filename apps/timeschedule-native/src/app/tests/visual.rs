@@ -407,6 +407,19 @@ fn settings_switch_stops_and_restarts_authenticated_mcp() {
     click(&mut app, true);
     assert!(crate::mcp_connection::probe(&dir.0).is_ok());
     assert!(crate::mcp::read_token(&dir.0).unwrap() == original_token);
+    // A token file that cannot be read is replaced at power-on. The warning opens the
+    // advanced part even though the owner had folded it.
+    let _ = app.update(Message::McpAdvanced(false));
+    click(&mut app, false);
+    std::fs::write(dir.0.join("mcp-token.dpapi"), b"copied from another PC").unwrap();
+    click(&mut app, true);
+    assert_eq!(
+        app.mcp_setup.token,
+        crate::mcp_setup_ui::TokenPanel::Recovered
+    );
+    assert_eq!(app.mcp_advanced, Some(true));
+    let labels = calendar_texts(crate::views::settings(&app), Size::new(1000., 2400.));
+    assert!(labels.iter().any(|s| s == "인증 토큰"), "{labels:?}");
 }
 
 fn click_text(mut element: Element<'_, Message>, size: Size, target: Rectangle) -> Vec<Message> {
@@ -2413,6 +2426,8 @@ fn reissuing_the_token_does_not_move_the_settings_controls() {
             let mut app = fixture();
             app.page = Page::Settings;
             app.settings_section = crate::app::SettingsSection::Mcp;
+            // These panels sit in the advanced part, opened here.
+            app.mcp_advanced = Some(true);
             app.preferences.theme = mode;
             let mut renderer =
                 iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
@@ -2484,6 +2499,8 @@ fn mcp_assistant_keeps_controls_and_outer_scroll_fixed_during_results() {
             let mut app = fixture();
             app.page = Page::Settings;
             app.settings_section = crate::app::SettingsSection::Mcp;
+            // These panels sit in the advanced part, opened here.
+            app.mcp_advanced = Some(true);
             app.mcp_setup.client = crate::mcp_setup::Client::ChatGptDesktop;
             app.preferences.theme = mode;
             let mut renderer =
@@ -4958,4 +4975,125 @@ fn an_editor_still_loading_does_not_open_over_a_new_settings_section() {
     let _ = app.update(Message::SettingsSection(SettingsSection::Mcp));
     let _ = app.update(Message::FormLoaded(vg, eg, Ok(form)));
     assert!(app.editor.is_none(), "the late search result stays closed");
+}
+
+#[test]
+fn the_token_and_helper_fold_away_until_needed_or_opened() {
+    use crate::app::SettingsSection;
+    use crate::mcp_clients::Registration;
+    use crate::mcp_setup_ui::TokenPanel;
+    let mut app = fixture();
+    app.page = Page::Settings;
+    app.settings_section = SettingsSection::Mcp;
+    let size = Size::new(1160., 2400.);
+    let shows = |app: &App, label: &str| {
+        calendar_texts(crate::views::settings(app), size)
+            .iter()
+            .any(|s| s == label)
+    };
+    // Nothing needs attention: the advanced part stays folded.
+    assert!(!shows(&app, "인증 토큰") && !shows(&app, "AI 연결 도우미"));
+    let target = calendar_text_bounds(crate::views::settings(&app), size)
+        .into_iter()
+        .find(|(s, _)| s == "펼치기")
+        .unwrap()
+        .1;
+    let messages = click_text(crate::views::settings(&app), size, target);
+    assert!(matches!(messages.as_slice(), [Message::McpAdvanced(true)]));
+    let _ = app.update(Message::McpAdvanced(true));
+    assert!(shows(&app, "인증 토큰") && shows(&app, "AI 연결 도우미") && shows(&app, "접기"));
+    // It opens by itself for a replaced token, or when no AI app is registered.
+    for needs in [0, 1] {
+        let mut app = fixture();
+        app.settings_section = SettingsSection::Mcp;
+        if needs == 0 {
+            app.mcp_setup.token = TokenPanel::Recovered;
+        } else {
+            app.mcp_setup.registrations = std::array::from_fn(|_| Registration::Missing);
+        }
+        assert!(shows(&app, "인증 토큰"), "case {needs}");
+        // The owner's choice to close it wins.
+        let _ = app.update(Message::McpAdvanced(false));
+        assert!(!shows(&app, "인증 토큰"), "case {needs}");
+    }
+    // Opened by itself for a replaced token, it stays open through the reissue steps.
+    let mut app = fixture();
+    app.settings_section = SettingsSection::Mcp;
+    app.mcp_setup.token = TokenPanel::Recovered;
+    let _ = app.update(Message::McpSetup(crate::mcp_setup_ui::Action::ReissueAsk));
+    assert_eq!(app.mcp_setup.token, TokenPanel::Confirming);
+    assert!(
+        shows(&app, "재발급 확인"),
+        "the confirm button stays in reach"
+    );
+    // Opened by itself because no AI app is registered, it stays open while the board
+    // is read again and while the owner moves on to the next app.
+    let mut app = fixture();
+    app.settings_section = SettingsSection::Mcp;
+    let generation = app.mcp_setup.generation;
+    let _ = app.update(Message::McpSetup(crate::mcp_setup_ui::Action::Loaded(
+        generation,
+        std::array::from_fn(|_| Registration::Missing),
+    )));
+    assert_eq!(app.mcp_advanced, Some(true));
+    app.mcp_setup.checking = true;
+    assert!(
+        shows(&app, "AI 연결 도우미"),
+        "a new reading does not fold it"
+    );
+    app.mcp_setup.checking = false;
+    app.mcp_setup.registrations[0] = Registration::Current;
+    let _ = app.update(Message::McpSetup(crate::mcp_setup_ui::Action::Client(
+        crate::mcp_setup::Client::ClaudeCode,
+    )));
+    assert!(
+        shows(&app, "AI 연결 도우미"),
+        "choosing the next app keeps it open"
+    );
+    // A board row's button shows its result in the helper, so the helper opens.
+    let mut app = fixture();
+    app.mcp_advanced = Some(false);
+    let _ = app.update(Message::McpSetup(crate::mcp_setup_ui::Action::Inspect(
+        crate::mcp_setup::Client::Codex,
+    )));
+    assert_eq!(app.mcp_advanced, Some(true));
+}
+
+#[test]
+fn the_screen_mode_buttons_switch_both_ways_and_ignore_the_mode_in_use() {
+    let mut app = fixture();
+    app.page = Page::Settings;
+    app.preferences.theme = AppTheme::Midnight;
+    let size = Size::new(1160., 1600.);
+    let target = calendar_text_bounds(crate::views::settings(&app), size)
+        .into_iter()
+        .find(|(s, _)| s == "밝은 모드")
+        .unwrap()
+        .1;
+    let messages = click_text(crate::views::settings(&app), size, target);
+    assert!(
+        matches!(
+            messages.as_slice(),
+            [Message::SetTheme(AppTheme::Porcelain)]
+        ),
+        "{messages:?}"
+    );
+    let _ = app.update(Message::SetTheme(AppTheme::Porcelain));
+    assert_eq!(app.preferences.theme, AppTheme::Porcelain);
+    // Choosing the mode in use changes nothing.
+    let _ = app.update(Message::SetTheme(AppTheme::Porcelain));
+    assert_eq!(app.preferences.theme, AppTheme::Porcelain);
+    // From the light mode, the other button goes back to the dark one.
+    let target = calendar_text_bounds(crate::views::settings(&app), size)
+        .into_iter()
+        .find(|(s, _)| s == "어두운 모드")
+        .unwrap()
+        .1;
+    let messages = click_text(crate::views::settings(&app), size, target);
+    assert!(
+        matches!(messages.as_slice(), [Message::SetTheme(AppTheme::Midnight)]),
+        "{messages:?}"
+    );
+    let _ = app.update(Message::SetTheme(AppTheme::Midnight));
+    assert_eq!(app.preferences.theme, AppTheme::Midnight);
 }
