@@ -414,10 +414,11 @@ fn daily(options: &HashMap<&str, &str>, store: Store) -> Result<serde_json::Valu
                 "model": record.model,
                 "usage": record.usage,
                 "checks": record.checks,
+                "overview": record.overview.is_some(),
                 "development": record.development.len(),
                 "troubleshooting": record.troubleshooting.len(),
-                "improvements": record.improvements.len(),
                 "decisions": record.decisions.len(),
+                "nextSteps": record.next_steps.len(),
             });
         }
         Outcome::Unchanged { path, revision } => {
