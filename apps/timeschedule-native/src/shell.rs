@@ -456,12 +456,14 @@ fn month(app: &App) -> Element<'_, Message> {
 }
 
 /// The selected day's buttons. In the button mode of 하루 정리 the day's record is made
-/// here; it is off while records are being made.
-fn date_actions<'a>(app: &'a App, key: &str) -> iced::widget::Row<'a, Message> {
-    let mut actions = row![
+/// by a button on its own row, since a third button does not fit beside the other two in
+/// the 270-wide panel; it is off while records are being made.
+fn date_actions<'a>(app: &'a App, key: &str) -> Column<'a, Message> {
+    let mut actions = column![row![
         control("+ 일정", Message::New(Kind::Event, Some(key.to_owned()))),
         control("+ 기록", Message::New(Kind::Entry, Some(key.to_owned())))
     ]
+    .spacing(6)]
     .spacing(6);
     if app.preferences.daily_record == DailyRecordMode::Button {
         let working = app.daily_making;
