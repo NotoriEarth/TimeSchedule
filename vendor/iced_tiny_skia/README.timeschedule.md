@@ -30,7 +30,7 @@ cargo test -p timeschedule-native --release --locked --offline settings_scroll_r
 ```
 
 Its timing ends after CPU rasterization, before Windows presentation. Host-dependent
-budgets are 33ms p95 at up to 1160x820 logical pixels and 66ms at 1920x1080 logical
-pixels / 150% scale; these are input-response checks, not guaranteed display FPS.
+budgets are 33ms p95 at up to 1160x820 logical pixels and 66ms at 1280x720 logical
+pixels / 225% scale (2880x1620 physical pixels); these are input-response checks, not guaranteed display FPS.
 Set `TIMESCHEDULE_SCROLL_REPORT` to save the measurements as JSON. The benchmark is
 ignored in routine tests because timing assertions on shared CI machines are noisy.

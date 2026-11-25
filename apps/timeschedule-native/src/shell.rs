@@ -242,9 +242,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
         views::actions(app)
     };
     top = top.push(toolbar);
-    // Omit the native banner only while the fixed settings status is rendered.
-    // Search replaces that content even when Settings remains the selected page.
-    let native_errors = if app.page == Page::Settings && app.search.trim().is_empty() {
+    // Omit the native banner only while the fixed settings status is rendered: the
+    // widget section of Settings. Search replaces that content even when Settings
+    // remains the selected page, and the other sections do not show it.
+    let native_errors = if app.page == Page::Settings
+        && app.settings_section == crate::app::SettingsSection::Widget
+        && app.search.trim().is_empty()
+    {
         String::new()
     } else {
         app.widget_errors()

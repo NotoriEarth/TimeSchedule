@@ -21,7 +21,7 @@
 | 기록 보관함 (현행 화면 식별용) | 왼쪽 메뉴 ‘개발 기록’ → 제목 ‘기록 보관함’. 여러 날짜와 여러 종류의 기록을 조회하는 기존 화면 | `Page::Records`, `views::records`, `app.snapshot.entries` |
 | 날짜 미정 화면 | ‘날짜 미정’. 날짜가 비어 있는 일정을 모아 표시. 여기서 ‘+ 일정’을 누르면 날짜를 비워 둘 수 있음 | `Page::Tasks`, `views::tasks`, `Kind::Task` |
 | 노트 화면 | 왼쪽 메뉴 ‘노트’ → 제목 ‘메모’. ‘+ 메모’로 추가하고 제목을 눌러 편집 | `Page::Notes`, `views::notes`, `app.snapshot.notes` |
-| 설정 화면 | 왼쪽 메뉴 하단 ‘설정’. 위젯 상단의 ‘설정’도 같은 화면으로 이동 | `Page::Settings`, `views::settings`, `widget_settings::Change::Open` |
+| 설정 화면 | 왼쪽 메뉴 하단 ‘설정’. 제목 아래 영역 버튼 넷 중 고른 영역 하나만 보임. 위젯 상단의 ‘설정’은 ‘바탕화면 위젯’ 영역을 바로 엶 | `Page::Settings`, `views::settings`, `app.settings_section`, `widget_settings::Change::Open` |
 
 ## 0.30.1 앱과 캡처를 대조하는 법
 
@@ -35,7 +35,7 @@
 | 채팅에서 경험 검토 | 수집된 채팅이 있으면 ‘채팅에서 경험 검토 · Terra’에서 채팅을 선택한다. 설계·트러블슈팅 후보에 체크한 뒤 ‘확인한 후보만 이력에 저장’을 누른다. 수집 중인데 경험 검토에 쓸 채팅이 없으면 이 자리에 ‘경험 검토에 쓸 채팅 발췌가 아직 없습니다’ | `chat_review_ui::panel`, `views::NO_CHATS_YET` |
 | 경험 선택과 Markdown 생성 | ‘포트폴리오 경험’에서 ‘경험 선택’으로 기록을 고른다. ‘백엔드 포트폴리오 · Markdown 생성’ 버튼 옆에 ‘기존 v2 재사용 완료’처럼 실제 판본 번호가 표시된다. | `portfolio_ui::panel`, `portfolio_ui::Action::Export` |
 
-30~31번 설정 캡처도 0.20.0 기준이다. 0.30.1의 ‘설정 → 로컬 일정 MCP’에는 ‘MCP 켜기’와 ‘MCP 끄기’가 있다. 설정에서 전원 제어를 찾을 때는 `views::settings`와 `Message::SetMcpEnabled`를 참고한다.
+30~31번 설정 캡처도 0.20.0 기준이다. 0.30.1의 ‘설정 → 로컬 일정 MCP’(0.38.0부터 ‘설정 → AI 연결 (MCP)’)에는 ‘MCP 켜기’와 ‘MCP 끄기’가 있다. 설정에서 전원 제어를 찾을 때는 `views::settings`와 `Message::SetMcpEnabled`를 참고한다.
 
 ## 달력, 위젯과 날짜별 보기
 
@@ -74,13 +74,14 @@
 
 | 부를 이름 | 화면에서 찾는 법 · 기능 | 코드에서 찾는 법 |
 | --- | --- | --- |
-| 화면 모드 | 설정의 ‘화면 모드’ 또는 왼쪽 메뉴의 밝은 모드·어두운 모드 전환 | `app.preferences.theme`, `shell::theme_toggle` |
-| 다이어리 저장 위치 | 설정의 ‘내 컴퓨터에 보관하는 다이어리’ 아래 데이터 저장 경로 | `app.data_dir`, `views::settings` |
-| 하루 정리 만드는 방식 | 설정의 ‘하루 정리 만드는 방식’. ‘버튼으로 만들기’(기본)와 ‘자동으로 만들기’ 중 하나를 고름 | `app.preferences.daily_record`, `views::daily_mode_choice`, `Message::SetDailyMode` |
-| 로컬 일정 MCP 연결 설정 | 설정의 ‘로컬 일정 MCP’. 서버 상태, 앱별 연결 현황, 토큰 관리, 연결 설정 | `app.mcp_setup`, `mcp_setup_ui::board`, `mcp_setup_ui::token_panel`, `mcp_setup_ui::view` |
-| 위젯 표시·위치 설정 | 설정의 ‘바탕화면 위젯’. 연결 상태, 표시·숨기기, 위치 복구·잠금, 배경 불투명도 | `views::settings`, `NativeAction`, `app.preferences.widget_opacity` |
-| 위젯 모양 설정 | 같은 설정 화면의 ‘크기와 표시 기간’, ‘글꼴과 간격’, ‘위젯 색상’ | `widget_settings::view`, `app.widget_ui`, `app.preferences.widget` |
-| 문서 저장소 안내 | 설정 하단의 ‘문서 저장소와 외부 연결’. 자동 개발 기록의 보관 경로와 외부 연결에 관한 설명 | `views::settings` · [문서 저장소 동작](document-vault.md) |
+| 설정 영역 버튼 | 설정 제목 아래 줄의 ‘일반’, ‘기록과 하루 정리’, ‘바탕화면 위젯’, ‘AI 연결 (MCP)’. 고른 버튼이 강조되고, 다른 화면에 다녀와도 마지막 영역이 유지됨 | `views::settings_sections`, `SettingsSection`, `Message::SettingsSection` |
+| 화면 모드 | 설정 ‘일반’의 ‘화면 모드’ 또는 왼쪽 메뉴의 밝은 모드·어두운 모드 전환 | `app.preferences.theme`, `shell::theme_toggle` |
+| 다이어리 저장 위치 | 설정 ‘일반’의 ‘내 컴퓨터에 보관하는 다이어리’ 아래 데이터 저장 경로. 같은 영역에 ‘창 닫기’ 안내와 버전 | `app.data_dir`, `views::settings_general` |
+| 하루 정리 만드는 방식 | 설정 ‘기록과 하루 정리’의 ‘하루 정리 만드는 방식’. ‘버튼으로 만들기’(기본)와 ‘자동으로 만들기’ 중 하나를 고름 | `app.preferences.daily_record`, `views::daily_mode_choice`, `Message::SetDailyMode` |
+| 로컬 일정 MCP 연결 설정 | 설정 ‘AI 연결 (MCP)’의 ‘로컬 일정 MCP’. 서버 상태, 앱별 연결 현황, 토큰 관리, 연결 설정 | `views::settings_mcp`, `app.mcp_setup`, `mcp_setup_ui::board`, `mcp_setup_ui::token_panel`, `mcp_setup_ui::view` |
+| 위젯 표시·위치 설정 | 설정 ‘바탕화면 위젯’의 ‘표시와 위치’. 연결 상태, 표시·숨기기, 위치 복구·잠금. 위젯 오류는 이 영역에서는 연결 상태 칸에, 다른 영역과 화면에서는 위쪽 알림 줄에 보임 | `views::settings_widget`, `NativeAction`, `shell::view`의 `native_errors` |
+| 위젯 모양 설정 | 같은 영역의 ‘크기와 표시 기간’, ‘글꼴과 간격’, ‘색상과 불투명도’(배경 불투명도 슬라이더와 색상) | `widget_settings::view`, `app.widget_ui`, `app.preferences.widget`, `app.preferences.widget_opacity` |
+| 문서 저장소 안내 | 설정 ‘기록과 하루 정리’의 ‘문서 저장소와 외부 연결’. 자동 개발 기록의 보관 경로와 외부 연결에 관한 설명 | `views::settings` · [문서 저장소 동작](document-vault.md) |
 | 트레이 메뉴 | Windows 알림 영역의 TimeSchedule 아이콘 메뉴. 다이어리 열기, 위젯 표시·숨기기·위치 복구, 앱 종료 | `NativeTray`, `TrayAction` |
 
 ## ‘개발 기록’이라고 했을 때

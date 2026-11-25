@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, Field, Message, NativeAction, Page, Past},
+    app::{App, Field, Message, NativeAction, Page, Past, SettingsSection},
     editor::{Confirmation, EditorPicker, Form, Kind},
     theme,
 };
@@ -236,8 +236,9 @@ pub(crate) fn actions(app: &App) -> Element<'_, Message> {
             ))
         }
         Page::Notes => actions = actions.push(control("+ 메모", Message::New(Kind::Note, None))),
+        Page::Settings => return settings_sections(app).wrap().into(),
         // The shell draws the month toolbar itself.
-        Page::Month | Page::Settings => {}
+        Page::Month => {}
     }
     actions.wrap().into()
 }
@@ -738,19 +739,63 @@ pub(crate) fn search_results(app: &App) -> Element<'_, Message> {
         .height(Length::Fill)
         .into()
 }
+/// The id of the settings screen's scroll, which each section opens at its top.
+pub(crate) const SETTINGS_SCROLL: &str = "settings-page";
+/// The settings screen shows one section at a time, picked by the toolbar buttons.
 pub(crate) fn settings(app: &App) -> Element<'_, Message> {
-    let mut c = column![
-        text(format!("TimeSchedule {}", env!("CARGO_PKG_VERSION"))).size(20),
-        title("화면 모드"),
+    let section = app.settings_section;
+    let body = match section {
+        SettingsSection::General => settings_general(app),
+        SettingsSection::Records => settings_records(app),
+        SettingsSection::Widget => settings_widget(app),
+        SettingsSection::Mcp => settings_mcp(app),
+    };
+    scrollable(paper(column![title(section.label()), body].spacing(15)))
+        .id(SETTINGS_SCROLL)
+        .spacing(crate::calendar_ui::SCROLL_GAP)
+        .height(Length::Fill)
+        .into()
+}
+/// The four section buttons in the settings toolbar, the open one highlighted.
+fn settings_sections(app: &App) -> Row<'_, Message> {
+    let mut sections = Row::new().spacing(6);
+    for section in SettingsSection::ALL {
+        sections = sections.push(
+            control(section.label(), Message::SettingsSection(section)).style(
+                if app.settings_section == section {
+                    theme::primary
+                } else {
+                    theme::secondary
+                },
+            ),
+        );
+    }
+    sections
+}
+fn settings_general(app: &App) -> Element<'_, Message> {
+    column![
+        subtitle("화면 모드"),
         quiet("Midnight · 어두운 모드 / Porcelain · 밝은 모드"),
         container(crate::shell::theme_toggle(app)).width(220),
         quiet("선택한 모드는 다음 실행에도 유지됩니다."),
         space().height(SECTION_GAP),
-        title("내 컴퓨터에 보관하는 다이어리"),
+        subtitle("내 컴퓨터에 보관하는 다이어리"),
         quiet("데이터 저장 위치"),
         text(app.data_dir.display().to_string()).size(14),
         space().height(SECTION_GAP),
-        title("하루 정리 만드는 방식"),
+        subtitle("창 닫기"),
+        quiet(
+            "상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."
+        ),
+        space().height(SECTION_GAP),
+        quiet(format!("TimeSchedule {}", env!("CARGO_PKG_VERSION"))),
+    ]
+    .spacing(15)
+    .into()
+}
+fn settings_records(app: &App) -> Element<'_, Message> {
+    column![
+        subtitle("하루 정리 만드는 방식"),
         daily_mode_choice(app),
         quiet(match app.preferences.daily_record {
             DailyRecordMode::Button => "월간 다이어리에서 날짜를 고른 뒤 ‘하루 정리 만들기’를 누를 때만 만듭니다. 모델 사용량은 누를 때만 씁니다.",
@@ -758,7 +803,15 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         }),
         quiet("채팅 자동 수집을 켠 프로젝트의 대화로 만듭니다."),
         space().height(SECTION_GAP),
-        title("로컬 일정 MCP"),
+        subtitle("문서 저장소와 외부 연결"),
+        text("개발 기록은 독립된 TimeScheduleData 문서 저장소에 먼저 보관합니다. 모바일·서버 동기화는 아직 제공하지 않습니다. 다이어리와 문서의 수동 편집은 자동 동기화하지 않습니다.").size(14),
+    ]
+    .spacing(15)
+    .into()
+}
+fn settings_mcp(app: &App) -> Element<'_, Message> {
+    column![
+        subtitle("로컬 일정 MCP"),
         crate::mcp_setup_ui::server_line(&app.mcp_status, app.mcp_endpoint().is_some()),
         row![
             control("MCP 켜기", Message::SetMcpEnabled(true)).on_press_maybe(
@@ -780,78 +833,58 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         ),
         crate::mcp_setup_ui::token_panel(&app.mcp_setup),
         crate::mcp_setup_ui::view(&app.mcp_setup),
-        space().height(SECTION_GAP),
-        title("바탕화면 위젯"),
-        scrollable(text(app.widget_status_text()).size(13))
-            .id("widget-connection-status")
-            .height(52)
-            .width(Length::Fill)
     ]
-    .spacing(15);
+    .spacing(15)
+    .into()
+}
+fn settings_widget(app: &App) -> Element<'_, Message> {
     // Keep controls and scroll content mounted during native requests.
     let enabled = !app.native_busy;
     let native_control = |label: &str, action| {
         control(label, Message::Native(action))
             .on_press_maybe(enabled.then_some(Message::Native(action)))
     };
-    c = c
-        .push(
-            container(quiet(if app.native_busy {
-                "Windows 작업 중…"
-            } else {
-                " "
-            }))
-            .height(20)
+    column![
+        subtitle("표시와 위치"),
+        scrollable(text(app.widget_status_text()).size(13))
+            .id("widget-connection-status")
+            .height(52)
             .width(Length::Fill),
-        )
-        .push(
-            row![
-                native_control(
-                    if app.preferences.widget_visible && app.widget_attached {
-                        "위젯 숨기기"
-                    } else {
-                        "위젯 표시"
-                    },
-                    if app.preferences.widget_visible && app.widget_attached {
-                        NativeAction::Hide
-                    } else {
-                        NativeAction::Show
-                    }
-                ),
-                native_control("위젯 위치 복구", NativeAction::Recover),
-                native_control(
-                    if app.preferences.widget_locked {
-                        "잠금 해제"
-                    } else {
-                        "위치 잠금"
-                    },
-                    NativeAction::Lock(!app.preferences.widget_locked)
-                )
-            ]
-            .spacing(6),
-        )
-        .push(
-            text(format!(
-                "배경 불투명도 {}% · 글자는 선명하게 유지",
-                app.preferences.widget_opacity
-            ))
-            .size(14),
-        )
-        .push(iced::widget::slider(
-            40..=100,
-            app.preferences.widget_opacity,
-            |v| Message::Native(NativeAction::Opacity(v)),
-        ));
-    c = c.push(crate::widget_settings::view(app));
-    c = c
-        .push(space().height(SECTION_GAP))
-        .push(title("문서 저장소와 외부 연결"))
-        .push(text("개발 기록은 독립된 TimeScheduleData 문서 저장소에 먼저 보관합니다. 모바일·서버 동기화는 아직 제공하지 않습니다. 다이어리와 문서의 수동 편집은 자동 동기화하지 않습니다.").size(14))
-        .push(quiet("상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."));
-    scrollable(paper(c))
-        .spacing(crate::calendar_ui::SCROLL_GAP)
-        .height(Length::Fill)
-        .into()
+        container(quiet(if app.native_busy {
+            "Windows 작업 중…"
+        } else {
+            " "
+        }))
+        .height(20)
+        .width(Length::Fill),
+        row![
+            native_control(
+                if app.preferences.widget_visible && app.widget_attached {
+                    "위젯 숨기기"
+                } else {
+                    "위젯 표시"
+                },
+                if app.preferences.widget_visible && app.widget_attached {
+                    NativeAction::Hide
+                } else {
+                    NativeAction::Show
+                }
+            ),
+            native_control("위젯 위치 복구", NativeAction::Recover),
+            native_control(
+                if app.preferences.widget_locked {
+                    "잠금 해제"
+                } else {
+                    "위치 잠금"
+                },
+                NativeAction::Lock(!app.preferences.widget_locked)
+            )
+        ]
+        .spacing(6),
+        crate::widget_settings::view(app),
+    ]
+    .spacing(15)
+    .into()
 }
 /// The two ways of making daily records, the chosen one highlighted.
 fn daily_mode_choice(app: &App) -> Element<'_, Message> {
