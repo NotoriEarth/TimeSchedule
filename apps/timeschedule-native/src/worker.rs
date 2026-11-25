@@ -772,6 +772,17 @@ where
                 ));
                 continue 'projects;
             }
+            // What is sent is the dialogue of the folder this job started with, and of
+            // no other: the kept folder says whose chats it holds. The path the
+            // transcript was looked up by comes from a second listing, which a change
+            // of the project's folder in between can make another folder's.
+            if transcript.repo_key != project.root {
+                made.failed.push(format!(
+                    "{}: 프로젝트의 폴더가 작업 도중 바뀌어 남은 하루 정리를 만들지 않았습니다.",
+                    project.title
+                ));
+                continue 'projects;
+            }
             if transcript.blocks.is_empty() {
                 // Warnings with no dialogue mean files that could not be read, not a
                 // day without dialogue.
@@ -1638,6 +1649,42 @@ mod tests {
             assert_eq!(made.failed.len(), 1, "{:?}", made.failed);
             assert!(made.failed[0].starts_with("가 프로젝트: "));
         }
+    }
+    #[test]
+    fn a_kept_folder_that_holds_another_folders_chats_is_not_sent_to_the_model() {
+        let past = past();
+        keep_sessions(&past, &past.a, A_SESSIONS);
+        let root = root_of(&past, &past.a.0);
+        // The kept folder says its chats are those of another folder of this project.
+        let meta = past
+            .vault
+            .join("originals")
+            .join(timeschedule_core::chat_originals::group_name(&root))
+            .join("project.json");
+        std::fs::write(
+            &meta,
+            serde_json::json!({"schemaVersion":1,"projectId":past.a.0,
+                "title":"가 프로젝트","repoKey":"c:/another/folder"})
+            .to_string(),
+        )
+        .unwrap();
+        let (asked, skip) = (Asked::default(), Default::default());
+        let days = [day("2026-11-10"), day("2026-11-12")];
+        let made = daily_job(
+            &past.store,
+            || Ok(past.vault.clone()),
+            whole,
+            Which::ProjectDays {
+                project: &past.a.0,
+                days: &days,
+                root: &root,
+            },
+            asking(&asked, &skip, || true),
+        )
+        .unwrap();
+        assert!(asked.borrow().is_empty(), "the model was asked");
+        assert!(made.saved.is_empty());
+        assert!(!made.failed.is_empty(), "the owner is told");
     }
     #[test]
     fn a_scan_part_that_cannot_start_does_not_hide_the_others() {

@@ -2309,10 +2309,7 @@ impl App {
                         let project = self
                             .editor
                             .as_ref()
-                            .filter(|e| {
-                                e.form.kind == Kind::Project
-                                    && e.confirmation == Some(Confirmation::Delete)
-                            })
+                            .filter(|e| e.form.kind == Kind::Project && e.deleting)
                             .and_then(|e| e.form.id.clone());
                         if let Some(project) = project {
                             self.forget_past_days(&project);
@@ -2326,6 +2323,7 @@ impl App {
                     Err(error) => {
                         if let Some(e) = &mut self.editor {
                             e.saving = false;
+                            e.deleting = false;
                             e.confirmation = None;
                             e.error = error;
                         }
@@ -2530,6 +2528,7 @@ impl App {
         }
         editor.picker = None;
         editor.saving = true;
+        editor.deleting = delete;
         editor.error.clear();
         let form = editor.form.clone();
         let generation = editor.generation;
@@ -3900,7 +3899,8 @@ mod tests {
             app.editor_generation += 1;
             let generation = app.editor_generation;
             let mut editor = Editor::new(form, generation);
-            editor.confirmation = delete.then_some(Confirmation::Delete);
+            // The confirmation may be closed by then; the running save says it.
+            editor.deleting = delete;
             app.editor = Some(editor);
             let _ = app.update(Message::Saved(generation, Ok(())));
         };

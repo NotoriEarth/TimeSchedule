@@ -278,6 +278,9 @@ pub struct Editor {
     pub error: String,
     /// The folder dialog of the project editor is open for this editor.
     pub picking_repo: bool,
+    /// The save that is running deletes the item. The confirmation that asked for it can
+    /// be closed while the save runs, so it does not say this.
+    pub deleting: bool,
     undo: Vec<(String, text_editor::Cursor)>,
     redo: Vec<(String, text_editor::Cursor)>,
 }
@@ -294,6 +297,7 @@ impl Editor {
             picker: None,
             error: String::new(),
             picking_repo: false,
+            deleting: false,
             undo: vec![],
             redo: vec![],
         }
