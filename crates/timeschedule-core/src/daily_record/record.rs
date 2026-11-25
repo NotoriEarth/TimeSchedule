@@ -1064,150 +1064,80 @@ fn keep(
     publish(dir, path, &bytes)
 }
 
-fn cited_one(e: &Evidence) -> String {
-    let speaker = if e.picked {
-        "사람(고른 답)"
-    } else {
-        e.speaker.label()
-    };
-    format!("[{}] {speaker} · {} {}행", e.block, e.source, e.line)
-}
-
-fn cited(evidence: &[Evidence]) -> String {
-    evidence
-        .iter()
-        .map(cited_one)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn quoted(evidence: &[Quoted]) -> String {
-    evidence
-        .iter()
-        .map(|q| match &q.quote {
-            Some(quote) => format!("{} “{}”", cited_one(&q.at), one_line(quote)),
-            None => format!("{} (모델이 인용한 글귀가 이 블록에 없음)", cited_one(&q.at)),
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 impl DailyRecord {
-    /// The record as text for the diary: summary, then each list, each item with the
-    /// number, speaker and place of the blocks it cites.
+    /// The record as a person reads it in the diary: summary, then each list, and for
+    /// each decision who proposed and who decided, as the checks left it.
     ///
-    /// The lines that say who proposed and who decided are written here from the
-    /// checked values. No text of the model's is one of them or adds one: each piece
-    /// is put on one line, after a label the program writes, so every line starts with
-    /// the program's words.
+    /// The cited blocks, quotes, check notes and the model's own claims stay in the
+    /// record file and are not shown: they are there to check the answer, not to read.
+    ///
+    /// Every line starts with the program's words: a heading, `- `, or a label such as
+    /// `  이유: `. The model's text is put on one line after one of them, so it never
+    /// starts a line. Under `## 결정` every item starts with who proposed and who
+    /// decided (`- [제안 AI · 사람 승인] `), written here from the checked values, so
+    /// the model's decision text always comes after them.
     pub fn render(&self) -> String {
         let mut out = String::new();
-        for s in &self.summary {
-            writeln!(
-                out,
-                "- 요약: {} ({})",
-                one_line(&s.text),
-                cited(&s.evidence)
-            )
-            .unwrap();
+        let section = |out: &mut String, title: &str| {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            writeln!(out, "## {title}").unwrap();
+        };
+        if !self.summary.is_empty() {
+            section(&mut out, "요약");
+            for s in &self.summary {
+                writeln!(out, "- {}", one_line(&s.text)).unwrap();
+            }
         }
         if !self.development.is_empty() {
-            out.push_str("\n## 개발 내역\n");
+            section(&mut out, "개발 내역");
             for d in &self.development {
-                writeln!(
-                    out,
-                    "\n- 개발: {}: {} ({})",
-                    one_line(&d.title),
-                    one_line(&d.detail),
-                    cited(&d.evidence)
-                )
-                .unwrap();
+                writeln!(out, "- {}: {}", one_line(&d.title), one_line(&d.detail)).unwrap();
             }
         }
         if !self.troubleshooting.is_empty() {
-            out.push_str("\n## 트러블슈팅\n");
+            section(&mut out, "트러블슈팅");
             for t in &self.troubleshooting {
-                writeln!(
-                    out,
-                    "\n- 문제: {} ({})",
-                    one_line(&t.problem),
-                    cited(&t.evidence)
-                )
-                .unwrap();
+                writeln!(out, "- {}", one_line(&t.problem)).unwrap();
                 for (label, value) in [
                     ("원인", &t.cause),
                     ("해결", &t.fix),
                     ("확인", &t.verification),
                 ] {
                     if let Some(value) = value {
-                        writeln!(out, "  - {label}: {}", one_line(value)).unwrap();
+                        writeln!(out, "  {label}: {}", one_line(value)).unwrap();
                     }
                 }
             }
         }
         if !self.improvements.is_empty() {
-            out.push_str("\n## 개선 방향\n");
+            section(&mut out, "개선 방향");
             for i in &self.improvements {
-                writeln!(
-                    out,
-                    "\n- 개선: {} ({})",
-                    one_line(&i.text),
-                    cited(&i.evidence)
-                )
-                .unwrap();
+                writeln!(out, "- {}", one_line(&i.text)).unwrap();
             }
         }
         if !self.decisions.is_empty() {
-            out.push_str("\n## 결정\n");
+            section(&mut out, "결정");
             for d in &self.decisions {
-                writeln!(out, "\n- 결정: {}", one_line(&d.decision)).unwrap();
+                writeln!(
+                    out,
+                    "- [제안 {} · {}] {}",
+                    d.proposed_by.label(),
+                    d.decided_by.label(),
+                    one_line(&d.decision)
+                )
+                .unwrap();
                 let reason = d.reason.as_deref().map(one_line);
                 writeln!(
                     out,
-                    "  - 이유: {}",
+                    "  이유: {}",
                     reason.as_deref().unwrap_or("이유 기록 없음")
                 )
                 .unwrap();
                 if !d.rejected.is_empty() {
                     let rejected: Vec<String> = d.rejected.iter().map(|r| one_line(r)).collect();
-                    writeln!(out, "  - 버린 대안: {}", rejected.join("; ")).unwrap();
-                }
-                let side = |label: &str, claimed: Option<&str>, evidence: &[Quoted]| {
-                    let mut line = label.to_owned();
-                    if let Some(claimed) = claimed {
-                        write!(
-                            line,
-                            " (모델의 답 “{claimed}”은 근거가 뒷받침하지 않아 바꿈)"
-                        )
-                        .unwrap();
-                    }
-                    if !evidence.is_empty() {
-                        write!(line, " — {}", quoted(evidence)).unwrap();
-                    }
-                    line
-                };
-                writeln!(
-                    out,
-                    "  - 제안: {}",
-                    side(
-                        d.proposed_by.label(),
-                        d.claimed_proposed_by.map(Proposer::label),
-                        &d.proposal_evidence
-                    )
-                )
-                .unwrap();
-                writeln!(
-                    out,
-                    "  - 확정: {}",
-                    side(
-                        d.decided_by.label(),
-                        d.claimed_decided_by.map(Decider::label),
-                        &d.decision_evidence
-                    )
-                )
-                .unwrap();
-                if !d.evidence.is_empty() {
-                    writeln!(out, "  - 그 밖의 근거: {}", cited(&d.evidence)).unwrap();
+                    writeln!(out, "  버린 대안: {}", rejected.join("; ")).unwrap();
                 }
             }
         }

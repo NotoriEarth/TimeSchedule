@@ -71,6 +71,8 @@ Node.js는 로컬 문서 저장 명령에 필요하다. 기록 전달은 모델�
 
 `kind`는 design / development / troubleshooting / portfolio / summary 중 하나다. 개발 일지 `finish`의 선택 필드 `kind`에는 design / development / troubleshooting을 쓰며 기본값은 development다. 앱의 프로젝트 화면에서 이 세 종류의 경험으로 Markdown 포트폴리오를 생성한다. `status`는 in_progress / verification_pending / verified / completed / merged 중 하나다. `verified`는 기록에 명시한 검증 범위이며 사용자 승인·병합을 의미하지 않는다. 요약은 상세 원문의 완전한 문단을 선택하고, 생략하면 첫 일반 문단을 쓴다. 제한·미확인을 잘라 성과만 남기지 않는다. 상세 원문은 UTF-8 48,000바이트 이하로 나눈다.
 
+상세 원문에 `<!-- 다이어리 본문은 여기까지 -->`만으로 된 문단이 있으면, 앱은 다이어리 항목 본문에 그 첫 문단 앞까지만 넣는다(`project_records.rs`의 `DIARY_END`). 앞뒤가 빈 줄인 한 줄이면 코드 블록 안이어도 경계이고, 문장 안에 인용한 같은 글은 경계가 아니다. 개발 일지 `finish`는 요약이나 설명에 이 글이 들어 있으면 거절하므로, `finish`가 만든 원문에서는 첫 번째 이 줄이 언제나 `finish`가 넣은 경계다. 원문을 직접 만들 때는 이 줄을 경계로만 쓴다. 전달한 기록과 문서 저장소의 원문은 전체를 그대로 갖고, 본문을 고치지 않은 항목의 포트폴리오 근거와 v2 기록의 `작업 커밋 · ` 줄도 전체에서 읽는다. 0.34.1부터 개발 일지 `finish`가 요약과 `detail` 다음에 이 줄을 넣으므로 테스트 실행 기록(커밋 해시, 명령, 종료 코드, 집계), `verification`, `작업 커밋 · ` 줄은 다이어리 본문에 보이지 않는다. 이 줄이 없는 기록은 전처럼 전체가 보인다. 이미 전달한 기록은 같은 판을 같은 내용으로 다시 보내면, 항목이 앱이 넣은 그대로일 때 `unchanged`이고 다이어리 본문도 그대로다(고친 항목은 전처럼 `conflict`). 같은 작업을 0.34.1 이후에 다시 `finish`하면 원문이 달라져 새 판이 되고, 사용자가 고치지 않은 항목은 새 본문으로 바뀐다. 이 문단은 원문에 46바이트를 더하므로, 48,000바이트에 거의 닿던 작업을 다시 `finish`하면 크기 제한에 걸릴 수 있다.
+
 ```powershell
 node scripts/project-records.mjs prepare --input .cache/project-record-input.json
 node scripts/project-records.mjs sync
