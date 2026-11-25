@@ -298,7 +298,7 @@ fn metric(
     .into()
 }
 pub fn view(app: &App) -> Element<'_, Message> {
-    use crate::views::{quiet, title};
+    use crate::views::{quiet, subtitle};
     let p = &app.preferences.widget;
     fn msg(value: Change) -> Message {
         Message::WidgetSetting(value)
@@ -312,7 +312,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
     let actual = app.widget_ui.actual_size;
     let mut c = column![
-        title("크기와 표시 기간"),
+        subtitle("크기와 표시 기간"),
         quiet(format!(
             "현재 {:.0} × {:.0} · 잠금을 풀면 오른쪽 아래 모서리를 끌어 조절할 수 있습니다.",
             actual.width, actual.height
@@ -359,7 +359,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .copied()
         .find(|name| *name == p.font);
     c = c
-        .push(title("글꼴과 간격"))
+        .push(subtitle("글꼴과 간격"))
         .push(
             row![
                 pick_list(
@@ -418,7 +418,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     let swatch = widget_appearance::rgb(&app.widget_ui.color).unwrap_or(iced::Color::TRANSPARENT);
     c = c
-        .push(title("위젯 색상"))
+        .push(subtitle("위젯 색상"))
         .push(quiet(if app.preferences.theme == AppTheme::Midnight {
             "어두운 모드 색상 · 밝은 모드와 별도로 저장됩니다."
         } else {

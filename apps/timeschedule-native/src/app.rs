@@ -408,6 +408,9 @@ pub struct App {
     pub widget_month: NaiveDate,
     pub hovered_week: Option<NaiveDate>,
     pub project: Option<String>,
+    /// The project whose full list `snapshot.entries` holds, set only when a project
+    /// screen load succeeds: a failed load never passes the previous rows off as these.
+    pub entries_project: Option<String>,
     pub expanded: HashSet<String>,
 
     record_sync: crate::record_sync::Runner,
@@ -576,6 +579,7 @@ impl App {
             widget_month: month,
             hovered_week: None,
             project: None,
+            entries_project: None,
             expanded: HashSet::new(),
 
             record_sync: crate::record_sync::Runner::default(),
@@ -973,6 +977,8 @@ impl App {
         // The previous snapshot may remain visible while loading, but it cannot
         // provide an offset for the new scope, including after a failed load.
         self.more = false;
+        // Until this load succeeds, nothing on screen is known to be its rows.
+        self.entries_project = None;
         self.loading = false;
         let Some(store) = self.store.clone() else {
             return Task::none();
@@ -2011,6 +2017,10 @@ impl App {
                         ));
                         self.more = snapshot.entries.len() == 200;
                         self.snapshot = snapshot;
+                        // A matching generation means page and project are the ones loaded.
+                        self.entries_project = (self.page == Page::Projects)
+                            .then(|| self.project.clone())
+                            .flatten();
                         if self
                             .project
                             .as_ref()
@@ -2677,6 +2687,7 @@ mod tests {
             widget_month: date.with_day(1).unwrap(),
             hovered_week: None,
             project: None,
+            entries_project: None,
             expanded: HashSet::new(),
 
             record_sync: crate::record_sync::Runner::default(),

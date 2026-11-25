@@ -3,7 +3,7 @@ use crate::{
     editor::{Confirmation, EditorPicker, Form, Kind},
     theme,
 };
-use chrono::{Datelike, Duration, NaiveDate};
+use chrono::{Datelike, Duration, Local, NaiveDate};
 use iced::widget::{
     button, checkbox, column, container, mouse_area, opaque, pick_list, row, scrollable, space,
     stack, text, text_editor, text_input, Column, Row,
@@ -60,6 +60,12 @@ pub(crate) fn quiet<'a>(value: impl Into<String>) -> Element<'a, Message> {
 pub(crate) fn title<'a>(value: impl Into<String>) -> Element<'a, Message> {
     text(value.into()).size(23).into()
 }
+/// A heading inside a settings section, one step below `title`.
+pub(crate) fn subtitle<'a>(value: impl Into<String>) -> Element<'a, Message> {
+    text(value.into()).size(16).into()
+}
+/// The extra room above each settings section title.
+const SECTION_GAP: f32 = 10.0;
 pub(crate) fn kind_label(value: &str) -> &'static str {
     KIND_VALUES
         .iter()
@@ -194,13 +200,6 @@ pub fn view(app: &App, id: window::Id) -> Element<'_, Message> {
 pub(crate) fn actions(app: &App) -> Element<'_, Message> {
     let mut actions = Row::new().spacing(6);
     match app.page {
-        Page::Month => {
-            actions = actions
-                .push(control("‹ 이전 달", Message::Month(-1)))
-                .push(control("다음 달 ›", Message::Month(1)))
-                .push(control("+ 일정", Message::New(Kind::Event, None)))
-                .push(control("+ 기록", Message::New(Kind::Entry, None)));
-        }
         Page::Week => {
             actions = actions
                 .push(control("‹", Message::Week(-1)))
@@ -237,7 +236,8 @@ pub(crate) fn actions(app: &App) -> Element<'_, Message> {
             ))
         }
         Page::Notes => actions = actions.push(control("+ 메모", Message::New(Kind::Note, None))),
-        Page::Settings => {}
+        // The shell draws the month toolbar itself.
+        Page::Month | Page::Settings => {}
     }
     actions.wrap().into()
 }
@@ -539,6 +539,29 @@ fn past_days_panel<'a>(app: &'a App, project: &str) -> Element<'a, Message> {
         _ => control("지난 대화 정리", Message::CheckPastDays(project.to_owned())).into(),
     }
 }
+pub(crate) const NO_REPO_HINT: &str =
+    "프로젝트 수정에서 로컬 Git 저장소 경로를 넣으면 채팅 자동 수집을 켤 수 있습니다";
+pub(crate) const NO_CHATS_YET: &str = "경험 검토에 쓸 채팅 발췌가 아직 없습니다";
+pub(crate) const NO_PROJECT_RECORDS: &str =
+    "이 프로젝트에 남긴 기록이 없습니다. ‘+ 기록’으로 시작하세요.";
+/// A date heading of the project screen: "11월 24일 (화)", with the year when it is not
+/// `this_year`. A value that is not a date is shown as it is.
+pub(crate) fn date_heading(date: &str, this_year: i32) -> String {
+    let Ok(day) = NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+        return date.to_owned();
+    };
+    let weekday = WEEKDAYS[day.weekday().num_days_from_sunday() as usize];
+    if day.year() == this_year {
+        format!("{}월 {}일 ({weekday})", day.month(), day.day())
+    } else {
+        format!(
+            "{}년 {}월 {}일 ({weekday})",
+            day.year(),
+            day.month(),
+            day.day()
+        )
+    }
+}
 pub(crate) fn projects(app: &App) -> Element<'_, Message> {
     let mut list = column![control("모든 프로젝트", Message::Project(None))].spacing(5);
     for p in &app.snapshot.projects {
@@ -554,29 +577,32 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
         .iter()
         .find(|p| Some(&p.id) == app.project.as_ref())
     {
-        let mut panel = column![
-            text(&p.description).size(14),
-            quiet(format!(
-                "Git 저장소: {}",
-                if p.repo_path.is_empty() {
-                    "미연결"
-                } else {
-                    &p.repo_path
-                }
-            ))
-        ]
-        .spacing(10);
-        if app.busy {
-            panel = panel.push(quiet("작업 중…"));
-        } else {
-            panel = panel.push(
-                row![
-                    control("근거 요약", Message::Draft(false)),
-                    control("자료 발췌 초안", Message::Draft(true))
-                ]
-                .spacing(6),
-            );
+        let mut panel = column![].spacing(10);
+        if !p.description.trim().is_empty() {
+            panel = panel.push(text(&p.description).size(14));
         }
+        panel = panel.push(quiet(format!(
+            "Git 저장소: {}",
+            if p.repo_path.is_empty() {
+                "미연결"
+            } else {
+                &p.repo_path
+            }
+        )));
+        // While a model call or a refresh runs the buttons stay where they are, only
+        // unpressable: a draft finished during a refresh could not open its editor.
+        let idle = |message: Message| (!app.busy && !app.loading).then_some(message);
+        let mut drafts = row![
+            control("근거 요약", Message::Draft(false)).on_press_maybe(idle(Message::Draft(false))),
+            control("자료 발췌 초안", Message::Draft(true))
+                .on_press_maybe(idle(Message::Draft(true)))
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        if app.busy {
+            drafts = drafts.push(quiet("작업 중…"));
+        }
+        panel = panel.push(drafts);
         let watching = app.snapshot.chat_capture_project.as_ref() == Some(&p.id);
         if watching || !p.repo_path.is_empty() {
             panel = panel.push(control(
@@ -587,12 +613,17 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
                 },
                 Message::SetChatCapture(p.id.clone(), !watching),
             ));
+        } else {
+            panel = panel.push(quiet(NO_REPO_HINT));
         }
         if watching {
             panel = panel.push(past_days_panel(app, &p.id));
         }
         if !app.snapshot.reviewable_chats.is_empty() {
             panel = panel.push(crate::chat_review_ui::panel(app, &p.id));
+        } else if watching && app.entries_project.as_ref() == Some(&p.id) {
+            // Only a list read for this project can show it has no chats.
+            panel = panel.push(quiet(NO_CHATS_YET));
         }
         if let Some(state) = app
             .snapshot
@@ -610,15 +641,23 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
     for (date, entries) in date_groups(&app.snapshot.entries) {
         let shown = entries.len() as u32;
         let total = date_total(app, date, shown);
-        let mut heading = format!("{date} · {total}건");
+        let mut heading = format!("{} · {total}건", date_heading(date, Local::now().year()));
         if shown < total {
             heading.push_str(&format!(" · {shown}건 표시 · 더 불러오면 이어집니다"));
         }
-        let mut day = column![quiet(heading)].spacing(4);
+        let mut day = column![text(heading).size(14).style(theme::muted)].spacing(4);
         for e in entries {
             day = day.push(entry_card(app, e));
         }
         c = c.push(day);
+    }
+    // Only rows loaded for this very project can show it has none.
+    if app.project.is_some()
+        && app.entries_project == app.project
+        && app.snapshot.entries.is_empty()
+        && !app.loading
+    {
+        c = c.push(quiet(NO_PROJECT_RECORDS));
     }
     if app.more {
         c = c.push(more(app));
@@ -706,12 +745,11 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         quiet("Midnight · 어두운 모드 / Porcelain · 밝은 모드"),
         container(crate::shell::theme_toggle(app)).width(220),
         quiet("선택한 모드는 다음 실행에도 유지됩니다."),
-        space().height(10),
+        space().height(SECTION_GAP),
         title("내 컴퓨터에 보관하는 다이어리"),
         quiet("데이터 저장 위치"),
         text(app.data_dir.display().to_string()).size(14),
-        quiet("기존 Tauri 앱과 분리된 네이티브 데이터 폴더입니다."),
-        space().height(10),
+        space().height(SECTION_GAP),
         title("하루 정리 만드는 방식"),
         daily_mode_choice(app),
         quiet(match app.preferences.daily_record {
@@ -719,6 +757,7 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
             DailyRecordMode::Auto => "앱을 켤 때와 켜 둔 동안 한 시간마다, 최근 7일 가운데 끝난 날의 하루 정리를 만듭니다. 오늘은 만들지 않습니다. 대화가 바뀌지 않은 날은 모델을 부르지 않습니다.",
         }),
         quiet("채팅 자동 수집을 켠 프로젝트의 대화로 만듭니다."),
+        space().height(SECTION_GAP),
         title("로컬 일정 MCP"),
         crate::mcp_setup_ui::server_line(&app.mcp_status, app.mcp_endpoint().is_some()),
         row![
@@ -741,6 +780,7 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
         ),
         crate::mcp_setup_ui::token_panel(&app.mcp_setup),
         crate::mcp_setup_ui::view(&app.mcp_setup),
+        space().height(SECTION_GAP),
         title("바탕화면 위젯"),
         scrollable(text(app.widget_status_text()).size(13))
             .id("widget-connection-status")
@@ -803,7 +843,11 @@ pub(crate) fn settings(app: &App) -> Element<'_, Message> {
             |v| Message::Native(NativeAction::Opacity(v)),
         ));
     c = c.push(crate::widget_settings::view(app));
-    c=c.push(title("문서 저장소와 외부 연결")).push(text("개발 기록은 독립된 TimeScheduleData 문서 저장소에 먼저 보관합니다. 저장 경로·문서 가져오기는 docs/document-vault.md를 참고하세요. 모바일·서버 동기화는 아직 제공하지 않습니다. 다이어리와 문서의 수동 편집은 자동 동기화하지 않습니다.").size(14)).push(quiet("상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."));
+    c = c
+        .push(space().height(SECTION_GAP))
+        .push(title("문서 저장소와 외부 연결"))
+        .push(text("개발 기록은 독립된 TimeScheduleData 문서 저장소에 먼저 보관합니다. 모바일·서버 동기화는 아직 제공하지 않습니다. 다이어리와 문서의 수동 편집은 자동 동기화하지 않습니다.").size(14))
+        .push(quiet("상세창 X는 트레이로 숨깁니다. 완전 종료는 왼쪽 앱 종료 또는 트레이 메뉴를 사용하세요."));
     scrollable(paper(c))
         .spacing(crate::calendar_ui::SCROLL_GAP)
         .height(Length::Fill)
