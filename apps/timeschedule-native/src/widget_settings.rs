@@ -1,6 +1,6 @@
 //! Widget preferences UI and drafts; dates and appearance live in their modules.
 use crate::{
-    app::{App, Message, NativeAction, Page},
+    app::{App, Message, NativeAction},
     month_jump::MonthJump,
     widget_appearance::{self, Appearance},
 };
@@ -157,11 +157,11 @@ impl App {
                         self.show_manager()
                     };
                 }
-                self.page = Page::Settings;
                 self.widget_ui.width = w.width.to_string();
                 self.widget_ui.height = w.height.to_string();
                 self.sync_color_draft();
-                return self.show_manager();
+                let open = self.open_settings_section(crate::app::SettingsSection::Widget);
+                return Task::batch([self.show_manager(), open]);
             }
             Change::Width(s) => {
                 self.widget_ui.width = s.chars().take(4).collect();
@@ -418,7 +418,17 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     let swatch = widget_appearance::rgb(&app.widget_ui.color).unwrap_or(iced::Color::TRANSPARENT);
     c = c
-        .push(subtitle("위젯 색상"))
+        .push(subtitle("색상과 불투명도"))
+        .push(
+            text(format!(
+                "배경 불투명도 {}% · 글자는 선명하게 유지",
+                app.preferences.widget_opacity
+            ))
+            .size(14),
+        )
+        .push(slider(40..=100, app.preferences.widget_opacity, |v| {
+            Message::Native(crate::app::NativeAction::Opacity(v))
+        }))
         .push(quiet(if app.preferences.theme == AppTheme::Midnight {
             "어두운 모드 색상 · 밝은 모드와 별도로 저장됩니다."
         } else {

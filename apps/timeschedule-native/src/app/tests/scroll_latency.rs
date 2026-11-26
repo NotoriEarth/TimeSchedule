@@ -18,17 +18,20 @@ fn settings_scroll_has_no_stale_pixels() {
 fn run_settings_probe(verify_only: bool) {
     let frame_count = if verify_only { 2 } else { 50 };
     let mut report = Vec::new();
-    // Logical sizes; the large 150% case draws 2880 x 1620 physical pixels.
+    // Logical sizes; the large case draws 2880 x 1620 physical pixels. One settings
+    // section fits a 1920 x 1080 window, so that case scales a smaller logical window.
     for (width, height, scale, budget_ms) in [
         (800., 620., 1., 33.),
         (1160., 820., 1., 33.),
         (1160., 820., 1.5, 33.),
-        (1920., 1080., 1.5, 66.),
+        (1280., 720., 2.25, 66.),
     ] {
         let size = Size::new(width, height);
         let bounds = Rectangle::new(Point::ORIGIN, size);
         let mut app = fixture();
         app.page = Page::Settings;
+        // A long section with no inner scroll under the wheel.
+        app.settings_section = crate::app::SettingsSection::Widget;
         let mut renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
         let mut element = app.view(app.manager);
         let mut tree = Tree::new(element.as_widget());
@@ -47,12 +50,33 @@ fn run_settings_probe(verify_only: bool) {
         let mut samples = Vec::new();
         let mut last_offset = 0.;
         let mut moving = 0;
+        // Turn the wheel around before the content ends, so every input moves it.
+        let mut start_probe = SettingsProbe::default();
+        element.as_widget_mut().operate(
+            &mut tree,
+            layout::Layout::new(&node),
+            &renderer,
+            &mut start_probe,
+        );
+        let (view, content, _) = *start_probe
+            .scrolls
+            .iter()
+            .find(|s| s.0.x > 150. && s.0.width > 300. && s.0.height > 100.)
+            .unwrap();
+        let max_offset = content.height - view.height;
+        assert!(max_offset >= 120., "{size:?}: the section must scroll");
+        let mut down = true;
         let cursor = mouse::Cursor::Available(Point::new(width - 80., height * 0.5));
         for frame in 0..frame_count {
             let start = Instant::now();
             let mut messages = Vec::new();
             let mut shell = iced::advanced::Shell::new(&mut messages);
-            let wheel = if frame % 14 < 7 { -1. } else { 1. };
+            if down && last_offset + 60. > max_offset {
+                down = false;
+            } else if !down && last_offset < 60. {
+                down = true;
+            }
+            let wheel = if down { -1. } else { 1. };
             element.as_widget_mut().update(
                 &mut tree,
                 &iced::Event::Mouse(mouse::Event::WheelScrolled {

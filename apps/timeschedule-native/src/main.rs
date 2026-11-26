@@ -50,7 +50,7 @@ fn main() {
         launch::Route::Helper => std::process::exit(mcp_connection::run(&args)),
         launch::Route::Record => std::process::exit(record_cli::run(&args)),
         launch::Route::UnknownHelper => {
-            eprintln!("알 수 없는 MCP 도우미 모드입니다. TimeSchedule 설정 → 로컬 일정 MCP → AI 연결 도우미에서 다시 등록하세요.");
+            eprintln!("알 수 없는 MCP 도우미 모드입니다. TimeSchedule 설정 → AI 연결 (MCP) → AI 연결 도우미에서 다시 등록하세요.");
             std::process::exit(2);
         }
         launch::Route::Window { ignored } => {

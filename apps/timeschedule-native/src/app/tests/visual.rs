@@ -368,6 +368,7 @@ fn settings_switch_stops_and_restarts_authenticated_mcp() {
     }
     let dir = crate::record_inbox::tests::TestDir::new();
     let mut app = fixture();
+    app.settings_section = crate::app::SettingsSection::Mcp;
     app.data_dir = dir.0.clone();
     let _ = app.update(Message::SetMcpEnabled(false));
     assert!(
@@ -2411,6 +2412,7 @@ fn reissuing_the_token_does_not_move_the_settings_controls() {
         for size in [Size::new(800., 620.), Size::new(1160., 820.)] {
             let mut app = fixture();
             app.page = Page::Settings;
+            app.settings_section = crate::app::SettingsSection::Mcp;
             app.preferences.theme = mode;
             let mut renderer =
                 iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
@@ -2481,6 +2483,7 @@ fn mcp_assistant_keeps_controls_and_outer_scroll_fixed_during_results() {
         for size in [Size::new(800., 620.), Size::new(1160., 820.)] {
             let mut app = fixture();
             app.page = Page::Settings;
+            app.settings_section = crate::app::SettingsSection::Mcp;
             app.mcp_setup.client = crate::mcp_setup::Client::ChatGptDesktop;
             app.preferences.theme = mode;
             let mut renderer =
@@ -2557,6 +2560,7 @@ fn settings_retained_layout_is_stable_across_native_busy_transitions() {
     for mode in [AppTheme::Midnight, AppTheme::Porcelain] {
         for size in [Size::new(620., 480.), Size::new(1160., 820.)] {
             let mut app = fixture();
+            app.settings_section = crate::app::SettingsSection::Widget;
             app.preferences.theme = mode;
             let mut renderer =
                 iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
@@ -2690,6 +2694,7 @@ fn full_settings_shell_keeps_layout_through_real_native_errors_and_recovery() {
                 for unrelated in ["", "다이어리 저장 실패: 별도 오류 fixture"] {
                     let mut app = fixture();
                     app.page = Page::Settings;
+                    app.settings_section = crate::app::SettingsSection::Widget;
                     app.manager_size = size;
                     app.preferences.theme = mode;
                     app.widget = Some(window::Id::unique());
@@ -2765,9 +2770,10 @@ fn full_settings_shell_keeps_layout_through_real_native_errors_and_recovery() {
                             &renderer,
                             &mut probe,
                         );
+                        // The widget section holds no other scroll than its status.
                         assert_eq!(
                             probe.scrolls.len(),
-                            5,
+                            3,
                             "sidebar, settings and fixed status must remain mounted"
                         );
                         if size.width == 800.
@@ -2894,6 +2900,7 @@ fn settings_search_keeps_native_errors_visible_until_settings_returns() {
         for source in ["geometry", "native", "observer"] {
             let mut app = fixture();
             app.page = Page::Settings;
+            app.settings_section = crate::app::SettingsSection::Widget;
             app.preferences.theme = mode;
             app.error = "별도 저장 오류 fixture".into();
             let size = Size::new(1160., 820.);
@@ -4711,4 +4718,244 @@ fn a_failed_load_never_calls_the_next_project_empty() {
     app.error = "이전 오류".into();
     run_message(&mut app, Message::Project(Some(other.id)));
     assert!(says_empty(&app));
+}
+
+#[test]
+fn settings_shows_the_section_its_button_picks() {
+    use crate::app::SettingsSection;
+    let mut app = fixture();
+    run_message(&mut app, Message::Navigate(Page::Settings));
+    let size = Size::new(1160., 1600.);
+    let shell_texts = |app: &App| calendar_texts(crate::shell::view(app), size);
+    let labels = shell_texts(&app);
+    for section in SettingsSection::ALL {
+        assert!(
+            labels.iter().any(|s| s == section.label()),
+            "{section:?}: {labels:?}"
+        );
+    }
+    assert!(labels.iter().any(|s| s == "화면 모드"), "{labels:?}");
+    assert!(!labels.iter().any(|s| s == "로컬 일정 MCP"), "{labels:?}");
+    // Pressing a section button sends that section and shows only it.
+    let target = calendar_text_bounds(crate::shell::view(&app), size)
+        .into_iter()
+        .find(|(s, _)| s == "AI 연결 (MCP)")
+        .unwrap()
+        .1;
+    let messages = click_text(crate::shell::view(&app), size, target);
+    assert!(
+        matches!(
+            messages.as_slice(),
+            [Message::SettingsSection(SettingsSection::Mcp)]
+        ),
+        "{messages:?}"
+    );
+    run_message(&mut app, Message::SettingsSection(SettingsSection::Mcp));
+    let labels = shell_texts(&app);
+    assert!(labels.iter().any(|s| s == "로컬 일정 MCP"), "{labels:?}");
+    assert!(!labels.iter().any(|s| s == "화면 모드"), "{labels:?}");
+    // Leaving and coming back keeps the section.
+    run_message(&mut app, Message::Navigate(Page::Month));
+    run_message(&mut app, Message::Navigate(Page::Settings));
+    assert_eq!(app.settings_section, SettingsSection::Mcp);
+}
+
+#[test]
+fn the_widget_settings_button_opens_the_widget_section_with_opacity_by_the_colors() {
+    use crate::app::SettingsSection;
+    let mut app = fixture();
+    app.settings_section = SettingsSection::Mcp;
+    let _ = app.update(Message::WidgetSetting(crate::widget_settings::Change::Open));
+    assert_eq!(
+        (app.page, app.settings_section),
+        (Page::Settings, SettingsSection::Widget)
+    );
+    let labels = calendar_texts(crate::views::settings(&app), Size::new(1000., 2400.));
+    let at = |label: &str| {
+        labels
+            .iter()
+            .position(|s| s.starts_with(label))
+            .unwrap_or_else(|| panic!("{label}: {labels:?}"))
+    };
+    assert!(at("표시와 위치") < at("크기와 표시 기간"));
+    assert!(at("크기와 표시 기간") < at("글꼴과 간격"));
+    assert!(at("글꼴과 간격") < at("색상과 불투명도"));
+    assert!(at("색상과 불투명도") < at("배경 불투명도"));
+    // The slider right under the opacity line sets the opacity.
+    let size = Size::new(1000., 2400.);
+    let line = calendar_text_bounds(crate::views::settings(&app), size)
+        .into_iter()
+        .find(|(s, _)| s.starts_with("배경 불투명도"))
+        .unwrap()
+        .1;
+    // The column puts 14px between the line and the 22px slider.
+    let slider = Rectangle::new(
+        Point::new(line.x + 40., line.y + line.height + 20.),
+        Size::new(4., 10.),
+    );
+    let messages = click_text(crate::views::settings(&app), size, slider);
+    assert!(
+        matches!(
+            messages.as_slice(),
+            [Message::Native(NativeAction::Opacity(_)), ..]
+        ),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn widget_errors_stay_in_the_banner_outside_the_widget_section() {
+    use crate::app::SettingsSection;
+    let mut app = fixture();
+    let _ = app.update(Message::NativeDone(
+        NativeAction::Recover,
+        Err("위젯 복구 실패 fixture".into()),
+    ));
+    let size = Size::new(1160., 1600.);
+    let banner = |app: &App| {
+        calendar_texts(crate::shell::view(app), size)
+            .iter()
+            .filter(|s| s.contains("위젯 복구 실패 fixture"))
+            .count()
+    };
+    app.page = Page::Settings;
+    for section in [
+        SettingsSection::General,
+        SettingsSection::Records,
+        SettingsSection::Mcp,
+    ] {
+        app.settings_section = section;
+        assert_eq!(banner(&app), 1, "{section:?} shows the error once");
+    }
+    // The widget section shows it in its own status, not twice.
+    app.settings_section = SettingsSection::Widget;
+    assert_eq!(banner(&app), 1);
+}
+
+/// The widget operations a task asks for, such as scrolling, without running it.
+fn widget_operations(
+    task: Task<Message>,
+) -> Vec<Box<dyn iced::advanced::widget::Operation + Send>> {
+    use iced::futures::StreamExt;
+    let mut operations = Vec::new();
+    let Some(mut stream) = iced_runtime::task::into_stream(task) else {
+        return operations;
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        // Window and file work may never finish here; only the requests made at once count.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(300), async {
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Widget(operation) = action {
+                    operations.push(operation);
+                }
+            }
+        })
+        .await;
+    });
+    operations
+}
+
+#[test]
+fn every_way_into_a_settings_section_starts_at_its_top() {
+    use crate::app::SettingsSection;
+    let size = Size::new(1160., 820.);
+    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+    let settings_offset = |app: &App, tree: &mut Tree, scroll_to: Option<f32>, ops| {
+        let mut element = crate::views::settings(app);
+        tree.diff(element.as_widget());
+        let node =
+            element
+                .as_widget_mut()
+                .layout(tree, &renderer, &layout::Limits::new(Size::ZERO, size));
+        let layout = layout::Layout::new(&node);
+        let mut set = SettingsProbe {
+            set_scroll: scroll_to,
+            set_scroll_index: 0,
+            ..Default::default()
+        };
+        element
+            .as_widget_mut()
+            .operate(tree, layout, &renderer, &mut set);
+        for mut operation in ops {
+            let operation: &mut Box<dyn iced::advanced::widget::Operation + Send> = &mut operation;
+            element
+                .as_widget_mut()
+                .operate(tree, layout, &renderer, operation.as_mut());
+        }
+        let mut probe = SettingsProbe::default();
+        element
+            .as_widget_mut()
+            .operate(tree, layout, &renderer, &mut probe);
+        probe.scrolls[0].2.y
+    };
+    for (name, message) in [
+        (
+            "section button",
+            Message::SettingsSection(SettingsSection::Widget),
+        ),
+        (
+            "widget settings button",
+            Message::WidgetSetting(crate::widget_settings::Change::Open),
+        ),
+    ] {
+        let mut app = fixture();
+        app.page = Page::Settings;
+        app.settings_section = SettingsSection::Widget;
+        let mut tree = Tree::empty();
+        let scrolled = settings_offset(&app, &mut tree, Some(300.), Vec::new());
+        assert!(scrolled > 0., "{name}: the widget section scrolls");
+        let task = app.update(message);
+        let offset = settings_offset(&app, &mut tree, None, widget_operations(task));
+        assert_eq!(offset, 0., "{name}");
+    }
+    // Moving to another section from a scrolled one starts that section at its top too.
+    let mut app = fixture();
+    app.page = Page::Settings;
+    app.settings_section = SettingsSection::Widget;
+    let mut tree = Tree::empty();
+    assert!(settings_offset(&app, &mut tree, Some(300.), Vec::new()) > 0.);
+    let task = app.update(Message::SettingsSection(SettingsSection::Mcp));
+    let operations = widget_operations(task);
+    assert_eq!(settings_offset(&app, &mut tree, None, operations), 0.);
+}
+
+#[test]
+fn opening_a_settings_section_ends_a_search_and_rereads_the_ai_apps() {
+    use crate::app::SettingsSection;
+    let mut app = fixture();
+    let _ = app.update(Message::WidgetSetting(crate::widget_settings::Change::Open));
+    app.search = "회의".into();
+    let generation = app.mcp_setup.generation;
+    let _ = app.update(Message::SettingsSection(SettingsSection::Mcp));
+    assert!(
+        app.search.is_empty(),
+        "the section is not hidden behind results"
+    );
+    assert_eq!(
+        app.mcp_setup.generation,
+        generation + 1,
+        "registrations are read again"
+    );
+    app.search = "회의".into();
+    let _ = app.update(Message::WidgetSetting(crate::widget_settings::Change::Open));
+    assert_eq!(
+        (app.search.as_str(), app.settings_section),
+        ("", SettingsSection::Widget)
+    );
+}
+
+#[test]
+fn an_editor_still_loading_does_not_open_over_a_new_settings_section() {
+    use crate::app::SettingsSection;
+    let mut app = fixture();
+    app.page = Page::Settings;
+    let (vg, eg) = (app.view_generation, app.editor_generation);
+    let form = Form::new(Kind::Note, app.selected.to_string(), None);
+    let _ = app.update(Message::SettingsSection(SettingsSection::Mcp));
+    let _ = app.update(Message::FormLoaded(vg, eg, Ok(form)));
+    assert!(app.editor.is_none(), "the late search result stays closed");
 }

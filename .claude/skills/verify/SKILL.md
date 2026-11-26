@@ -161,7 +161,7 @@ Run `stop` after every run, including failed ones. A leftover instance keeps its
 
 ## Never do this in a verification run
 
-- Do not apply a registration in **설정 → 로컬 일정 MCP** (`다시 등록`, `등록 준비`, then `등록 적용`). It rewrites the user's real `~\.codex\config.toml`, `~\.claude.json` or Claude Desktop configuration to point at the scratch instance. The connection board itself only reads them.
+- Do not apply a registration in **설정 → AI 연결 (MCP)** (`다시 등록`, `등록 준비`, then `등록 적용`). It rewrites the user's real `~\.codex\config.toml`, `~\.claude.json` or Claude Desktop configuration to point at the scratch instance. The connection board itself only reads them.
 - Do not turn on `Codex·Claude Code 채팅 자동 수집` for a project. It copies the user's real chat history into the run's database and into your evidence.
 - Do not press `채팅에서 경험 검토 · Terra` or `백엔드 포트폴리오 · Markdown 생성`. They send content to an external model through the user's Codex login.
 

@@ -96,6 +96,26 @@ impl Page {
         }
     }
 }
+/// The part of the settings screen on show; the buttons above it pick one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SettingsSection {
+    #[default]
+    General,
+    Records,
+    Widget,
+    Mcp,
+}
+impl SettingsSection {
+    pub const ALL: [Self; 4] = [Self::General, Self::Records, Self::Widget, Self::Mcp];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::General => "일반",
+            Self::Records => "기록과 하루 정리",
+            Self::Widget => "바탕화면 위젯",
+            Self::Mcp => "AI 연결 (MCP)",
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub enum Field {
     Category(String),
@@ -275,6 +295,7 @@ pub enum Message {
     ScanChats,
     ChatsScanned(Result<worker::ChatScan, String>),
     SetDailyMode(preferences::DailyRecordMode),
+    SettingsSection(SettingsSection),
     /// Make the daily record of this day now (the selected day's button).
     MakeDaily(NaiveDate),
     DailyMade(Result<worker::DailyMade, String>),
@@ -411,6 +432,7 @@ pub struct App {
     /// The project whose full list `snapshot.entries` holds, set only when a project
     /// screen load succeeds: a failed load never passes the previous rows off as these.
     pub entries_project: Option<String>,
+    pub settings_section: SettingsSection,
     pub expanded: HashSet<String>,
 
     record_sync: crate::record_sync::Runner,
@@ -580,6 +602,7 @@ impl App {
             hovered_week: None,
             project: None,
             entries_project: None,
+            settings_section: SettingsSection::General,
             expanded: HashSet::new(),
 
             record_sync: crate::record_sync::Runner::default(),
@@ -965,6 +988,35 @@ impl App {
         )
     }
 
+    /// Shows one section of the settings screen from its top. A search would cover it,
+    /// so the search ends, with any editor it was still loading; the AI connection
+    /// section reads every AI app's registration again, as opening settings from the
+    /// menu does.
+    pub(crate) fn open_settings_section(&mut self, section: SettingsSection) -> Task<Message> {
+        self.page = Page::Settings;
+        self.settings_section = section;
+        self.search.clear();
+        self.search_generation += 1;
+        self.search_results.clear();
+        // An editor still loading from the screen left behind must not open over this one.
+        if self.editor.is_none() {
+            self.editor_generation += 1;
+        }
+        let top = iced::widget::operation::snap_to(
+            crate::views::SETTINGS_SCROLL,
+            iced::widget::operation::RelativeOffset::START,
+        );
+        if section != SettingsSection::Mcp {
+            return top;
+        }
+        let endpoint = self.mcp_endpoint();
+        let board = self.mcp_setup.update(
+            crate::mcp_setup_ui::Action::Refresh,
+            self.data_dir.clone(),
+            endpoint,
+        );
+        Task::batch([top, board])
+    }
     pub fn refresh(&mut self) -> Task<Message> {
         self.calendar.generation += 1;
         self.view_generation += 1;
@@ -1462,6 +1514,7 @@ impl App {
                 }
                 return Task::batch(tasks);
             }
+            Message::SettingsSection(section) => return self.open_settings_section(section),
             Message::SetDailyMode(mode) => {
                 if self.preferences.daily_record != mode {
                     self.preferences.daily_record = mode;
@@ -2688,6 +2741,7 @@ mod tests {
             hovered_week: None,
             project: None,
             entries_project: None,
+            settings_section: SettingsSection::General,
             expanded: HashSet::new(),
 
             record_sync: crate::record_sync::Runner::default(),
@@ -3578,20 +3632,29 @@ mod tests {
                     Page::Settings,
                 ] {
                     app.page = page;
-                    let mut element = app.view(app.manager);
-                    let mut tree = Tree::new(element.as_widget());
-                    let node = element.as_widget_mut().layout(
-                        &mut tree,
-                        &renderer,
-                        &layout::Limits::new(Size::ZERO, size),
-                    );
-                    assert_eq!(node.size(), size);
-                    check(
-                        &node,
-                        0.0,
-                        size.width,
-                        &format!("{page:?}/{mode:?}/{size:?}"),
-                    );
+                    // Settings shows one section at a time; every one must fit.
+                    let sections: &[SettingsSection] = if page == Page::Settings {
+                        &SettingsSection::ALL
+                    } else {
+                        &[SettingsSection::General]
+                    };
+                    for &section in sections {
+                        app.settings_section = section;
+                        let mut element = app.view(app.manager);
+                        let mut tree = Tree::new(element.as_widget());
+                        let node = element.as_widget_mut().layout(
+                            &mut tree,
+                            &renderer,
+                            &layout::Limits::new(Size::ZERO, size),
+                        );
+                        assert_eq!(node.size(), size);
+                        check(
+                            &node,
+                            0.0,
+                            size.width,
+                            &format!("{page:?}/{section:?}/{mode:?}/{size:?}"),
+                        );
+                    }
                 }
             }
         }

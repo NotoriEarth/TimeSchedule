@@ -13,8 +13,8 @@ An AI app connected to the running TimeSchedule can list, read, create and updat
 
 ## How to get to it (user POV)
 
-- An AI app registered through **설정 → 로컬 일정 MCP** calls a calendar tool while TimeSchedule is running.
-- A script sends the same JSON-RPC request to the endpoint shown in **설정 → 로컬 일정 MCP** with the app's token.
+- An AI app registered through **설정 → AI 연결 (MCP)** calls a calendar tool while TimeSchedule is running.
+- A script sends the same JSON-RPC request to the endpoint shown in **설정 → AI 연결 (MCP)** with the app's token.
 
 ## Driving it with control-timeschedule
 
