@@ -96,6 +96,21 @@ impl Page {
         }
     }
 }
+/// Scrolls the project screen back to its top.
+fn projects_top() -> Task<Message> {
+    iced::widget::operation::snap_to(
+        "projects-page",
+        iced::widget::operation::RelativeOffset::START,
+    )
+}
+/// The tab on show under a project's info rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProjectTab {
+    #[default]
+    Records,
+    Review,
+    Portfolio,
+}
 /// The part of the settings screen on show; the buttons above it pick one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SettingsSection {
@@ -298,6 +313,7 @@ pub enum Message {
     SettingsSection(SettingsSection),
     /// Opens or closes the advanced part of the AI connection section.
     McpAdvanced(bool),
+    ProjectTab(ProjectTab),
     SetTheme(AppTheme),
     /// Make the daily record of this day now (the selected day's button).
     MakeDaily(NaiveDate),
@@ -435,10 +451,19 @@ pub struct App {
     /// The project whose full list `snapshot.entries` holds, set only when a project
     /// screen load succeeds: a failed load never passes the previous rows off as these.
     pub entries_project: Option<String>,
+    /// Whose rows are on screen: `Some(None)` for 모든 프로젝트, `Some(Some(id))` for one
+    /// project, `None` for rows read by another screen (a calendar's range). Kept through
+    /// a refresh and replaced only by a successful load, so rows read for one choice are
+    /// never shown under another.
+    pub rows_project: Option<Option<String>>,
+    /// Whether the rows on screen have a next page; unlike `more`, kept through a refresh.
+    pub rows_more: bool,
     pub settings_section: SettingsSection,
     /// Whether the owner opened (true) or closed (false) the advanced part of the
     /// AI connection section; until then it opens itself when it needs attention.
     pub mcp_advanced: Option<bool>,
+    /// Back to the records tab whenever another project is opened.
+    pub project_tab: ProjectTab,
     pub expanded: HashSet<String>,
 
     record_sync: crate::record_sync::Runner,
@@ -608,8 +633,11 @@ impl App {
             hovered_week: None,
             project: None,
             entries_project: None,
+            rows_project: None,
+            rows_more: false,
             settings_section: SettingsSection::General,
             mcp_advanced: None,
+            project_tab: ProjectTab::Records,
             expanded: HashSet::new(),
 
             record_sync: crate::record_sync::Runner::default(),
@@ -963,7 +991,7 @@ impl App {
             .find(|p| p.id == project)
             .map_or("프로젝트", |p| p.title.as_str());
         self.notice = format!(
-            "{title}: 지난 대화 {}일을 정리할 수 있습니다. 프로젝트 화면에서 확인해 주세요.",
+            "{title}: 지난 대화 {}일을 정리할 수 있습니다. 이 프로젝트의 ‘경험 검토’ 탭에서 확인해 주세요.",
             made.due.len()
         );
         // The folder the days were counted in goes with them.
@@ -1545,6 +1573,13 @@ impl App {
             }
             Message::SettingsSection(section) => return self.open_settings_section(section),
             Message::McpAdvanced(open) => self.mcp_advanced = Some(open),
+            Message::ProjectTab(tab) => {
+                let changed = tab != self.project_tab;
+                self.project_tab = tab;
+                if changed {
+                    return projects_top();
+                }
+            }
             Message::SetTheme(theme) if theme != self.preferences.theme => {
                 return self.update(Message::ToggleTheme);
             }
@@ -2023,13 +2058,20 @@ impl App {
                 return self.place_popup(self.quick_anchor(), id);
             }
             Message::Project(id) if self.editor.is_none() => {
-                self.portfolio_feedback = None;
-                self.chat_review = Default::default();
+                // Another project starts on its records, from the top, with nothing of
+                // the previous one's review or portfolio result; the same one keeps them.
+                let other = id != self.project;
+                if other {
+                    self.portfolio_feedback = None;
+                    self.chat_review = Default::default();
+                    self.project_tab = ProjectTab::Records;
+                }
                 self.project = id;
                 self.page = Page::Projects;
                 self.search.clear();
                 self.search_generation += 1;
-                return Task::batch([self.refresh(), self.scan_chats()]);
+                let top = if other { projects_top() } else { Task::none() };
+                return Task::batch([self.refresh(), self.scan_chats(), top]);
             }
             Message::New(kind, date) if self.editor.is_none() => {
                 let date = date.unwrap_or_else(|| self.selected.to_string());
@@ -2107,6 +2149,9 @@ impl App {
                         self.entries_project = (self.page == Page::Projects)
                             .then(|| self.project.clone())
                             .flatten();
+                        self.rows_project =
+                            (self.page == Page::Projects).then(|| self.project.clone());
+                        self.rows_more = self.more;
                         if self
                             .project
                             .as_ref()
@@ -2140,6 +2185,7 @@ impl App {
                 match result {
                     Ok((rows, totals)) => {
                         self.more = rows.len() == 200;
+                        self.rows_more = self.more;
                         // A record moved between pages is listed once.
                         let known: HashSet<String> =
                             self.snapshot.entries.iter().map(|e| e.id.clone()).collect();
@@ -2777,8 +2823,11 @@ mod tests {
             hovered_week: None,
             project: None,
             entries_project: None,
+            rows_project: None,
+            rows_more: false,
             settings_section: SettingsSection::General,
             mcp_advanced: None,
+            project_tab: ProjectTab::Records,
             expanded: HashSet::new(),
 
             record_sync: crate::record_sync::Runner::default(),

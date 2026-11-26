@@ -864,6 +864,7 @@ fn project_panel_receives_experiences_and_exports_markdown_from_its_buttons() {
     assert_eq!(record_inbox::drain(&dir.0, &store).unwrap().saved, 2);
     let project = store.list_projects().unwrap().remove(0).id;
     run_message(&mut app, Message::Project(Some(project.clone())));
+    app.project_tab = crate::app::ProjectTab::Portfolio;
     let click = |app: &mut App, label: &str| {
         let size = Size::new(930., 820.);
         let target = calendar_text_bounds(crate::views::projects(app), size)
@@ -4256,8 +4257,7 @@ fn project_page_groups_the_same_records_by_date_newest_first() {
         form.title = title.into();
         form.save(&store).unwrap();
     }
-    let _ = app.update(Message::Project(Some(project.clone())));
-    app.snapshot = worker::snapshot(&store, &app.scope()).unwrap();
+    run_message(&mut app, Message::Project(Some(project.clone())));
     let groups = crate::views::date_groups(&app.snapshot.entries);
     let shape: Vec<_> = groups
         .iter()
@@ -4519,6 +4519,8 @@ fn render_past_days_previews() {
     // The capture is on for an empty folder: no session is read.
     store.set_chat_capture(&project, true).unwrap();
     run_message(&mut app, Message::Project(Some(project.clone())));
+    // The past-days panel sits in the review tab.
+    let _ = app.update(Message::ProjectTab(crate::app::ProjectTab::Review));
     let days: Vec<NaiveDate> = [20, 22, 23, 24]
         .iter()
         .map(|d| NaiveDate::from_ymd_opt(2026, 11, *d).unwrap())
@@ -4591,7 +4593,13 @@ fn a_busy_project_keeps_its_draft_buttons_in_place() {
     let project = app.snapshot.projects[0].id.clone();
     run_message(&mut app, Message::Project(Some(project)));
     let size = Size::new(900., 1400.);
-    let press = |app: &App, label: &str| {
+    // 근거 요약 sits in the records tab, 자료 발췌 초안 in the portfolio tab.
+    let press = |app: &mut App, label: &str| {
+        app.project_tab = if label == "근거 요약" {
+            crate::app::ProjectTab::Records
+        } else {
+            crate::app::ProjectTab::Portfolio
+        };
         let target = calendar_text_bounds(crate::views::projects(app), size)
             .into_iter()
             .find(|(s, _)| s == label)
@@ -4600,15 +4608,20 @@ fn a_busy_project_keeps_its_draft_buttons_in_place() {
         click_text(crate::views::projects(app), size, target)
     };
     assert!(matches!(
-        press(&app, "근거 요약").as_slice(),
+        press(&mut app, "근거 요약").as_slice(),
         [Message::Draft(false)]
     ));
+    assert!(matches!(
+        press(&mut app, "자료 발췌 초안").as_slice(),
+        [Message::Draft(true)]
+    ));
+    app.project_tab = crate::app::ProjectTab::Records;
     app.busy = true;
     let labels = calendar_texts(crate::views::projects(&app), size);
     assert!(labels.iter().any(|s| s == "작업 중…"), "{labels:?}");
     for label in ["근거 요약", "자료 발췌 초안"] {
         assert!(
-            press(&app, label).is_empty(),
+            press(&mut app, label).is_empty(),
             "{label} is pressable while busy"
         );
     }
@@ -4617,7 +4630,7 @@ fn a_busy_project_keeps_its_draft_buttons_in_place() {
     app.loading = true;
     for label in ["근거 요약", "자료 발췌 초안"] {
         assert!(
-            press(&app, label).is_empty(),
+            press(&mut app, label).is_empty(),
             "{label} is pressable while loading"
         );
     }
@@ -5247,4 +5260,212 @@ fn a_project_shows_its_repository_and_capture_as_states_and_buttons() {
         press(&app, "끄기").as_slice(),
         [Message::SetChatCapture(p, false)] if *p == id
     ));
+}
+
+#[test]
+fn a_project_shows_one_tab_at_a_time_and_opens_on_its_records() {
+    use crate::app::ProjectTab;
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let project = app.snapshot.projects[0].id.clone();
+    run_message(&mut app, Message::Project(Some(project.clone())));
+    let size = Size::new(1160., 1600.);
+    let labels = |app: &App| calendar_texts(crate::views::projects(app), size);
+    // The records tab: its counts, the summary button and the records themselves.
+    let shown = labels(&app);
+    for label in [
+        "기록 · 1",
+        "경험 검토 · 0",
+        "포트폴리오",
+        "근거 요약",
+        "+ 연동기록",
+    ] {
+        assert!(shown.iter().any(|s| s == label), "{label}: {shown:?}");
+    }
+    assert!(!shown.iter().any(|s| s == "자료 발췌 초안"), "{shown:?}");
+    let target = calendar_text_bounds(crate::views::projects(&app), size)
+        .into_iter()
+        .find(|(s, _)| s == "포트폴리오")
+        .unwrap()
+        .1;
+    assert!(matches!(
+        click_text(crate::views::projects(&app), size, target).as_slice(),
+        [Message::ProjectTab(ProjectTab::Portfolio)]
+    ));
+    // The portfolio tab: its draft button, no records.
+    let _ = app.update(Message::ProjectTab(ProjectTab::Portfolio));
+    let shown = labels(&app);
+    assert!(shown.iter().any(|s| s == "자료 발췌 초안"), "{shown:?}");
+    assert!(
+        !shown.iter().any(|s| s == "+ 연동기록" || s == "근거 요약"),
+        "{shown:?}"
+    );
+    // The review tab says how to get chats when capture is off.
+    let _ = app.update(Message::ProjectTab(ProjectTab::Review));
+    let shown = labels(&app);
+    assert!(
+        shown
+            .iter()
+            .any(|s| s == crate::views::NO_CAPTURE_FOR_REVIEW),
+        "{shown:?}"
+    );
+    // The same project keeps its tab; another project opens on its records.
+    run_message(&mut app, Message::Project(Some(project)));
+    assert_eq!(app.project_tab, ProjectTab::Review);
+    let other = store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: None,
+            title: "다른 프로젝트".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap();
+    run_message(&mut app, Message::Project(Some(other.id)));
+    assert_eq!(app.project_tab, ProjectTab::Records);
+}
+
+#[test]
+fn a_project_never_shows_another_project_s_rows_and_keeps_its_own_state() {
+    use crate::app::ProjectTab;
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let first = app.snapshot.projects[0].id.clone();
+    let other = store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: None,
+            title: "다른 프로젝트".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap();
+    let size = Size::new(1160., 1600.);
+    let labels = |app: &App| calendar_texts(crate::views::projects(app), size);
+    run_message(&mut app, Message::Project(Some(first.clone())));
+    assert!(labels(&app).iter().any(|s| s == "+ 연동기록"));
+    // A refresh of the same project keeps its rows on screen while it reads.
+    let _ = app.update(Message::Load);
+    assert!(labels(&app).iter().any(|s| s == "+ 연동기록"), "no flicker");
+    run_message(&mut app, Message::Load);
+    // Another project whose read fails does not show the first one's record.
+    let task = app.update(Message::Project(Some(other.id.clone())));
+    assert!(
+        !widget_operations(task).is_empty(),
+        "another project starts at the top"
+    );
+    let _ = app.update(Message::Loaded(
+        app.view_generation,
+        Err("읽기 실패".into()),
+    ));
+    assert!(
+        !labels(&app).iter().any(|s| s == "+ 연동기록"),
+        "{:?}",
+        labels(&app)
+    );
+    // The same project chosen again keeps its tab and its portfolio result.
+    run_message(&mut app, Message::Project(Some(first.clone())));
+    let _ = app.update(Message::ProjectTab(ProjectTab::Portfolio));
+    app.portfolio_feedback = Some((first.clone(), "새 v1 생성 완료".into()));
+    run_message(&mut app, Message::Project(Some(first.clone())));
+    assert_eq!(app.project_tab, ProjectTab::Portfolio);
+    assert!(app.portfolio_feedback.is_some());
+    // A running draft shows on every tab, not only where it started.
+    app.busy = true;
+    for tab in [
+        ProjectTab::Records,
+        ProjectTab::Review,
+        ProjectTab::Portfolio,
+    ] {
+        app.project_tab = tab;
+        assert!(labels(&app).iter().any(|s| s == "작업 중…"), "{tab:?}");
+    }
+    app.busy = false;
+    app.project_tab = ProjectTab::Records;
+    // Choosing another tab starts it at the top; the same tab moves nothing.
+    let task = app.update(Message::ProjectTab(ProjectTab::Records));
+    assert!(widget_operations(task).is_empty());
+    let task = app.update(Message::ProjectTab(ProjectTab::Review));
+    assert!(!widget_operations(task).is_empty());
+}
+
+#[test]
+fn another_tab_or_project_opens_at_the_top_and_the_same_one_stays() {
+    use crate::app::ProjectTab;
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let first = app.snapshot.projects[0].id.clone();
+    for n in 1..=40 {
+        let mut form = Form::new(Kind::Entry, app.selected.to_string(), Some(first.clone()));
+        form.title = format!("스크롤 기록 {n}");
+        form.save(&store).unwrap();
+    }
+    let other = store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: None,
+            title: "다른 프로젝트".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap();
+    run_message(&mut app, Message::Project(Some(first.clone())));
+    let size = Size::new(1160., 820.);
+    let renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+    let offset = |app: &App, tree: &mut Tree, scroll_to: Option<f32>, ops| {
+        let mut element = crate::views::projects(app);
+        tree.diff(element.as_widget());
+        let node =
+            element
+                .as_widget_mut()
+                .layout(tree, &renderer, &layout::Limits::new(Size::ZERO, size));
+        let layout = layout::Layout::new(&node);
+        let mut set = SettingsProbe {
+            set_scroll: scroll_to,
+            set_scroll_index: 0,
+            ..Default::default()
+        };
+        element
+            .as_widget_mut()
+            .operate(tree, layout, &renderer, &mut set);
+        for mut operation in ops {
+            let operation: &mut Box<dyn iced::advanced::widget::Operation + Send> = &mut operation;
+            element
+                .as_widget_mut()
+                .operate(tree, layout, &renderer, operation.as_mut());
+        }
+        let mut probe = SettingsProbe::default();
+        element
+            .as_widget_mut()
+            .operate(tree, layout, &renderer, &mut probe);
+        probe.scrolls[0].2.y
+    };
+    let mut tree = Tree::empty();
+    assert!(
+        offset(&app, &mut tree, Some(300.), Vec::new()) > 0.,
+        "the records scroll"
+    );
+    // The same tab keeps the place.
+    let task = app.update(Message::ProjectTab(ProjectTab::Records));
+    let kept = offset(&app, &mut tree, None, widget_operations(task));
+    assert!(kept > 0., "{kept}");
+    // Another tab opens at its top.
+    let task = app.update(Message::ProjectTab(ProjectTab::Portfolio));
+    assert_eq!(offset(&app, &mut tree, None, widget_operations(task)), 0.);
+    // Back on the records, scrolled, another project opens at the top of its records.
+    let _ = app.update(Message::ProjectTab(ProjectTab::Records));
+    assert!(offset(&app, &mut tree, Some(300.), Vec::new()) > 0.);
+    let task = app.update(Message::Project(Some(other.id)));
+    assert_eq!(offset(&app, &mut tree, None, widget_operations(task)), 0.);
+}
+
+#[test]
+fn all_projects_never_lists_rows_read_for_a_calendar() {
+    let mut app = calendar_record_fixture();
+    // The month view's rows are on screen; the projects screen's read then fails.
+    run_message(&mut app, Message::Navigate(Page::Month));
+    let _ = app.update(Message::Navigate(Page::Projects));
+    let _ = app.update(Message::Loaded(
+        app.view_generation,
+        Err("읽기 실패".into()),
+    ));
+    let labels = calendar_texts(crate::views::projects(&app), Size::new(1160., 1600.));
+    assert!(!labels.iter().any(|s| s == "+ 연동기록"), "{labels:?}");
 }
