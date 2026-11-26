@@ -104,6 +104,14 @@ pub fn locate(state_dir: &Path, work_id: &str, home: Option<&Path>) -> Result<Pa
     canonical_work_id(work_id)?;
     let root = std::fs::canonicalize(vault_root(state_dir, home)?)
         .map_err(|_| "문서 저장소 폴더를 찾지 못했습니다.".to_string())?;
+    document_in(&root, work_id)
+}
+
+/// The original file of one automatic record in the document store at `root`, which is
+/// a real folder path, or why it cannot be read.
+pub fn document_in(root: &Path, work_id: &str) -> Result<PathBuf, String> {
+    canonical_work_id(work_id)?;
+    let root = root.to_path_buf();
     let marker: VaultMarker = read_json(&no_links(&root, &["vault.json"])?, "문서 저장소 표식")?;
     if marker.schema_version != 1 {
         return Err("지원하지 않는 문서 저장소 형식입니다.".into());

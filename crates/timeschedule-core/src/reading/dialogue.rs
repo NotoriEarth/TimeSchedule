@@ -1,0 +1,365 @@
+//! The dialogue of a day and the lines of a kept original, read from the document
+//! store by the rules of the day transcript.
+use super::*;
+use crate::{
+    chat_originals::{group_name, is_link},
+    daily_record::{day_transcript, open_kept, project_dir, read_index, DayTranscript},
+    project_records::repo_key,
+};
+use std::io::{BufRead, Read};
+
+fn block_views(t: &DayTranscript) -> Vec<BlockView> {
+    let date = t.date.to_string();
+    t.blocks
+        .iter()
+        .map(|b| BlockView {
+            date: date.clone(),
+            number: b.number,
+            at: b.at.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+            speaker: b.speaker.label(),
+            source: t.sources[b.source].tag.clone(),
+            file: t.sources[b.source].files[b.file].clone(),
+            line: b.line,
+            clipped: b.clipped,
+            text: b.text.clone(),
+        })
+        .collect()
+}
+
+fn project_name(t: &DayTranscript) -> ProjectName {
+    ProjectName {
+        id: t.project_id.clone(),
+        title: t.title.clone(),
+    }
+}
+
+/// The blocks `pick` names of the dialogue of `project` on `date`, from `offset` on.
+/// `project` is a project ID or the absolute path of its folder, as for the day
+/// transcript, which this reads.
+pub fn read_day(
+    vault: &Path,
+    project: &str,
+    date: NaiveDate,
+    pick: Pick,
+    offset: usize,
+    budget: usize,
+) -> Result<DayView, String> {
+    let t = day_transcript(vault, project, date)?;
+    let all = block_views(&t);
+    let (focus, chosen): (Option<usize>, Vec<BlockView>) = match pick {
+        Pick::All => (None, all),
+        Pick::Matching(query) => {
+            let query = query_words(query)?;
+            (
+                None,
+                all.into_iter()
+                    .filter(|b| contains(&b.text, query))
+                    .collect(),
+            )
+        }
+        Pick::Around {
+            file,
+            line,
+            context,
+        } => {
+            let found = all
+                .iter()
+                .filter(|b| b.file == file && b.line <= line)
+                .map(|b| b.line)
+                .max()
+                .ok_or_else(|| {
+                    format!("{date}에 이 파일의 {line}번 줄이나 그 앞에서 시작하는 블록이 없습니다: {file}")
+                })?;
+            // One row can make several blocks, such as two failed commands in one
+            // Claude Code row: all of them are given, and the first is the focus.
+            let at: Vec<usize> = (0..all.len())
+                .filter(|&i| all[i].file == file && all[i].line == found)
+                .collect();
+            let (head, tail) = (at[0], at[at.len() - 1]);
+            let number = all[head].number;
+            let first = head.saturating_sub(context);
+            let last = (tail + context + 1).min(all.len());
+            (
+                Some(number),
+                all.into_iter().take(last).skip(first).collect(),
+            )
+        }
+    };
+    let total = chosen.len();
+    if offset > 0 && offset >= total {
+        return Err(format!("--offset이 블록 수({total}개)를 넘습니다."));
+    }
+    let (blocks, _) = fit(chosen.into_iter().skip(offset), budget);
+    let read = offset + blocks.len();
+    let (warnings, warnings_total) = capped(t.warnings.clone());
+    Ok(DayView {
+        project: project_name(&t),
+        date: date.to_string(),
+        focus,
+        total,
+        offset,
+        blocks,
+        warnings,
+        warnings_total,
+        next: (read < total).then_some(Offset { offset: read }),
+    })
+}
+
+/// The blocks of the dialogue of `project` from `from` to `to` that hold `query`, in
+/// time order. `offset` blocks of `from` are skipped. Days are read one by one until
+/// the page is full, at most `MAX_SEARCH_DAYS` in one search.
+pub fn search_days(
+    vault: &Path,
+    project: &str,
+    from: NaiveDate,
+    to: NaiveDate,
+    query: &str,
+    offset: usize,
+    budget: usize,
+) -> Result<SearchView, String> {
+    let query = query_words(query)?;
+    if from > to {
+        return Err("시작 날짜가 종료 날짜보다 늦습니다.".into());
+    }
+    if (to - from).num_days() >= MAX_SEARCH_DAYS {
+        return Err(format!(
+            "대화 검색은 한 번에 {MAX_SEARCH_DAYS}일까지 읽습니다. --from과 --to를 좁히세요."
+        ));
+    }
+    let mut view = SearchView {
+        project: ProjectName {
+            id: String::new(),
+            title: String::new(),
+        },
+        from: from.to_string(),
+        to: to.to_string(),
+        days_read: 0,
+        blocks: Vec::new(),
+        warnings: Vec::new(),
+        warnings_total: 0,
+        next: None,
+    };
+    let mut warnings = Vec::new();
+    let mut used = 0;
+    let mut day = from;
+    'days: loop {
+        let t = day_transcript(vault, project, day)?;
+        view.project = project_name(&t);
+        view.days_read += 1;
+        warnings.extend(t.warnings.iter().map(|w| format!("{day}: {w}")));
+        let skip = if day == from { offset } else { 0 };
+        let hits = block_views(&t)
+            .into_iter()
+            .filter(|b| contains(&b.text, query))
+            .skip(skip);
+        for (given, hit) in hits.enumerate() {
+            let size = chars_of(&hit);
+            // The first block of a page is given whatever its size.
+            if !view.blocks.is_empty() && used + size > budget {
+                view.next = Some(DayOffset {
+                    from: day.to_string(),
+                    offset: skip + given,
+                });
+                break 'days;
+            }
+            used += size;
+            view.blocks.push(hit);
+        }
+        if day >= to {
+            break;
+        }
+        day = day.succ_opt().ok_or("날짜를 넘길 수 없습니다.")?;
+    }
+    (view.warnings, view.warnings_total) = capped(warnings);
+    Ok(view)
+}
+
+/// Lines of a kept original of `project` as they are in the file, from line `line` (and
+/// `offset` characters into it) on: `count` lines, held to `budget` characters. `file`
+/// is a path of the project's `index.jsonl`, as the day transcript and a daily record
+/// give it.
+pub fn read_original(
+    vault: &Path,
+    project: &str,
+    file: &str,
+    line_number: usize,
+    count: usize,
+    offset: usize,
+    budget: usize,
+) -> Result<OriginalView, String> {
+    if line_number == 0 {
+        return Err("--line은 1부터 셉니다.".into());
+    }
+    let (dir, info) = project_dir(vault, project)?;
+    let entries = read_index(&dir)?;
+    let entry = entries
+        .iter()
+        .find(|e| e.file == file)
+        .ok_or_else(|| format!("이 프로젝트의 보관 목록에 없는 파일입니다: {file}"))?;
+    let mut input = open_kept(&dir, entry)?;
+    let mut buf = Vec::new();
+    for skipped in 1..line_number {
+        // A last line with no line end is not a line, however long.
+        if !rest_of_line(&mut input)? {
+            return Err(format!(
+                "이 파일은 {}줄입니다. --line {line_number}이 없습니다.",
+                skipped - 1
+            ));
+        }
+    }
+    let mut view = OriginalView {
+        project: ProjectName {
+            id: info.project_id,
+            title: info.title,
+        },
+        file: file.to_owned(),
+        lines: Vec::new(),
+        next: None,
+    };
+    let mut room = budget.max(1);
+    let mut skip = offset;
+    let mut left = count.max(1);
+    let mut number = line_number;
+    loop {
+        let Some((text, long)) = whole_line(&mut input, &mut buf)? else {
+            if view.lines.is_empty() {
+                return Err(format!(
+                    "이 파일은 {}줄입니다. --line {line_number}이 없습니다.",
+                    number - 1
+                ));
+            }
+            break;
+        };
+        // The line is there, and no room is left for it.
+        if room == 0 {
+            view.next = Some(LineOffset {
+                line: number,
+                offset: 0,
+                lines: left,
+            });
+            break;
+        }
+        let chars: Vec<char> = text.chars().collect();
+        if skip > chars.len() || (skip == chars.len() && skip > 0) {
+            return Err(format!(
+                "--offset이 {number}번 줄 길이({}자)를 넘습니다.",
+                chars.len()
+            ));
+        }
+        let end = (skip + room).min(chars.len());
+        room -= end - skip;
+        let clipped = end < chars.len();
+        view.lines.push(LineView {
+            line: number,
+            chars: chars.len(),
+            offset: skip,
+            text: chars[skip..end].iter().collect(),
+            clipped,
+            long,
+        });
+        if clipped {
+            view.next = Some(LineOffset {
+                line: number,
+                offset: end,
+                lines: left,
+            });
+            break;
+        }
+        left -= 1;
+        if left == 0 {
+            break;
+        }
+        skip = 0;
+        number += 1;
+    }
+    Ok(view)
+}
+
+/// The next line of `input` without its line end, and whether it is longer than
+/// `LINE_LIMIT` and was cut there. `None` at the end of the file and for a last line
+/// with no line end, which the tool may still be writing: the day transcript does not
+/// count it as a line either.
+fn whole_line(
+    input: &mut impl BufRead,
+    buf: &mut Vec<u8>,
+) -> Result<Option<(String, bool)>, String> {
+    buf.clear();
+    // Room for the line, `\r` and `\n`: a line of exactly the limit is not long,
+    // whichever line end it has.
+    input
+        .take(LINE_LIMIT + 2)
+        .read_until(b'\n', buf)
+        .map_err(|e| e.to_string())?;
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+    } else if buf.len() as u64 <= LINE_LIMIT + 1 || !rest_of_line(input)? {
+        return Ok(None);
+    }
+    let long = buf.len() as u64 > LINE_LIMIT;
+    if long {
+        buf.truncate(LINE_LIMIT as usize);
+        // Not into the middle of a letter: that would end the text with one that is
+        // not in the file.
+        if let Err(e) = std::str::from_utf8(buf) {
+            if e.error_len().is_none() {
+                buf.truncate(e.valid_up_to());
+            }
+        }
+    }
+    Ok(Some((String::from_utf8_lossy(buf).into_owned(), long)))
+}
+
+/// Reads past the rest of a line; whether it had a line end.
+fn rest_of_line(input: &mut impl BufRead) -> Result<bool, String> {
+    loop {
+        let seen = input.fill_buf().map_err(|e| e.to_string())?;
+        if seen.is_empty() {
+            return Ok(false);
+        }
+        if let Some(at) = seen.iter().position(|&b| b == b'\n') {
+            input.consume(at + 1);
+            return Ok(true);
+        }
+        let n = seen.len();
+        input.consume(n);
+    }
+}
+
+/// How many files the kept originals of `folder` list, and how many days of daily
+/// records it has, from the store at `vault`. Counted, not read.
+pub fn store_counts(vault: &Path, folder: &str) -> (usize, usize) {
+    let group = group_name(&repo_key(folder));
+    // Nothing is read through a link, as for the code that reads these folders.
+    let plain = |parts: &[&str]| {
+        let mut path = vault.to_path_buf();
+        for part in parts {
+            path.push(part);
+            if is_link(&path).unwrap_or(true) {
+                return None;
+            }
+        }
+        Some(path)
+    };
+    let files = plain(&["originals", &group, "index.jsonl"])
+        .and_then(|index| std::fs::read_to_string(index).ok())
+        .map_or(0, |text| {
+            text.lines().filter(|l| !l.trim().is_empty()).count()
+        });
+    let days = plain(&["daily", &group])
+        .and_then(|daily| std::fs::read_dir(daily).ok())
+        .map_or(0, |list| {
+            list.flatten()
+                // A record is a file: not a folder, and not a link.
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.strip_suffix(".json")
+                        .is_some_and(|d| crate::storage::validate_date(d).is_ok())
+                })
+                .count()
+        });
+    (files, days)
+}

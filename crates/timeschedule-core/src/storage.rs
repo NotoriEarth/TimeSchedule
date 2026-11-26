@@ -171,6 +171,40 @@ impl Storage {
         })
     }
 
+    /// The database at `path` for reading only. Nothing is made, migrated or written: a
+    /// missing file is an error, and a database of another schema version is not read,
+    /// because the queries are written for this one. It can be read while the app has
+    /// the database open; SQLite may leave its `-shm` and `-wal` files beside it.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
+            return Err(format!("DB 파일이 없습니다: {}", path.display()));
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| format!("Could not open SQLite database: {error}"))?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(database_error)?;
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .map_err(database_error)?;
+        if version != SCHEMA_VERSION {
+            return Err(format!(
+                "DB 형식({version})이 이 실행 파일이 읽는 형식({SCHEMA_VERSION})과 달라 읽지 않았습니다. 같은 버전의 앱을 한 번 켠 뒤 다시 실행하세요."
+            ));
+        }
+        connection
+            .execute_batch("PRAGMA query_only = ON;")
+            .map_err(database_error)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+            search: None,
+        })
+    }
+
     pub fn list_events(&self, from: &str, to: &str) -> Result<Vec<CalendarEvent>, String> {
         self.events_in_range(from, to, false)
     }

@@ -124,7 +124,7 @@ import zlib from 'node:zlib';
 const text = zlib.zstdDecompressSync(fs.readFileSync('<세션 ID>.jsonl.zst')).toString('utf8');
 ```
 
-프로젝트와 날짜로 찾아 읽는 명령은 방향 문서 순서 3번(읽기용 CLI)에서 만든다. 지금은 `index.jsonl`에서 세션을 찾고 파일을 직접 푼다.
+0.41.0부터는 프로젝트와 날짜로 찾아 읽는다. `record transcript`는 그날의 대화 블록을, `record original --file <보관본> --line <줄>`은 보관본의 줄을 그대로 돌려준다([기록 읽기 명령](record-reading.md)).
 
 ## 담기는 내용
 

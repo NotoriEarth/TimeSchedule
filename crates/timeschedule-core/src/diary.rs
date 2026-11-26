@@ -127,7 +127,7 @@ pub(crate) fn entry_row(row: &Row<'_>) -> rusqlite::Result<Entry> {
 }
 /// A folded list's summary: whitespace runs as single spaces, cut with `…`.
 /// `more` says the stored text went on past what was read.
-fn list_summary(value: &str, more: bool) -> String {
+pub(crate) fn list_summary(value: &str, more: bool) -> String {
     let flat = value.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut chars = flat.chars();
     let mut cut: String = chars.by_ref().take(LIST_SUMMARY_CHARS).collect();

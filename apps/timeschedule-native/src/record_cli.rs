@@ -6,7 +6,7 @@ use std::{
 use timeschedule_core::storage::Storage;
 use timeschedule_desktop::paths::{self, InstanceLock};
 
-const USAGE: &str = "record enqueue --input FILE | drain | status --work-id UUID --revision N | configure-local-chats --project UUID --enabled true/false | scan-local-chats | daily --project UUID|FOLDER [--dry-run] [--date YYYY-MM-DD] [--model NAME] [--transcript FILE] [--data-dir DIR] [--result FILE]";
+const USAGE: &str = "record enqueue --input FILE | drain | status --work-id UUID --revision N | configure-local-chats --project UUID --enabled true/false | scan-local-chats | daily --project UUID|FOLDER [--dry-run] [--date YYYY-MM-DD] [--model NAME] [--transcript FILE] | projects | list [--project UUID|FOLDER] [--from DATE] [--to DATE] [--origin LIST] | search --query WORDS [list's filters] | show --id UUID [--evidence] | transcript --project UUID|FOLDER (--date DATE [--query WORDS | --file FILE --line N [--context K]] | --from DATE --to DATE --query WORDS) | original --project UUID|FOLDER --file FILE --line N [--lines K]; reading commands take [--offset N] [--max-chars N]; every command takes [--data-dir DIR] [--result FILE]";
 
 fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
     if args.len() < 2 || args[0] != "record" {
@@ -27,7 +27,7 @@ fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
             &["--date", "--transcript", "--model"],
             &["--dry-run"],
         ),
-        _ => return Err(USAGE.into()),
+        _ => crate::record_read::arguments(command).ok_or(USAGE)?,
     };
     let mut options = HashMap::new();
     let mut index = 2;
@@ -46,9 +46,10 @@ fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
         {
             return Err(format!("알 수 없는 인자: {key}"));
         }
+        // Words to search for may start like an argument: `--query --dry-run`.
         let value = args
             .get(index + 1)
-            .filter(|v| !v.starts_with("--") && !v.is_empty())
+            .filter(|v| (key == "--query" || !v.starts_with("--")) && !v.is_empty())
             .ok_or_else(|| format!("{key} 값이 필요합니다."))?;
         if options.insert(key, value.as_str()).is_some() {
             return Err(format!("중복 인자: {key}"));
@@ -65,14 +66,14 @@ fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
 
 /// What `run` does with `args`, without the printing and the result file.
 #[cfg(test)]
-fn execute(args: &[String]) -> Result<serde_json::Value, String> {
+pub(crate) fn execute(args: &[String]) -> Result<serde_json::Value, String> {
     let (command, options) = parse(args)?;
-    let store = daily_store(command, &options);
-    let refused = refused_outputs(&options, store.as_ref());
+    let store = document_store(command, &options);
+    let refused = refused_outputs(command, &options, store.as_ref());
     perform(command, &options, refused, store)
 }
 
-/// Runs a command that `parse` read. `store` is `daily_store` of it and `refused` is
+/// Runs a command that `parse` read. `store` is `document_store` of it and `refused` is
 /// `refused_outputs` of that same store.
 fn perform(
     command: &str,
@@ -83,7 +84,8 @@ fn perform(
     if let Some(store) = store {
         return match refused {
             Some(why) => Err(why),
-            None => daily(options, store),
+            None if command == "daily" => daily(options, store),
+            None => crate::record_read::perform(command, options, store),
         };
     }
     let input = if command == "enqueue" {
@@ -224,6 +226,8 @@ fn result_is_transcript(options: &HashMap<&str, &str>) -> bool {
 
 /// Whether `path` (a `place`) is `folder` or below it.
 fn within(path: &str, folder: &str) -> bool {
+    // A drive's root, `c:\`, already ends with the separator.
+    let folder = folder.trim_end_matches(['\\', '/']);
     path.strip_prefix(folder)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(['\\', '/']))
 }
@@ -232,6 +236,11 @@ fn within(path: &str, folder: &str) -> bool {
 /// the daily records of the document store at `vault`. The program keeps those two
 /// folders itself, and an output there could replace a record or a kept revision.
 fn in_kept_folders(vault: &Path, path: &str) -> bool {
+    in_folders(&[vault.join("daily"), vault.join("originals")], path)
+}
+
+/// Whether an output file named `path` would be written in one of `folders` or below it.
+fn in_folders(folders: &[PathBuf], path: &str) -> bool {
     let path = Path::new(path);
     // The file the output names may itself be a link: `place` follows it to where it
     // points, but writing replaces the name. So the name's own place, its folder
@@ -252,21 +261,21 @@ fn in_kept_folders(vault: &Path, path: &str) -> bool {
         _ => None,
     };
     let places = [Some(place(path)), entry];
-    ["daily", "originals"].iter().any(|folder| {
-        let folder = place(&vault.join(folder));
+    folders.iter().any(|folder| {
+        let folder = place(folder);
         places.iter().flatten().any(|at| within(at, &folder))
     })
 }
 
-/// Where the document store of a `daily` run is, or why it was not found.
+/// Where the document store of a `daily` or reading run is, or why it was not found.
 type Store = Result<PathBuf, String>;
 
-/// The document store `daily` reads and writes; `None` for any other command. A run
-/// asks this once. The check of where its outputs go and the run itself are given the
-/// same answer, so a setting changed in between cannot have the check look at one
-/// store while the run writes over a record of another.
-fn daily_store(command: &str, options: &HashMap<&str, &str>) -> Option<Store> {
-    (command == "daily").then(|| {
+/// The document store `daily` and the reading commands read, and `daily` writes; `None`
+/// for any other command. A run asks this once. The check of where its outputs go and
+/// the run itself are given the same answer, so a setting changed in between cannot
+/// have the check look at one store while the run writes over a record of another.
+fn document_store(command: &str, options: &HashMap<&str, &str>) -> Option<Store> {
+    (command == "daily" || crate::record_read::arguments(command).is_some()).then(|| {
         #[cfg(test)]
         tests::STORE_LOOKUPS.with(|count| count.set(count.get() + 1));
         let dir = paths::data_dir(options.get("--data-dir").map(PathBuf::from), true)?;
@@ -275,12 +284,19 @@ fn daily_store(command: &str, options: &HashMap<&str, &str>) -> Option<Store> {
     })
 }
 
-/// Why `daily` must not write the files its arguments name, if it must not. `store` is
-/// `daily_store` of the run. Such a run writes neither file, the result included: a
-/// refusal must leave a transcript, a record or a kept revision as it was. This is
-/// asked once, before anything is written: writing makes folders, and a path can
-/// resolve differently after.
-fn refused_outputs(options: &HashMap<&str, &str>, store: Option<&Store>) -> Option<String> {
+/// Why `daily` or a reading command must not write the files its arguments name, if it
+/// must not. `store` is `document_store` of the run. Such a run writes neither file,
+/// the result included: a refusal must leave a transcript, a record or a kept revision
+/// as it was. This is asked once, before anything is written: writing makes folders,
+/// and a path can resolve differently after.
+///
+/// A reading command writes nothing in the document store or the data folder: it is
+/// to leave both as they were.
+fn refused_outputs(
+    command: &str,
+    options: &HashMap<&str, &str>,
+    store: Option<&Store>,
+) -> Option<String> {
     let store = store?;
     if result_is_transcript(options) {
         return Some("--transcript와 --result는 서로 다른 파일이어야 합니다.".into());
@@ -302,6 +318,15 @@ fn refused_outputs(options: &HashMap<&str, &str>, store: Option<&Store>) -> Opti
             ))
         }
     };
+    if command != "daily" {
+        let data = paths::data_dir(options.get("--data-dir").map(PathBuf::from), true);
+        let mut folders = vec![vault.clone()];
+        folders.extend(data.ok());
+        return named.into_iter().find_map(|(key, path)| {
+            in_folders(&folders, path)
+                .then(|| format!("{key}는 문서 저장소와 데이터 폴더 밖의 파일이어야 합니다."))
+        });
+    }
     named.into_iter().find_map(|(key, path)| {
         in_kept_folders(vault, path).then(|| {
             format!("{key}는 문서 저장소의 daily와 originals 폴더 밖의 파일이어야 합니다.")
@@ -330,7 +355,7 @@ fn write_whole(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// The day transcript of one project and, without `--dry-run`, the daily record a
 /// model makes of it. It reads the kept originals in the document store and writes
 /// only below the store's `daily` folder, so it runs while the app is open and makes
-/// no data folder. `store` is `daily_store` of the run.
+/// no data folder. `store` is `document_store` of the run.
 fn daily(options: &HashMap<&str, &str>, store: Store) -> Result<serde_json::Value, String> {
     use timeschedule_core::{
         daily_record::{
@@ -340,18 +365,7 @@ fn daily(options: &HashMap<&str, &str>, store: Store) -> Result<serde_json::Valu
         terra,
     };
     let date = match options.get("--date") {
-        // The parser also takes `2026-1-2` and `+10000-01-01`, so the shape is checked
-        // first: four digits, two and two.
-        Some(text) => chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-            .ok()
-            .filter(|_| {
-                let shaped = |(at, byte): (usize, u8)| match at {
-                    4 | 7 => byte == b'-',
-                    _ => byte.is_ascii_digit(),
-                };
-                text.len() == 10 && text.bytes().enumerate().all(shaped)
-            })
-            .ok_or("--date는 YYYY-MM-DD 형식이어야 합니다.")?,
+        Some(text) => date_arg(text).map_err(|e| format!("--date는 {e}"))?,
         None => chrono::Utc::now().with_timezone(&kst()).date_naive(),
     };
     let vault = store?;
@@ -411,6 +425,19 @@ fn daily(options: &HashMap<&str, &str>, store: Store) -> Result<serde_json::Valu
         }
     }
     Ok(out)
+}
+
+/// A date argument: `YYYY-MM-DD`, a real date. The parser also takes `2026-1-2` and
+/// `+10000-01-01`, so the shape is checked first: four digits, two and two.
+pub(crate) fn date_arg(text: &str) -> Result<chrono::NaiveDate, String> {
+    let shaped = |(at, byte): (usize, u8)| match at {
+        4 | 7 => byte == b'-',
+        _ => byte.is_ascii_digit(),
+    };
+    chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .ok()
+        .filter(|_| text.len() == 10 && text.bytes().enumerate().all(shaped))
+        .ok_or_else(|| "YYYY-MM-DD 형식이어야 합니다.".to_string())
 }
 
 /// The daily record asks for a summary of one day, not hard reasoning.
@@ -508,21 +535,30 @@ pub fn run(args: &[String]) -> i32 {
     let store = parsed
         .as_ref()
         .ok()
-        .and_then(|(command, options)| daily_store(command, options));
+        .and_then(|(command, options)| document_store(command, options));
     let refused = parsed
         .as_ref()
         .ok()
-        .and_then(|(_, options)| refused_outputs(options, store.as_ref()));
+        .and_then(|(command, options)| refused_outputs(command, options, store.as_ref()));
     let writes_result = refused.is_none();
+    // A reading command writes nothing before its result, so where the result goes is
+    // looked at again right before it is written: a junction on the way may have been
+    // turned to the store or the data folder while the command read.
+    let store_again = store.clone();
     let output = parsed
         .as_ref()
         .map_err(String::clone)
         .and_then(|(command, options)| perform(command, options, refused, store))
         .unwrap_or_else(|message| serde_json::json!({"outcome": "error", "message": message}));
     let bytes = serde_json::to_vec_pretty(&output).expect("JSON value serialization");
-    if let Ok((_, options)) = &parsed {
+    if let Ok((command, options)) = &parsed {
         if let Some(path) = options.get("--result").filter(|_| writes_result) {
             let result = (|| -> Result<(), String> {
+                if crate::record_read::arguments(command).is_some() {
+                    if let Some(why) = refused_outputs(command, options, store_again.as_ref()) {
+                        return Err(why);
+                    }
+                }
                 let path = Path::new(path);
                 if let Some(input) = options.get("--input") {
                     if std::fs::canonicalize(input).ok().is_some_and(|source| {
@@ -548,7 +584,7 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::record_inbox::tests::{sample, TestDir};
     use timeschedule_core::storage::Storage;
@@ -748,7 +784,7 @@ mod tests {
 
     /// A data folder registered with a record state folder whose document store is
     /// `vault`, so that where the store is does not depend on the user's home.
-    fn registered(dir: &TestDir, vault: &Path) -> PathBuf {
+    pub(crate) fn registered(dir: &TestDir, vault: &Path) -> PathBuf {
         let (data, state) = (dir.0.join("data"), dir.0.join("state"));
         let script = dir.0.join("project-records.mjs");
         std::fs::create_dir_all(&state).unwrap();
@@ -879,6 +915,13 @@ mod tests {
             return;
         }
         assert!(in_kept_folders(&vault, name.to_str().unwrap()));
+    }
+
+    #[test]
+    fn a_drive_root_holds_what_is_below_it() {
+        assert!(within(r"c:\data\out.json", r"c:\"));
+        assert!(within(r"c:\data", r"c:\data"));
+        assert!(!within(r"c:\data-2\out.json", r"c:\data"));
     }
 
     #[test]
