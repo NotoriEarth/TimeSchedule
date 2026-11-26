@@ -4,7 +4,7 @@ use crate::{
     worker,
 };
 use iced::{
-    widget::{button, checkbox, column, pick_list, scrollable, text},
+    widget::{button, checkbox, column, pick_list, text},
     Element, Task,
 };
 use timeschedule_core::chat_experiences::{ChatChoice, Kind, Review, Saved};
@@ -76,7 +76,7 @@ pub fn panel<'a>(app: &'a App, project: &str) -> Element<'a, Message> {
                 } else {
                     toggle.on_toggle(move |v| msg(Action::Check(kind, v)))
                 })
-                .push(scrollable(text(&c.body).size(13)).height(135));
+                .push(text(&c.body).size(13));
         }
         panel = panel.push(
             button(text("확인한 후보만 이력에 저장").size(13)).on_press_maybe(

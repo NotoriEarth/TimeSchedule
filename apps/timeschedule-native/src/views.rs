@@ -1,5 +1,5 @@
 use crate::{
-    app::{App, Field, Message, NativeAction, Page, Past, SettingsSection},
+    app::{App, Field, Message, NativeAction, Page, Past, ProjectTab, SettingsSection},
     editor::{Confirmation, EditorPicker, Form, Kind},
     theme,
 };
@@ -614,8 +614,9 @@ fn project_info<'a>(
     .spacing(10)
     .align_y(Alignment::Start);
     let linked = !p.repo_path.is_empty();
-    // The capture state comes with the rows read for this project; until they arrive
-    // (or when that read failed) the state is unknown and the button waits.
+    // The capture state comes with this project's latest read; while a read runs, or
+    // when it failed, the state is unknown and the button waits. (A toggle reads again,
+    // so a kept older state could say the opposite of what was just saved.)
     let known = app.entries_project.as_ref() == Some(&p.id);
     let watching = known && app.snapshot.chat_capture_project.as_ref() == Some(&p.id);
     let mut sources = Row::new()
@@ -662,53 +663,58 @@ fn project_info<'a>(
     }
     info.into()
 }
-pub(crate) fn projects(app: &App) -> Element<'_, Message> {
-    let mut c = column![].spacing(12);
-    if let Some(p) = app
-        .snapshot
-        .projects
-        .iter()
-        .find(|p| Some(&p.id) == app.project.as_ref())
-    {
-        let mut panel = column![project_info(app, p)].spacing(10);
-        // While a model call or a refresh runs the buttons stay where they are, only
-        // unpressable: a draft finished during a refresh could not open its editor.
-        let idle = |message: Message| (!app.busy && !app.loading).then_some(message);
-        let mut drafts = row![
-            control("근거 요약", Message::Draft(false)).on_press_maybe(idle(Message::Draft(false))),
-            control("자료 발췌 초안", Message::Draft(true))
-                .on_press_maybe(idle(Message::Draft(true)))
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center);
-        if app.busy {
-            drafts = drafts.push(quiet("작업 중…"));
-        }
-        panel = panel.push(drafts);
-        let watching = app.entries_project.as_ref() == Some(&p.id)
-            && app.snapshot.chat_capture_project.as_ref() == Some(&p.id);
-        if watching {
-            panel = panel.push(past_days_panel(app, &p.id));
-        }
-        if !app.snapshot.reviewable_chats.is_empty() {
-            panel = panel.push(crate::chat_review_ui::panel(app, &p.id));
-        } else if watching && app.entries_project.as_ref() == Some(&p.id) {
-            // Only a list read for this project can show it has no chats.
-            panel = panel.push(quiet(NO_CHATS_YET));
-        }
-        if let Some(state) = app
-            .snapshot
-            .portfolio
-            .as_ref()
-            .filter(|s| s.project_id == p.id)
-        {
-            panel = panel.push(crate::portfolio_ui::panel(app, state));
-        }
-        c = c.push(paper(panel));
+pub(crate) const NO_CAPTURE_FOR_REVIEW: &str =
+    "채팅 자동 수집을 켜면 수집된 채팅에서 경험 후보를 검토할 수 있습니다";
+/// A draft button that stays where it is while a model call or a refresh runs, only
+/// unpressable: a draft finished during a refresh could not open its editor.
+fn draft_row<'a>(app: &'a App, label: &'static str, portfolio: bool) -> Element<'a, Message> {
+    let message = Message::Draft(portfolio);
+    row![control(label, message.clone())
+        .on_press_maybe((!app.busy && !app.loading).then_some(message))]
+    .into()
+}
+/// The three tabs under a project's info rows, the open one highlighted. The counts
+/// come only from rows read for this project. A running draft shows here, on every tab.
+fn project_tabs<'a>(app: &'a App, known: bool) -> Element<'a, Message> {
+    let records = if !known {
+        "기록".to_owned()
+    } else if app.rows_more {
+        format!("기록 · {}+", app.snapshot.entries.len())
+    } else {
+        format!("기록 · {}", app.snapshot.entries.len())
+    };
+    let review = if known {
+        format!("경험 검토 · {}", app.snapshot.reviewable_chats.len())
+    } else {
+        "경험 검토".to_owned()
+    };
+    let mut tabs = Row::new().spacing(6);
+    for (label, tab) in [
+        (records, ProjectTab::Records),
+        (review, ProjectTab::Review),
+        ("포트폴리오".to_owned(), ProjectTab::Portfolio),
+    ] {
+        tabs = tabs.push(control(label, Message::ProjectTab(tab)).style(
+            if app.project_tab == tab {
+                theme::primary
+            } else {
+                theme::secondary
+            },
+        ));
     }
-    // The same diary records, newest date first, one heading per date. The
-    // count is every record of that date; a date the loaded rows only begin
-    // says how many are shown and that more follow.
+    if app.busy {
+        tabs = tabs.push(quiet("작업 중…"));
+    }
+    tabs.align_y(Alignment::Center).wrap().into()
+}
+/// The diary records, newest date first, one heading per date. The count is every
+/// record of that date; a date the loaded rows only begin says how many are shown
+/// and that more follow.
+fn record_list<'a>(app: &'a App, mut c: Column<'a, Message>) -> Column<'a, Message> {
+    // Rows read for another choice stay off screen until this one's rows arrive.
+    if app.rows_project.as_ref() != Some(&app.project) {
+        return c;
+    }
     for (date, entries) in date_groups(&app.snapshot.entries) {
         let shown = entries.len() as u32;
         let total = date_total(app, date, shown);
@@ -732,6 +738,64 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
     }
     if app.more {
         c = c.push(more(app));
+    }
+    c
+}
+pub(crate) fn projects(app: &App) -> Element<'_, Message> {
+    let mut c = column![].spacing(12);
+    let Some(p) = app
+        .snapshot
+        .projects
+        .iter()
+        .find(|p| Some(&p.id) == app.project.as_ref())
+    else {
+        // 모든 프로젝트: every record, no tabs.
+        return scrollable(record_list(app, c))
+            .id("projects-page")
+            .spacing(crate::calendar_ui::SCROLL_GAP)
+            .height(Length::Fill)
+            .into();
+    };
+    // `shown`: the rows on screen are this project's. `fresh`: its latest read
+    // succeeded, which alone may say that something is missing.
+    let shown = app.rows_project == Some(Some(p.id.clone()));
+    let fresh = app.entries_project.as_ref() == Some(&p.id);
+    c = c
+        .push(paper(project_info(app, p)))
+        .push(project_tabs(app, shown));
+    match app.project_tab {
+        ProjectTab::Records => {
+            c = record_list(app, c.push(draft_row(app, "근거 요약", false)));
+        }
+        ProjectTab::Review => {
+            // As on the info rows, the capture state is the latest read's only.
+            let watching = fresh && app.snapshot.chat_capture_project.as_ref() == Some(&p.id);
+            let mut review = column![].spacing(12);
+            if watching {
+                review = review.push(past_days_panel(app, &p.id));
+            }
+            if shown && !app.snapshot.reviewable_chats.is_empty() {
+                review = review.push(crate::chat_review_ui::panel(app, &p.id));
+            } else if fresh && watching {
+                // Only a list read for this project can show it has no chats.
+                review = review.push(quiet(NO_CHATS_YET));
+            } else if fresh {
+                review = review.push(quiet(NO_CAPTURE_FOR_REVIEW));
+            }
+            c = c.push(paper(review));
+        }
+        ProjectTab::Portfolio => {
+            let mut portfolio = column![draft_row(app, "자료 발췌 초안", true)].spacing(12);
+            if let Some(state) = app
+                .snapshot
+                .portfolio
+                .as_ref()
+                .filter(|s| s.project_id == p.id)
+            {
+                portfolio = portfolio.push(crate::portfolio_ui::panel(app, state));
+            }
+            c = c.push(paper(portfolio));
+        }
     }
     scrollable(c)
         .id("projects-page")

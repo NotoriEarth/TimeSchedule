@@ -4,7 +4,7 @@ use crate::{
     worker,
 };
 use iced::{
-    widget::{button, checkbox, column, row, scrollable, text, text_input},
+    widget::{button, checkbox, column, row, text, text_input},
     Element, Task,
 };
 use timeschedule_core::portfolio::{PortfolioExport, PortfolioPanel};
@@ -95,7 +95,7 @@ pub fn panel<'a>(app: &'a App, p: &'a PortfolioPanel) -> Element<'a, Message> {
                     .on_toggle(move |checked| message(Action::Toggle(id.clone(), checked))),
             );
         }
-        section = section.push(scrollable(choices).height(110));
+        section = section.push(choices);
         if ids.is_empty() {
             return section.into();
         }
