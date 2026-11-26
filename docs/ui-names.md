@@ -17,7 +17,7 @@
 | 월간 다이어리 | ‘월간’. 연·월 제목 아래 달력과 선택한 날짜의 일정·기록을 표시 | `Page::Month`, `app.month`, `shell::month` |
 | 상단 ‘오늘’ 버튼 | 화면 제목 줄 오른쪽, 새로 고침(↻) 왼쪽. 월간·주간 화면에만 보이며 달력을 오늘로 옮김 | `shell::view`의 `heading_row`, `Message::Today` |
 | 주간 다이어리 | ‘주간’. 주간 개요와 7개의 날짜 칸, ‘주간 근거 요약’ 버튼 | `Page::Week`, `app.week`, `views::week`, `views::day` |
-| 프로젝트 화면 | ‘프로젝트’. ‘모든 프로젝트’ 또는 프로젝트 이름을 골라 기록을 조회. 개별 프로젝트의 기본 버튼은 ‘근거 요약’, ‘자료 발췌 초안’(작업 중에는 그대로 두고 막으며 옆에 ‘작업 중…’). 기록은 ‘11월 24일 (화) · 3건’ 같은 날짜 제목 아래 묶이고, 기록이 없으면 ‘이 프로젝트에 남긴 기록이 없습니다. ‘+ 기록’으로 시작하세요.’ | `Page::Projects`, `app.project`, `views::projects`, `views::date_heading` |
+| 프로젝트 화면 | ‘프로젝트’. 버튼 줄 맨 앞의 프로젝트 선택 상자(‘모든 프로젝트’와 각 프로젝트)로 골라 기록을 조회. 개별 프로젝트는 맨 위 정보 줄 두 줄을 가짐: 설명과 ‘프로젝트 수정’, 그리고 ‘Git 저장소 ● 연결됨/미연결’(경로)·‘채팅 자동 수집 ● 켜짐/꺼짐’과 ‘켜기’/‘끄기’. 개별 프로젝트의 기본 버튼은 ‘근거 요약’, ‘자료 발췌 초안’(작업 중에는 그대로 두고 막으며 옆에 ‘작업 중…’). 기록은 ‘11월 24일 (화) · 3건’ 같은 날짜 제목 아래 묶이고, 기록이 없으면 ‘이 프로젝트에 남긴 기록이 없습니다. ‘+ 기록’으로 시작하세요.’ | `Page::Projects`, `app.project`, `views::projects`, `views::project_picker`, `views::project_choices`, `views::project_info`, `views::date_heading` |
 | 기록 보관함 (현행 화면 식별용) | 왼쪽 메뉴 ‘개발 기록’ → 제목 ‘기록 보관함’. 여러 날짜와 여러 종류의 기록을 조회하는 기존 화면 | `Page::Records`, `views::records`, `app.snapshot.entries` |
 | 날짜 미정 화면 | ‘날짜 미정’. 날짜가 비어 있는 일정을 모아 표시. 여기서 ‘+ 일정’을 누르면 날짜를 비워 둘 수 있음 | `Page::Tasks`, `views::tasks`, `Kind::Task` |
 | 노트 화면 | 왼쪽 메뉴 ‘노트’ → 제목 ‘메모’. ‘+ 메모’로 추가하고 제목을 눌러 편집 | `Page::Notes`, `views::notes`, `app.snapshot.notes` |
@@ -27,11 +27,11 @@
 
 04번 ‘선택한 프로젝트’ 캡처는 0.20.0 기준이다. 현재 앱에서는 왼쪽에서 프로젝트 이름을 선택한 뒤 아래 문구로 기능을 찾는다.
 
-| 수정 요청에서 가리킬 대상 | 0.30.1 화면에서 찾는 법 | 코드에서 찾는 법 |
+| 수정 요청에서 가리킬 대상 | 화면에서 찾는 법 (0.30.1 기준, 0.39.0에서 바뀐 곳은 그 줄에 적음) | 코드에서 찾는 법 |
 | --- | --- | --- |
 | 자료 발췌 초안 | ‘근거 요약’ 옆의 ‘자료 발췌 초안’ 버튼. 기록 편집기의 종류 목록에는 ‘포트폴리오 초안’이라는 이름이 남아 있다. | `views::projects`, `Message::Draft(true)`, `views::KIND_LABELS` |
-| 로컬 채팅 자동 수집 | 저장소가 연결된 프로젝트에서 ‘Codex·Claude Code 채팅 자동 수집 켜기’ 또는 ‘채팅 자동 수집 끄기’. 저장소가 없으면 버튼 자리에 ‘프로젝트 수정에서 로컬 Git 저장소 경로를 넣으면 채팅 자동 수집을 켤 수 있습니다’ | `views::projects`, `Message::SetChatCapture`, `views::NO_REPO_HINT` |
-| 지난 대화 정리 영역 | 채팅 자동 수집이 켜진 프로젝트의 ‘채팅 자동 수집 끄기’ 바로 아래. 상태에 따라 ‘지난 대화 정리’ 버튼, ‘지난 대화 확인 중…’, ‘지난 대화가 N일 있습니다 (…). 모두 정리하면 모델을 N번 부릅니다.’와 ‘지금 모두 정리’·‘나중에’, ‘지난 대화 정리 중…’과 ‘정리 멈추기’가 나옴. 다른 하루 정리 작업이 도는 동안에는 ‘하루 정리 만드는 중…’ | `views::past_days_panel`, `app.past_days`(프로젝트 ID별 `Past`: `Due`·`Checking`·`Ask`·`Making`), `Message::CheckPastDays(ID)`, `MakePastDays(ID)`, `DismissPastDays(ID)`, `StopPastDays` |
+| 로컬 채팅 자동 수집 | 저장소가 연결된 프로젝트의 정보 둘째 줄 ‘채팅 자동 수집 ● 켜짐/꺼짐’ 옆 ‘켜기’·‘끄기’ 버튼(Codex·Claude Code 채팅). 이 프로젝트의 기록을 아직 다 읽지 못했으면(전환 직후, 조회 실패) ‘● 확인 중’이고 버튼은 눌리지 않음. 저장소가 없으면 그 줄 아래에 ‘프로젝트 수정에서 로컬 Git 저장소 경로를 넣으면 채팅 자동 수집을 켤 수 있습니다’ | `views::project_info`, `Message::SetChatCapture`, `views::NO_REPO_HINT` |
+| 지난 대화 정리 영역 | 채팅 자동 수집이 켜진 프로젝트의 ‘근거 요약’·‘자료 발췌 초안’ 줄 바로 아래. 상태에 따라 ‘지난 대화 정리’ 버튼, ‘지난 대화 확인 중…’, ‘지난 대화가 N일 있습니다 (…). 모두 정리하면 모델을 N번 부릅니다.’와 ‘지금 모두 정리’·‘나중에’, ‘지난 대화 정리 중…’과 ‘정리 멈추기’가 나옴. 다른 하루 정리 작업이 도는 동안에는 ‘하루 정리 만드는 중…’ | `views::past_days_panel`, `app.past_days`(프로젝트 ID별 `Past`: `Due`·`Checking`·`Ask`·`Making`), `Message::CheckPastDays(ID)`, `MakePastDays(ID)`, `DismissPastDays(ID)`, `StopPastDays` |
 | 채팅에서 경험 검토 | 수집된 채팅이 있으면 ‘채팅에서 경험 검토 · Terra’에서 채팅을 선택한다. 설계·트러블슈팅 후보에 체크한 뒤 ‘확인한 후보만 이력에 저장’을 누른다. 수집 중인데 경험 검토에 쓸 채팅이 없으면 이 자리에 ‘경험 검토에 쓸 채팅 발췌가 아직 없습니다’ | `chat_review_ui::panel`, `views::NO_CHATS_YET` |
 | 경험 선택과 Markdown 생성 | ‘포트폴리오 경험’에서 ‘경험 선택’으로 기록을 고른다. ‘백엔드 포트폴리오 · Markdown 생성’ 버튼 옆에 ‘기존 v2 재사용 완료’처럼 실제 판본 번호가 표시된다. | `portfolio_ui::panel`, `portfolio_ui::Action::Export` |
 
@@ -64,7 +64,7 @@
 | 일정 편집기 | 달력·빠른 일정 창의 ‘+ 일정’ 또는 기존 일정 수정. 날짜, 하루 종일, 시작·종료 시간, 완료 | `Kind::Event`, `form.date`, `form.all_day`, `form.start`, `form.end`, `form.completed` |
 | 날짜 미정 일정 편집기 | 날짜 미정 화면의 ‘+ 일정’. 제목은 ‘일정 추가’이고 날짜는 선택 입력 | `Kind::Task`, `form.date` |
 | 기록 편집기 | ‘+ 기록’ 또는 기록 수정. 짧은 작업명, 카테고리, 기록 종류, 프로젝트, 출처 링크 | `Kind::Entry`, `form.short_title`, `form.category_id`, `form.entry_kind`, `form.project_id`, `form.source_url` |
-| 프로젝트 편집기 | ‘+ 프로젝트’ 또는 ‘프로젝트 수정’. 프로젝트 이름·설명, 달력용 짧은 프로젝트명, 로컬 Git 저장소 경로. 경로 입력란 오른쪽의 ‘폴더 찾기’ 버튼이 Windows 폴더 선택창을 열고, 고른 폴더를 입력란에 넣음 | `Kind::Project`, `form.title`, `form.body`, `form.project_short_name`, `form.repo_path`, `Message::PickRepoFolder`, `Message::RepoFolderPicked` |
+| 프로젝트 편집기 | 버튼 줄의 ‘+ 프로젝트’ 또는 정보 줄의 ‘프로젝트 수정’. 프로젝트 이름·설명, 달력용 짧은 프로젝트명, 로컬 Git 저장소 경로. 경로 입력란 오른쪽의 ‘폴더 찾기’ 버튼이 Windows 폴더 선택창을 열고, 고른 폴더를 입력란에 넣음 | `Kind::Project`, `form.title`, `form.body`, `form.project_short_name`, `form.repo_path`, `Message::PickRepoFolder`, `Message::RepoFolderPicked` |
 | 메모 편집기 | 노트 화면의 ‘+ 메모’ 또는 기존 메모 제목. 제목과 본문 편집 | `Kind::Note`, `form.title`, `form.body` |
 | 편집기 날짜 입력 / 날짜 선택기 | 연·월·일을 나눠 입력하는 날짜 필드와 달력 아이콘으로 여는 선택기 | `date_input::input`, `EditorPicker::Date`, `Message::PickEditorDate` |
 | 편집기 시간 선택기 | ‘하루 종일’을 해제했을 때의 시작·종료 시간 입력과 선택 목록 | `time_input::view`, `Message::OpenTimePicker`, `Message::PickEditorTime` |

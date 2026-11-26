@@ -5097,3 +5097,154 @@ fn the_screen_mode_buttons_switch_both_ways_and_ignore_the_mode_in_use() {
     let _ = app.update(Message::SetTheme(AppTheme::Midnight));
     assert_eq!(app.preferences.theme, AppTheme::Midnight);
 }
+
+#[test]
+fn the_project_picker_replaces_the_list_inside_the_screen() {
+    let mut app = calendar_record_fixture();
+    run_message(&mut app, Message::Navigate(Page::Projects));
+    let size = Size::new(1160., 1600.);
+    // The picker offers all projects first, then each project, and shows the open one.
+    let project = app.snapshot.projects[0].clone();
+    let (choices, selected) = crate::views::project_choices(&app);
+    let offered: Vec<_> = choices
+        .iter()
+        .map(|c| (c.id.clone(), c.title.as_str()))
+        .collect();
+    assert_eq!(
+        offered,
+        vec![
+            (None, crate::views::ALL_PROJECTS),
+            (Some(project.id.clone()), project.title.as_str())
+        ]
+    );
+    assert_eq!(selected.map(|c| c.id), Some(None));
+    run_message(&mut app, Message::Project(Some(project.id.clone())));
+    let (_, selected) = crate::views::project_choices(&app);
+    assert_eq!(selected.map(|c| c.id), Some(Some(project.id.clone())));
+    // The list of buttons inside the screen is gone: the project's name is the heading
+    // alone, and no "모든 프로젝트" button is drawn.
+    let body = calendar_texts(crate::views::projects(&app), size);
+    assert!(
+        !body.iter().any(|s| s == crate::views::ALL_PROJECTS),
+        "{body:?}"
+    );
+    assert!(!body.iter().any(|s| *s == project.title), "{body:?}");
+    let labels = calendar_texts(crate::shell::view(&app), size);
+    let heading: Vec<_> = labels.iter().take_while(|s| *s != "↻").collect();
+    assert_eq!(
+        heading.last().map(|s| s.as_str()),
+        Some(project.title.as_str())
+    );
+}
+
+#[test]
+fn a_project_shows_capture_only_from_its_own_rows() {
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let other = store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: None,
+            title: "수집 중인 프로젝트".into(),
+            description: String::new(),
+            repo_path: r"C:\work\other".into(),
+        })
+        .unwrap();
+    let size = Size::new(1160., 1600.);
+    let first = app.snapshot.projects[0].id.clone();
+    run_message(&mut app, Message::Project(Some(first)));
+    // The other project's load fails: the rows on screen are the first project's, so
+    // its capture state is unknown and its button waits.
+    let _ = app.update(Message::Project(Some(other.id.clone())));
+    let _ = app.update(Message::Loaded(
+        app.view_generation,
+        Err("읽기 실패".into()),
+    ));
+    let labels = calendar_texts(crate::views::projects(&app), size);
+    assert!(labels.iter().any(|s| s == "확인 중"), "{labels:?}");
+    let target = calendar_text_bounds(crate::views::projects(&app), size)
+        .into_iter()
+        .find(|(s, _)| s == "켜기")
+        .unwrap()
+        .1;
+    assert!(click_text(crate::views::projects(&app), size, target).is_empty());
+}
+
+#[test]
+fn deleting_the_open_project_shows_every_project_s_records() {
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let gone = store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: None,
+            title: "지울 프로젝트".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap();
+    run_message(&mut app, Message::Project(Some(gone.id.clone())));
+    assert!(app.snapshot.entries.is_empty());
+    store.delete_project(&gone.id).unwrap();
+    run_message(&mut app, Message::Load);
+    assert_eq!(app.project, None);
+    assert!(
+        app.snapshot.entries.iter().any(|e| e.title == "연동기록"),
+        "the other project's record shows under 모든 프로젝트"
+    );
+}
+
+#[test]
+fn a_project_shows_its_repository_and_capture_as_states_and_buttons() {
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let mut project = app.snapshot.projects[0].clone();
+    run_message(&mut app, Message::Project(Some(project.id.clone())));
+    let size = Size::new(1160., 1600.);
+    let press = |app: &App, label: &str| {
+        let target = calendar_text_bounds(crate::views::projects(app), size)
+            .into_iter()
+            .find(|(s, _)| s == label)
+            .unwrap_or_else(|| panic!("{label} is on screen"))
+            .1;
+        click_text(crate::views::projects(app), size, target)
+    };
+    let labels = |app: &App| calendar_texts(crate::views::projects(app), size);
+    // No repository: its state in words, the hint, and the edit button beside it.
+    let shown = labels(&app);
+    for label in ["Git 저장소", "미연결", crate::views::NO_REPO_HINT] {
+        assert!(shown.iter().any(|s| s == label), "{label}: {shown:?}");
+    }
+    assert!(!shown.iter().any(|s| s == "채팅 자동 수집"), "{shown:?}");
+    assert!(matches!(
+        press(&app, "프로젝트 수정").as_slice(),
+        [Message::EditForm(_)]
+    ));
+    // A linked repository with capture off offers to turn it on.
+    project.repo_path = r"C:\work\example".into();
+    store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: Some(project.id.clone()),
+            title: project.title.clone(),
+            description: project.description.clone(),
+            repo_path: project.repo_path.clone(),
+        })
+        .unwrap();
+    run_message(&mut app, Message::Load);
+    let shown = labels(&app);
+    for label in ["연결됨", r"C:\work\example", "채팅 자동 수집", "꺼짐"] {
+        assert!(shown.iter().any(|s| s == label), "{label}: {shown:?}");
+    }
+    assert!(!shown.iter().any(|s| s == crate::views::NO_REPO_HINT));
+    let id = project.id.clone();
+    assert!(matches!(
+        press(&app, "켜기").as_slice(),
+        [Message::SetChatCapture(p, true)] if *p == id
+    ));
+    // With capture on, the state reads 켜짐 and the button turns it off.
+    app.snapshot.chat_capture_project = Some(project.id.clone());
+    let shown = labels(&app);
+    assert!(shown.iter().any(|s| s == "켜짐"), "{shown:?}");
+    assert!(matches!(
+        press(&app, "끄기").as_slice(),
+        [Message::SetChatCapture(p, false)] if *p == id
+    ));
+}

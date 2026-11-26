@@ -2112,7 +2112,10 @@ impl App {
                             .as_ref()
                             .is_some_and(|id| !self.snapshot.projects.iter().any(|p| &p.id == id))
                         {
+                            // The open project is gone; its rows were filtered by it, so
+                            // read every project's rows for "모든 프로젝트".
                             self.project = None;
+                            return self.refresh();
                         }
                     }
                     Err(e) => self.error = e,

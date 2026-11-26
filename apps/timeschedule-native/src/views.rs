@@ -214,19 +214,9 @@ pub(crate) fn actions(app: &App) -> Element<'_, Message> {
         }
         Page::Projects => {
             actions = actions
+                .push(project_picker(app))
                 .push(control("+ 프로젝트", Message::New(Kind::Project, None)))
                 .push(control("+ 기록", Message::New(Kind::Entry, None)));
-            if let Some(project) = app
-                .snapshot
-                .projects
-                .iter()
-                .find(|p| Some(&p.id) == app.project.as_ref())
-            {
-                actions = actions.push(control(
-                    "프로젝트 수정",
-                    Message::EditForm(Form::project(project.clone())),
-                ));
-            }
         }
         Page::Records => actions = actions.push(control("+ 기록", Message::New(Kind::Entry, None))),
         Page::Tasks => {
@@ -563,33 +553,124 @@ pub(crate) fn date_heading(date: &str, this_year: i32) -> String {
         )
     }
 }
-pub(crate) fn projects(app: &App) -> Element<'_, Message> {
-    let mut list = column![control("모든 프로젝트", Message::Project(None))].spacing(5);
-    for p in &app.snapshot.projects {
-        list = list.push(control(&p.title, Message::Project(Some(p.id.clone()))));
+/// The label of the picker entry that shows every project's records.
+pub(crate) const ALL_PROJECTS: &str = "모든 프로젝트";
+/// What the project picker offers, all projects first, and the entry on show.
+pub(crate) fn project_choices(app: &App) -> (Vec<ProjectChoice>, Option<ProjectChoice>) {
+    let choices: Vec<_> = std::iter::once(ProjectChoice {
+        id: None,
+        title: ALL_PROJECTS.into(),
+    })
+    .chain(app.snapshot.projects.iter().map(|p| ProjectChoice {
+        id: Some(p.id.clone()),
+        title: p.title.clone(),
+    }))
+    .collect();
+    let selected = choices.iter().find(|c| c.id == app.project).cloned();
+    (choices, selected)
+}
+/// The project screen's picker at the front of its toolbar: every project, and all.
+fn project_picker(app: &App) -> Element<'_, Message> {
+    let (choices, selected) = project_choices(app);
+    pick_list(choices, selected, |choice| Message::Project(choice.id))
+        .text_size(13)
+        .padding([6, 10])
+        .width(220)
+        .into()
+}
+/// "label ● state": a coloured dot for on or off and the state in words.
+fn status<'a>(app: &App, label: &'a str, on: bool, state: &'a str) -> Element<'a, Message> {
+    let p = theme::palette(app.preferences.theme);
+    row![
+        text(label).size(13),
+        text("●").size(11).color(if on { p.green } else { p.muted }),
+        text(state).size(13),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .into()
+}
+/// The two lines on top of a project: what it is with its edit button, then its
+/// repository and chat capture, each as a state in words and an action as a button.
+fn project_info<'a>(
+    app: &'a App,
+    p: &'a timeschedule_core::diary::Project,
+) -> Element<'a, Message> {
+    // The description takes what the edit button leaves, so the button keeps its width.
+    let description: Element<'_, Message> = if p.description.trim().is_empty() {
+        space().width(Length::Fill).into()
+    } else {
+        text(p.description.trim())
+            .size(14)
+            .width(Length::Fill)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+            .into()
+    };
+    // A long description wraps below; the edit button stays on its first line.
+    let about = row![
+        description,
+        control("프로젝트 수정", Message::EditForm(Form::project(p.clone()))),
+    ]
+    .spacing(10)
+    .align_y(Alignment::Start);
+    let linked = !p.repo_path.is_empty();
+    // The capture state comes with the rows read for this project; until they arrive
+    // (or when that read failed) the state is unknown and the button waits.
+    let known = app.entries_project.as_ref() == Some(&p.id);
+    let watching = known && app.snapshot.chat_capture_project.as_ref() == Some(&p.id);
+    let mut sources = Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(status(
+            app,
+            "Git 저장소",
+            linked,
+            if linked { "연결됨" } else { "미연결" },
+        ));
+    if linked {
+        sources = sources.push(
+            text(&p.repo_path)
+                .size(12)
+                .style(theme::muted)
+                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+        );
     }
-    let mut c = column![scrollable(list)
-        .spacing(crate::calendar_ui::SCROLL_GAP)
-        .height(110)]
-    .spacing(12);
+    let mut info = column![about].spacing(8);
+    if linked || watching {
+        sources = sources
+            .push(quiet("·"))
+            .push(status(
+                app,
+                "채팅 자동 수집",
+                watching,
+                match (known, watching) {
+                    (false, _) => "확인 중",
+                    (true, true) => "켜짐",
+                    (true, false) => "꺼짐",
+                },
+            ))
+            .push(
+                control(
+                    if watching { "끄기" } else { "켜기" },
+                    Message::SetChatCapture(p.id.clone(), !watching),
+                )
+                .on_press_maybe(known.then(|| Message::SetChatCapture(p.id.clone(), !watching))),
+            );
+        info = info.push(sources.wrap());
+    } else {
+        info = info.push(sources.wrap()).push(quiet(NO_REPO_HINT));
+    }
+    info.into()
+}
+pub(crate) fn projects(app: &App) -> Element<'_, Message> {
+    let mut c = column![].spacing(12);
     if let Some(p) = app
         .snapshot
         .projects
         .iter()
         .find(|p| Some(&p.id) == app.project.as_ref())
     {
-        let mut panel = column![].spacing(10);
-        if !p.description.trim().is_empty() {
-            panel = panel.push(text(&p.description).size(14));
-        }
-        panel = panel.push(quiet(format!(
-            "Git 저장소: {}",
-            if p.repo_path.is_empty() {
-                "미연결"
-            } else {
-                &p.repo_path
-            }
-        )));
+        let mut panel = column![project_info(app, p)].spacing(10);
         // While a model call or a refresh runs the buttons stay where they are, only
         // unpressable: a draft finished during a refresh could not open its editor.
         let idle = |message: Message| (!app.busy && !app.loading).then_some(message);
@@ -604,19 +685,8 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
             drafts = drafts.push(quiet("작업 중…"));
         }
         panel = panel.push(drafts);
-        let watching = app.snapshot.chat_capture_project.as_ref() == Some(&p.id);
-        if watching || !p.repo_path.is_empty() {
-            panel = panel.push(control(
-                if watching {
-                    "채팅 자동 수집 끄기"
-                } else {
-                    "Codex·Claude Code 채팅 자동 수집 켜기"
-                },
-                Message::SetChatCapture(p.id.clone(), !watching),
-            ));
-        } else {
-            panel = panel.push(quiet(NO_REPO_HINT));
-        }
+        let watching = app.entries_project.as_ref() == Some(&p.id)
+            && app.snapshot.chat_capture_project.as_ref() == Some(&p.id);
         if watching {
             panel = panel.push(past_days_panel(app, &p.id));
         }
@@ -938,9 +1008,9 @@ fn daily_mode_choice(app: &App) -> Element<'_, Message> {
     .into()
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectChoice {
-    id: Option<String>,
-    title: String,
+pub(crate) struct ProjectChoice {
+    pub(crate) id: Option<String>,
+    pub(crate) title: String,
 }
 impl std::fmt::Display for ProjectChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
