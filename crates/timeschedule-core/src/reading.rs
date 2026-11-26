@@ -356,8 +356,9 @@ pub struct OriginalView {
     pub file: String,
     /// Earlier contents of the file kept beside it (`<name>.prev-<time>`), relative to
     /// the project's originals folder. The file was replaced by content that did not
-    /// go on from them, so a line cited before then may now hold other text.
-    pub earlier: Vec<String>,
+    /// go on from them, so a line cited before then may now hold other text. `None`
+    /// when the folder could not be listed: then nothing says there are none.
+    pub earlier: Option<Vec<String>>,
     pub lines: Vec<LineView>,
     pub next: Option<LineOffset>,
 }

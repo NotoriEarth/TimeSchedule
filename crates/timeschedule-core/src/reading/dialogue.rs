@@ -205,14 +205,27 @@ pub fn read_original(
         .find(|e| e.file == file)
         .ok_or_else(|| format!("이 프로젝트의 보관 목록에 없는 파일입니다: {file}"))?;
     let mut input = open_kept(&dir, entry)?;
+    let earlier = earlier_contents(&dir, file);
+    // A line that is not there may be in an earlier content of the file.
+    let missing = |lines: usize| {
+        let mut why = format!("이 파일은 {lines}줄입니다. --line {line_number}이 없습니다.");
+        match &earlier {
+            Some(names) if !names.is_empty() => {
+                why += &format!(
+                    " 이 파일은 내용이 바뀐 적이 있고 이전 내용이 남아 있습니다: {}",
+                    names.join(", ")
+                );
+            }
+            None => why += " 이전 내용이 남아 있는지는 폴더를 읽지 못해 확인하지 못했습니다.",
+            _ => {}
+        }
+        why
+    };
     let mut buf = Vec::new();
     for skipped in 1..line_number {
         // A last line with no line end is not a line, however long.
         if !rest_of_line(&mut input)? {
-            return Err(format!(
-                "이 파일은 {}줄입니다. --line {line_number}이 없습니다.",
-                skipped - 1
-            ));
+            return Err(missing(skipped - 1));
         }
     }
     let mut view = OriginalView {
@@ -221,7 +234,7 @@ pub fn read_original(
             title: info.title,
         },
         file: file.to_owned(),
-        earlier: earlier_contents(&dir, file),
+        earlier: earlier.clone(),
         lines: Vec::new(),
         next: None,
     };
@@ -232,10 +245,7 @@ pub fn read_original(
     loop {
         let Some((text, long, lossy)) = whole_line(&mut input, &mut buf)? else {
             if view.lines.is_empty() {
-                return Err(format!(
-                    "이 파일은 {}줄입니다. --line {line_number}이 없습니다.",
-                    number - 1
-                ));
+                return Err(missing(number - 1));
             }
             break;
         };
@@ -327,33 +337,42 @@ fn whole_line(
 /// The earlier contents of the kept `file` below the project folder `dir`: the
 /// `<name>.prev-…` files the archive keeps when it replaces a file with content that
 /// does not go on from it.
-fn earlier_contents(dir: &Path, file: &str) -> Vec<String> {
+fn earlier_contents(dir: &Path, file: &str) -> Option<Vec<String>> {
     let (folder, name) = file.rsplit_once('/').unwrap_or(("", file));
-    let Ok(place) = crate::chat_originals::kept_path(dir, file) else {
-        return Vec::new();
-    };
-    let Some(parent) = place.parent() else {
-        return Vec::new();
-    };
-    let prefix = format!("{name}.prev-");
-    let mut found: Vec<String> = std::fs::read_dir(parent)
-        .map(|list| {
-            list.flatten()
-                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|n| n.starts_with(&prefix))
-                .map(|n| {
-                    if folder.is_empty() {
-                        n
-                    } else {
-                        format!("{folder}/{n}")
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let place = crate::chat_originals::kept_path(dir, file).ok()?;
+    let list = std::fs::read_dir(place.parent()?).ok()?;
+    let mut found = Vec::new();
+    for entry in list {
+        let entry = entry.ok()?;
+        let other = entry.file_name().to_string_lossy().into_owned();
+        let earlier = other
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(".prev-"))
+            .is_some_and(previous_stamp);
+        if earlier && entry.file_type().ok()?.is_file() {
+            found.push(if folder.is_empty() {
+                other
+            } else {
+                format!("{folder}/{other}")
+            });
+        }
+    }
     found.sort();
-    found
+    Some(found)
+}
+
+/// Whether `rest` is what the archive puts after `.prev-`: a UTC time `YYYYMMDDTHHMMSSZ`,
+/// and `-<n>` when that name was taken. Another file whose name only starts the same,
+/// such as `out.zst.prev-note.zst`, is not an earlier content.
+fn previous_stamp(rest: &str) -> bool {
+    let (stamp, n) = rest.split_once('-').unwrap_or((rest, "1"));
+    let b = stamp.as_bytes();
+    b.len() == 16
+        && b[8] == b'T'
+        && b[15] == b'Z'
+        && b[..8].iter().chain(&b[9..15]).all(u8::is_ascii_digit)
+        && !n.is_empty()
+        && n.bytes().all(|c| c.is_ascii_digit())
 }
 
 /// Reads past the rest of a line; whether it had a line end.

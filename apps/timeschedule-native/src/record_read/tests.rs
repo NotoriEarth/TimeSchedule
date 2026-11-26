@@ -815,6 +815,8 @@ fn an_original_says_when_the_file_was_replaced_and_when_bytes_were_not_text() {
     let kept = f.vault.join("originals").join(&f.group).join(FILE);
     let earlier = kept.with_file_name("s1.jsonl.zst.prev-20261125T000000Z");
     std::fs::copy(&kept, &earlier).unwrap();
+    // Another file whose name only starts the same is not an earlier content.
+    std::fs::copy(&kept, kept.with_file_name("s1.jsonl.zst.prev-note.zst")).unwrap();
     let mut text = b"ok\n".to_vec();
     text.extend_from_slice(b"\xbf\xc0 cp949\n");
     std::fs::write(&kept, zstd::encode_all(&text[..], 3).unwrap()).unwrap();
@@ -835,6 +837,22 @@ fn an_original_says_when_the_file_was_replaced_and_when_bytes_were_not_text() {
     );
     assert_eq!(read["lines"][0]["lossy"], false);
     assert_eq!(read["lines"][1]["lossy"], true);
+    // A cited line the new content does not have points at the earlier one.
+    let error = f
+        .read(&[
+            "original",
+            "--project",
+            &f.project,
+            "--file",
+            FILE,
+            "--line",
+            "4",
+        ])
+        .unwrap_err();
+    assert!(
+        error.contains("s1.jsonl.zst.prev-20261125T000000Z"),
+        "{error}"
+    );
 }
 
 #[test]
