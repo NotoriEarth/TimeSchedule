@@ -96,7 +96,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         ]
         .align_y(Alignment::Center),
     );
-    for project in app.snapshot.projects.iter().take(6) {
+    // Every project gets a shortcut; the navigation scrolls when they do not fit.
+    for project in &app.snapshot.projects {
+        let open = app.page == Page::Projects && app.project.as_ref() == Some(&project.id);
         navigation = navigation.push(
             button(
                 row![
@@ -107,7 +109,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
             )
             .padding([7, 10])
             .width(Length::Fill)
-            .style(theme::text_button)
+            .style(if open {
+                theme::navigation
+            } else {
+                theme::text_button
+            })
             .on_press(Message::Project(Some(project.id.clone()))),
         );
     }
@@ -185,6 +191,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
         .width(220)
         .size(12)
         .padding(9);
+    // ‘오늘’ moves the calendars only, so only the calendars show it.
+    let mut heading_row = row![heading, space().width(Length::Fill)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    if matches!(app.page, Page::Month | Page::Week) {
+        heading_row = heading_row.push(control("오늘", Message::Today));
+    }
+    heading_row = heading_row.push(
+        button(text("↻").size(18))
+            .style(theme::text_button)
+            .on_press(Message::Load),
+    );
     let mut top = column![
         row![
             quiet(format!("{}", Local::now().format("%Y년 %m월 %d일"))),
@@ -192,16 +210,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             search
         ]
         .align_y(Alignment::Center),
-        row![
-            heading,
-            space().width(Length::Fill),
-            control("오늘", Message::Today),
-            button(text("↻").size(18))
-                .style(theme::text_button)
-                .on_press(Message::Load)
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+        heading_row,
     ]
     .spacing(12);
     let toolbar: Element<'_, Message> = if app.page == Page::Month {

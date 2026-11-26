@@ -12,11 +12,12 @@
 | --- | --- | --- |
 | 다이어리 창 | 창 제목의 ‘만년 다이어리’. 왼쪽 메뉴와 현재 화면 전체를 담는 기본 창 | `app.manager`, `shell::view` |
 | 왼쪽 메뉴 | 월간·주간 등 화면을 여는 세로 메뉴. 아래쪽에 테마 전환, 설정, 앱 종료 | `shell::view`의 `navigation`, `sidebar` · `Message::Navigate` |
-| 프로젝트 바로가기 | 왼쪽 메뉴 중간의 ‘프로젝트’ 소제목, ＋ 버튼, 개별 프로젝트 이름 | `app.snapshot.projects`, `Message::Project` |
+| 프로젝트 바로가기 | 왼쪽 메뉴 중간의 ‘프로젝트’ 소제목, ＋ 버튼, 개별 프로젝트 이름. 개수 제한 없이 모두 나오며, 프로젝트 화면에서 열린 프로젝트가 강조됨 | `app.snapshot.projects`, `Message::Project` |
 | 상단 검색창 / 검색 결과 | ‘일정, 프로젝트, 기록 검색’에 입력하면 현재 본문 자리에 ‘검색 결과’가 표시됨 | `app.search`, `app.search_results`, `views::search_results` |
 | 월간 다이어리 | ‘월간’. 연·월 제목 아래 달력과 선택한 날짜의 일정·기록을 표시 | `Page::Month`, `app.month`, `shell::month` |
+| 상단 ‘오늘’ 버튼 | 화면 제목 줄 오른쪽, 새로 고침(↻) 왼쪽. 월간·주간 화면에만 보이며 달력을 오늘로 옮김 | `shell::view`의 `heading_row`, `Message::Today` |
 | 주간 다이어리 | ‘주간’. 주간 개요와 7개의 날짜 칸, ‘주간 근거 요약’ 버튼 | `Page::Week`, `app.week`, `views::week`, `views::day` |
-| 프로젝트 화면 | ‘프로젝트’. ‘모든 프로젝트’ 또는 프로젝트 이름을 골라 기록을 조회. 개별 프로젝트의 기본 버튼은 ‘근거 요약’, ‘자료 발췌 초안’ | `Page::Projects`, `app.project`, `views::projects` |
+| 프로젝트 화면 | ‘프로젝트’. ‘모든 프로젝트’ 또는 프로젝트 이름을 골라 기록을 조회. 개별 프로젝트의 기본 버튼은 ‘근거 요약’, ‘자료 발췌 초안’(작업 중에는 그대로 두고 막으며 옆에 ‘작업 중…’). 기록은 ‘11월 24일 (화) · 3건’ 같은 날짜 제목 아래 묶이고, 기록이 없으면 ‘이 프로젝트에 남긴 기록이 없습니다. ‘+ 기록’으로 시작하세요.’ | `Page::Projects`, `app.project`, `views::projects`, `views::date_heading` |
 | 기록 보관함 (현행 화면 식별용) | 왼쪽 메뉴 ‘개발 기록’ → 제목 ‘기록 보관함’. 여러 날짜와 여러 종류의 기록을 조회하는 기존 화면 | `Page::Records`, `views::records`, `app.snapshot.entries` |
 | 날짜 미정 화면 | ‘날짜 미정’. 날짜가 비어 있는 일정을 모아 표시. 여기서 ‘+ 일정’을 누르면 날짜를 비워 둘 수 있음 | `Page::Tasks`, `views::tasks`, `Kind::Task` |
 | 노트 화면 | 왼쪽 메뉴 ‘노트’ → 제목 ‘메모’. ‘+ 메모’로 추가하고 제목을 눌러 편집 | `Page::Notes`, `views::notes`, `app.snapshot.notes` |
@@ -29,9 +30,9 @@
 | 수정 요청에서 가리킬 대상 | 0.30.1 화면에서 찾는 법 | 코드에서 찾는 법 |
 | --- | --- | --- |
 | 자료 발췌 초안 | ‘근거 요약’ 옆의 ‘자료 발췌 초안’ 버튼. 기록 편집기의 종류 목록에는 ‘포트폴리오 초안’이라는 이름이 남아 있다. | `views::projects`, `Message::Draft(true)`, `views::KIND_LABELS` |
-| 로컬 채팅 자동 수집 | 저장소가 연결된 프로젝트에서 ‘Codex·Claude Code 채팅 자동 수집 켜기’ 또는 ‘채팅 자동 수집 끄기’ | `views::projects`, `Message::SetChatCapture` |
+| 로컬 채팅 자동 수집 | 저장소가 연결된 프로젝트에서 ‘Codex·Claude Code 채팅 자동 수집 켜기’ 또는 ‘채팅 자동 수집 끄기’. 저장소가 없으면 버튼 자리에 ‘프로젝트 수정에서 로컬 Git 저장소 경로를 넣으면 채팅 자동 수집을 켤 수 있습니다’ | `views::projects`, `Message::SetChatCapture`, `views::NO_REPO_HINT` |
 | 지난 대화 정리 영역 | 채팅 자동 수집이 켜진 프로젝트의 ‘채팅 자동 수집 끄기’ 바로 아래. 상태에 따라 ‘지난 대화 정리’ 버튼, ‘지난 대화 확인 중…’, ‘지난 대화가 N일 있습니다 (…). 모두 정리하면 모델을 N번 부릅니다.’와 ‘지금 모두 정리’·‘나중에’, ‘지난 대화 정리 중…’과 ‘정리 멈추기’가 나옴. 다른 하루 정리 작업이 도는 동안에는 ‘하루 정리 만드는 중…’ | `views::past_days_panel`, `app.past_days`(프로젝트 ID별 `Past`: `Due`·`Checking`·`Ask`·`Making`), `Message::CheckPastDays(ID)`, `MakePastDays(ID)`, `DismissPastDays(ID)`, `StopPastDays` |
-| 채팅에서 경험 검토 | 수집된 채팅이 있으면 ‘채팅에서 경험 검토 · Terra’에서 채팅을 선택한다. 설계·트러블슈팅 후보에 체크한 뒤 ‘확인한 후보만 이력에 저장’을 누른다. | `chat_review_ui::panel` |
+| 채팅에서 경험 검토 | 수집된 채팅이 있으면 ‘채팅에서 경험 검토 · Terra’에서 채팅을 선택한다. 설계·트러블슈팅 후보에 체크한 뒤 ‘확인한 후보만 이력에 저장’을 누른다. 수집 중인데 경험 검토에 쓸 채팅이 없으면 이 자리에 ‘경험 검토에 쓸 채팅 발췌가 아직 없습니다’ | `chat_review_ui::panel`, `views::NO_CHATS_YET` |
 | 경험 선택과 Markdown 생성 | ‘포트폴리오 경험’에서 ‘경험 선택’으로 기록을 고른다. ‘백엔드 포트폴리오 · Markdown 생성’ 버튼 옆에 ‘기존 v2 재사용 완료’처럼 실제 판본 번호가 표시된다. | `portfolio_ui::panel`, `portfolio_ui::Action::Export` |
 
 30~31번 설정 캡처도 0.20.0 기준이다. 0.30.1의 ‘설정 → 로컬 일정 MCP’에는 ‘MCP 켜기’와 ‘MCP 끄기’가 있다. 설정에서 전원 제어를 찾을 때는 `views::settings`와 `Message::SetMcpEnabled`를 참고한다.

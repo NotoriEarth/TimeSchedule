@@ -33,24 +33,29 @@ pub fn panel<'a>(app: &'a App, project: &str) -> Element<'a, Message> {
         .as_ref()
         .filter(|r| r.project() == project);
     let mut panel = column![text("채팅에서 경험 검토 · Terra").size(16)].spacing(6);
-    if app.busy || app.loading {
-        return panel.push(quiet("불러오는 중…")).into();
-    }
     panel = panel.push(quiet(
         "채팅을 선택하면 해당 채팅의 발췌를 로그인한 Codex의 GPT-6.1 Terra에 보내 후보를 검토합니다.",
     ));
-    let selected = review.map(|r| r.chat().clone());
-    panel = panel.push(
-        pick_list(app.snapshot.reviewable_chats.as_slice(), selected, |chat| {
-            msg(Action::Choose(chat))
-        })
-        .placeholder("수집된 채팅 선택"),
-    );
+    // While a model call or a refresh runs, the review on screen stays, only unpressable.
+    // Reading a chat again starts a new review, so its old candidates go.
+    let waiting = app.busy || app.loading;
+    let idle = |message: Message| (!waiting).then_some(message);
+    if waiting {
+        panel = panel.push(quiet("불러오는 중…"));
+    } else {
+        let selected = review.map(|r| r.chat().clone());
+        panel = panel.push(
+            pick_list(app.snapshot.reviewable_chats.as_slice(), selected, |chat| {
+                msg(Action::Choose(chat))
+            })
+            .placeholder("수집된 채팅 선택"),
+        );
+    }
     if let Some(r) = review {
-        panel = panel.push(crate::views::control(
-            "후보 다시 읽기",
-            msg(Action::Choose(r.chat().clone())),
-        ));
+        let again = msg(Action::Choose(r.chat().clone()));
+        panel = panel.push(
+            crate::views::control("후보 다시 읽기", again.clone()).on_press_maybe(idle(again)),
+        );
         if r.candidates().is_empty() {
             return panel
                 .push(quiet(
@@ -60,17 +65,25 @@ pub fn panel<'a>(app: &'a App, project: &str) -> Element<'a, Message> {
         }
         for c in r.candidates() {
             let kind = c.kind;
+            let toggle = checkbox(app.chat_review.checked.contains(&kind)).label(format!(
+                "{} · {}",
+                kind.label(),
+                c.title
+            ));
             panel = panel
-                .push(
-                    checkbox(app.chat_review.checked.contains(&kind))
-                        .label(format!("{} · {}", kind.label(), c.title))
-                        .on_toggle(move |v| msg(Action::Check(kind, v))),
-                )
+                .push(if waiting {
+                    toggle
+                } else {
+                    toggle.on_toggle(move |v| msg(Action::Check(kind, v)))
+                })
                 .push(scrollable(text(&c.body).size(13)).height(135));
         }
         panel = panel.push(
-            button(text("확인한 후보만 이력에 저장").size(13))
-                .on_press_maybe((!app.chat_review.checked.is_empty()).then_some(msg(Action::Save))),
+            button(text("확인한 후보만 이력에 저장").size(13)).on_press_maybe(
+                (!app.chat_review.checked.is_empty())
+                    .then_some(msg(Action::Save))
+                    .and_then(idle),
+            ),
         );
     }
     panel.into()

@@ -338,7 +338,7 @@ pub fn board<'a>(
     use crate::mcp_clients::{classify, row_state, when, Origin, RowState};
     let enabled = !state.busy;
     let mut rows = column![row![
-        text("연결 상태").size(18),
+        crate::views::subtitle("연결 상태"),
         iced::widget::space().width(Length::Fill),
         button(text("새로 고침").size(12))
             .padding([5, 10])
@@ -483,7 +483,7 @@ pub fn token_panel(state: &State) -> Element<'_, Message> {
     };
     let enabled = !state.busy;
     let mut header = row![
-        text("인증 토큰").size(18),
+        crate::views::subtitle("인증 토큰"),
         iced::widget::space().width(Length::Fill)
     ]
     .spacing(8)
@@ -526,7 +526,7 @@ pub fn view(state: &State) -> Element<'_, Message> {
     }
     let preview = state.preview.as_ref().map(|p| p.preview.as_str()).unwrap_or("AI 앱을 선택하고 ‘등록 미리보기’를 누르세요.\n현재 Windows 사용자에게 등록하여 여러 프로젝트에서 사용할 수 있습니다.\n앱 또는 데이터 폴더를 옮겼다면 새 위치에서 다시 등록하세요.");
     column![
-        text("AI 연결 도우미").size(18),
+        crate::views::subtitle("AI 연결 도우미"),
         pick_list(Client::ALL, Some(state.client), move |c| msg(Action::Client(c))).width(220),
         path,
         row![

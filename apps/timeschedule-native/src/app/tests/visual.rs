@@ -4245,14 +4245,16 @@ fn project_page_groups_the_same_records_by_date_newest_first() {
         "newest date first, each count is its cards"
     );
     let labels = calendar_texts(crate::views::projects(&app), Size::new(900., 1400.));
-    let heading = format!("{} · 2건", app.selected);
+    let year = chrono::Datelike::year(&chrono::Local::now());
+    let day = |date: &str| crate::views::date_heading(date, year);
+    let heading = format!("{} · 2건", day(&app.selected.to_string()));
     let at = |s: &str| {
         labels
             .iter()
             .position(|l| l == s)
             .unwrap_or_else(|| panic!("{s}: {labels:?}"))
     };
-    assert!(at(&heading) < at(&format!("{earlier} · 1건")));
+    assert!(at(&heading) < at(&format!("{} · 1건", day(&earlier))));
 }
 
 #[test]
@@ -4316,6 +4318,7 @@ fn project_heading_counts_every_record_of_a_date_past_the_first_200() {
     let store = app.store.clone().unwrap();
     let project = store.list_projects().unwrap()[0].id.clone();
     let today = app.selected.to_string();
+    let heading = crate::views::date_heading(&today, chrono::Datelike::year(&chrono::Local::now()));
     // The fixture's record and 200 more on one date.
     for n in 1..=200 {
         let mut form = Form::new(Kind::Entry, today.clone(), Some(project.clone()));
@@ -4326,7 +4329,7 @@ fn project_heading_counts_every_record_of_a_date_past_the_first_200() {
     assert_eq!(app.snapshot.entries.len(), 200);
     assert!(app.more);
     let labels = calendar_texts(crate::views::projects(&app), Size::new(900., 1400.));
-    let partial = format!("{today} · 201건 · 200건 표시 · 더 불러오면 이어집니다");
+    let partial = format!("{heading} · 201건 · 200건 표시 · 더 불러오면 이어집니다");
     assert!(
         labels.iter().any(|s| *s == partial),
         "{:?}",
@@ -4337,7 +4340,7 @@ fn project_heading_counts_every_record_of_a_date_past_the_first_200() {
         app.snapshot.entries.iter().map(|e| e.id.clone()).collect();
     assert_eq!((app.snapshot.entries.len(), ids.len()), (201, 201));
     let labels = calendar_texts(crate::views::projects(&app), Size::new(900., 1400.));
-    assert!(labels.iter().any(|s| *s == format!("{today} · 201건")));
+    assert!(labels.iter().any(|s| *s == format!("{heading} · 201건")));
 }
 
 #[test]
@@ -4548,4 +4551,164 @@ fn render_past_days_previews() {
         )),
     ));
     frame(&app, "editor-2-picked");
+}
+
+#[test]
+fn a_project_date_heading_names_the_weekday_and_drops_this_year() {
+    use crate::views::date_heading;
+    assert_eq!(date_heading("2026-11-24", 2026), "11월 24일 (화)");
+    assert_eq!(date_heading("2025-11-24", 2026), "2025년 11월 24일 (월)");
+    assert_eq!(date_heading("날짜 없음", 2026), "날짜 없음");
+}
+
+#[test]
+fn a_busy_project_keeps_its_draft_buttons_in_place() {
+    let mut app = calendar_record_fixture();
+    let project = app.snapshot.projects[0].id.clone();
+    run_message(&mut app, Message::Project(Some(project)));
+    let size = Size::new(900., 1400.);
+    let press = |app: &App, label: &str| {
+        let target = calendar_text_bounds(crate::views::projects(app), size)
+            .into_iter()
+            .find(|(s, _)| s == label)
+            .unwrap_or_else(|| panic!("{label} is on screen"))
+            .1;
+        click_text(crate::views::projects(app), size, target)
+    };
+    assert!(matches!(
+        press(&app, "근거 요약").as_slice(),
+        [Message::Draft(false)]
+    ));
+    app.busy = true;
+    let labels = calendar_texts(crate::views::projects(&app), size);
+    assert!(labels.iter().any(|s| s == "작업 중…"), "{labels:?}");
+    for label in ["근거 요약", "자료 발췌 초안"] {
+        assert!(
+            press(&app, label).is_empty(),
+            "{label} is pressable while busy"
+        );
+    }
+    // A draft finished during a refresh cannot open its editor, so a refresh blocks too.
+    app.busy = false;
+    app.loading = true;
+    for label in ["근거 요약", "자료 발췌 초안"] {
+        assert!(
+            press(&app, label).is_empty(),
+            "{label} is pressable while loading"
+        );
+    }
+}
+
+#[test]
+fn a_project_says_what_is_missing_instead_of_hiding_it() {
+    let mut app = fixture();
+    let store = app.store.clone().unwrap();
+    let project = store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: None,
+            title: "빈 프로젝트".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap();
+    run_message(&mut app, Message::Project(Some(project.id)));
+    let labels = calendar_texts(crate::views::projects(&app), Size::new(900., 1400.));
+    for label in [crate::views::NO_REPO_HINT, crate::views::NO_PROJECT_RECORDS] {
+        assert!(labels.iter().any(|s| s == label), "{label}: {labels:?}");
+    }
+    // No empty line stands in for the missing description.
+    assert!(!labels.iter().any(|s| s.is_empty()), "{labels:?}");
+}
+
+#[test]
+fn every_project_has_a_shortcut_and_today_shows_only_on_the_calendars() {
+    let mut app = fixture();
+    let store = app.store.clone().unwrap();
+    for n in 1..=8 {
+        store
+            .save_project(timeschedule_core::diary::ProjectInput {
+                id: None,
+                title: format!("바로가기 {n}"),
+                description: String::new(),
+                repo_path: String::new(),
+            })
+            .unwrap();
+    }
+    run_message(&mut app, Message::Load);
+    let labels = calendar_texts(crate::shell::view(&app), Size::new(1160., 1600.));
+    for n in 1..=8 {
+        let name = format!("바로가기 {n}");
+        assert!(labels.iter().any(|s| *s == name), "{name}: {labels:?}");
+    }
+    for page in [
+        Page::Month,
+        Page::Week,
+        Page::Projects,
+        Page::Records,
+        Page::Tasks,
+        Page::Notes,
+        Page::Settings,
+    ] {
+        run_message(&mut app, Message::Navigate(page));
+        let labels = calendar_texts(crate::shell::view(&app), Size::new(1160., 1600.));
+        let calendar = matches!(page, Page::Month | Page::Week);
+        assert_eq!(
+            labels.iter().any(|s| s == "오늘"),
+            calendar,
+            "{page:?}: {labels:?}"
+        );
+    }
+}
+
+#[test]
+fn a_failed_load_never_calls_the_next_project_empty() {
+    let mut app = fixture();
+    let store = app.store.clone().unwrap();
+    let input = |title: &str| timeschedule_core::diary::ProjectInput {
+        id: None,
+        title: title.into(),
+        description: String::new(),
+        repo_path: String::new(),
+    };
+    let empty = store.save_project(input("빈 프로젝트")).unwrap();
+    let full = store.save_project(input("기록 있는 프로젝트")).unwrap();
+    let mut form = Form::new(Kind::Entry, app.selected.to_string(), Some(full.id.clone()));
+    form.title = "남긴 기록".into();
+    form.save(&store).unwrap();
+    let says_empty = |app: &App| {
+        calendar_texts(crate::views::projects(app), Size::new(900., 1400.))
+            .iter()
+            .any(|s| s == crate::views::NO_PROJECT_RECORDS)
+    };
+    run_message(&mut app, Message::Project(Some(empty.id.clone())));
+    assert!(says_empty(&app));
+    // The next project's load fails; the empty rows on screen are still the first one's.
+    let _ = app.update(Message::Project(Some(full.id.clone())));
+    let _ = app.update(Message::Loaded(
+        app.view_generation,
+        Err("읽기 실패".into()),
+    ));
+    app.error.clear();
+    assert!(!says_empty(&app));
+    // The first record is saved, then the reload fails: the old empty rows prove nothing.
+    run_message(&mut app, Message::Project(Some(empty.id.clone())));
+    assert!(says_empty(&app));
+    let mut first = Form::new(
+        Kind::Entry,
+        app.selected.to_string(),
+        Some(empty.id.clone()),
+    );
+    first.title = "첫 기록".into();
+    first.save(&store).unwrap();
+    let _ = app.update(Message::Load);
+    let _ = app.update(Message::Loaded(
+        app.view_generation,
+        Err("읽기 실패".into()),
+    ));
+    assert!(!says_empty(&app));
+    // An empty project loaded after an error says so, whatever the error line holds.
+    let other = store.save_project(input("또 빈 프로젝트")).unwrap();
+    app.error = "이전 오류".into();
+    run_message(&mut app, Message::Project(Some(other.id)));
+    assert!(says_empty(&app));
 }
