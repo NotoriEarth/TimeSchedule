@@ -469,6 +469,7 @@ fn excerpts(body: &str, query: &str, every_letter: bool) -> (usize, Vec<String>)
 mod tests {
     use super::records::daily_place;
     use super::*;
+    use crate::storage::Storage;
 
     #[test]
     fn words_are_found_without_regard_to_case_and_without_overlaps() {
@@ -481,6 +482,23 @@ mod tests {
         let (n, shown) = excerpts("앞\n\n오류가 났다 그리고 또 오류", "오류", true);
         assert_eq!(n, 2);
         assert_eq!(shown[0], "앞 오류가 났다 그리고 또 오류");
+    }
+
+    #[test]
+    fn a_read_only_database_writes_no_temporary_file() {
+        let path = std::env::temp_dir().join(format!("ts-read-only-{}.db", uuid::Uuid::new_v4()));
+        drop(Storage::open(&path).unwrap());
+        let store = Storage::open_read_only(&path).unwrap();
+        let c = store.connection().unwrap();
+        let read = |pragma: &str| -> i64 { c.query_row(pragma, [], |r| r.get(0)).unwrap() };
+        // 2 is MEMORY.
+        assert_eq!(read("PRAGMA temp_store"), 2);
+        assert_eq!(read("PRAGMA query_only"), 1);
+        drop(c);
+        drop(store);
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
     }
 
     #[test]

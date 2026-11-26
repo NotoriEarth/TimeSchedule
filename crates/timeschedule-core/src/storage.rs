@@ -174,7 +174,8 @@ impl Storage {
     /// The database at `path` for reading only. Nothing is made, migrated or written: a
     /// missing file is an error, and a database of another schema version is not read,
     /// because the queries are written for this one. It can be read while the app has
-    /// the database open; SQLite may leave its `-shm` and `-wal` files beside it.
+    /// the database open; SQLite may leave its `-shm` and `-wal` files beside it. Its
+    /// temporary tables and sorts are kept in memory, not in temporary files.
     pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref();
         if !std::fs::metadata(path).is_ok_and(|meta| meta.is_file()) {
@@ -196,8 +197,9 @@ impl Storage {
                 "DB 형식({version})이 이 실행 파일이 읽는 형식({SCHEMA_VERSION})과 달라 읽지 않았습니다. 같은 버전의 앱을 한 번 켠 뒤 다시 실행하세요."
             ));
         }
+        // Sorts and groups too large for memory would otherwise go to temporary files.
         connection
-            .execute_batch("PRAGMA query_only = ON;")
+            .execute_batch("PRAGMA query_only = ON; PRAGMA temp_store = MEMORY;")
             .map_err(database_error)?;
         Ok(Self {
             connection: Mutex::new(connection),
