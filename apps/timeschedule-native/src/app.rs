@@ -458,6 +458,9 @@ pub struct App {
     pub rows_project: Option<Option<String>>,
     /// Whether the rows on screen have a next page; unlike `more`, kept through a refresh.
     pub rows_more: bool,
+    /// Whether the latest read failed, so what is on screen may be behind: set by
+    /// each read's result, left alone while a read runs.
+    pub last_read_failed: bool,
     pub settings_section: SettingsSection,
     /// Whether the owner opened (true) or closed (false) the advanced part of the
     /// AI connection section; until then it opens itself when it needs attention.
@@ -635,6 +638,7 @@ impl App {
             entries_project: None,
             rows_project: None,
             rows_more: false,
+            last_read_failed: false,
             settings_section: SettingsSection::General,
             mcp_advanced: None,
             project_tab: ProjectTab::Records,
@@ -862,6 +866,7 @@ impl App {
             } else {
                 None
             },
+            cards: self.page == Page::Projects && self.project.is_none(),
         }
     }
     /// Makes the daily records `scope` names for a job of `kind`, unless records are
@@ -2162,8 +2167,12 @@ impl App {
                             self.project = None;
                             return self.refresh();
                         }
+                        self.last_read_failed = false;
                     }
-                    Err(e) => self.error = e,
+                    Err(e) => {
+                        self.error = e;
+                        self.last_read_failed = true;
+                    }
                 }
             }
             Message::More if self.more && !self.loading && !self.paging => {
@@ -2825,6 +2834,7 @@ mod tests {
             entries_project: None,
             rows_project: None,
             rows_more: false,
+            last_read_failed: false,
             settings_section: SettingsSection::General,
             mcp_advanced: None,
             project_tab: ProjectTab::Records,

@@ -266,6 +266,30 @@ impl Storage {
             .map_err(database_error)?;
         Ok(rows)
     }
+    /// Every project's record count and latest record date between `from` and `to`, the
+    /// range its record list reads, by project ID. A project with none is absent.
+    pub fn project_record_totals(
+        &self,
+        from: &str,
+        to: &str,
+    ) -> Result<std::collections::HashMap<String, (u32, String)>, String> {
+        range(from, to)?;
+        let c = self.connection()?;
+        let mut q = c
+            .prepare("SELECT project_id,count(*),max(date) FROM diary_entries WHERE project_id IS NOT NULL AND date>=?1 AND date<=?2 GROUP BY project_id")
+            .map_err(database_error)?;
+        let rows = q
+            .query_map(params![from, to], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (r.get::<_, u32>(1)?, r.get::<_, String>(2)?),
+                ))
+            })
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
+            .map_err(database_error)?;
+        Ok(rows)
+    }
     pub fn get_entry(&self, id: &str) -> Result<Entry, String> {
         validate_id(id)?;
         self.connection()?.query_row("SELECT id,project_id,date,kind,title,body,source_url,source_ref,source_body,updated_at FROM diary_entries WHERE id=?1", [id], entry_row).map_err(database_error)

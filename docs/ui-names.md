@@ -17,8 +17,8 @@
 | 월간 다이어리 | ‘월간’. 연·월 제목 아래 달력과 선택한 날짜의 일정·기록을 표시 | `Page::Month`, `app.month`, `shell::month` |
 | 상단 ‘오늘’ 버튼 | 화면 제목 줄 오른쪽, 새로 고침(↻) 왼쪽. 월간·주간 화면에만 보이며 달력을 오늘로 옮김 | `shell::view`의 `heading_row`, `Message::Today` |
 | 주간 다이어리 | ‘주간’. 주간 개요와 7개의 날짜 칸, ‘주간 근거 요약’ 버튼 | `Page::Week`, `app.week`, `views::week`, `views::day` |
-| 프로젝트 화면 | ‘프로젝트’. 버튼 줄 맨 앞의 프로젝트 선택 상자(‘모든 프로젝트’와 각 프로젝트)로 골라 기록을 조회. 개별 프로젝트는 맨 위 정보 줄 두 줄을 가짐: 설명과 ‘프로젝트 수정’, 그리고 ‘Git 저장소 ● 연결됨/미연결’(경로)·‘채팅 자동 수집 ● 켜짐/꺼짐’과 ‘켜기’/‘끄기’. 그 아래 탭 세 개 ‘기록 · N’, ‘경험 검토 · N’, ‘포트폴리오’ 중 하나만 보이며, 기본과 다른 프로젝트를 열 때는 ‘기록’(맨 위부터). 초안이 도는 동안 탭 줄 끝에 ‘작업 중…’. 기록·채팅은 그 프로젝트를 읽은 뒤에만 보임(`app.rows_project`). 개별 프로젝트의 기본 버튼은 ‘근거 요약’, ‘자료 발췌 초안’(작업 중에는 그대로 두고 누를 수 없음). 기록은 ‘11월 24일 (화) · 3건’ 같은 날짜 제목 아래 묶이고, 기록이 없으면 ‘이 프로젝트에 남긴 기록이 없습니다. ‘+ 기록’으로 시작하세요.’ | `Page::Projects`, `app.project`, `views::projects`, `views::project_picker`, `views::project_choices`, `views::project_info`, `views::project_tabs`, `app.project_tab`(`ProjectTab`), `Message::ProjectTab`, `views::date_heading` |
-| 기록 보관함 (현행 화면 식별용) | 왼쪽 메뉴 ‘개발 기록’ → 제목 ‘기록 보관함’. 여러 날짜와 여러 종류의 기록을 조회하는 기존 화면 | `Page::Records`, `views::records`, `app.snapshot.entries` |
+| 프로젝트 화면 | ‘프로젝트’. 버튼 줄 맨 앞의 프로젝트 선택 상자(‘모든 프로젝트’와 각 프로젝트)로 고름. ‘모든 프로젝트’는 프로젝트 카드 목록(이름, 설명, ‘기록 N건 · 마지막 날짜’, 저장소·수집 상태)이고, 카드를 누르면 그 프로젝트가 열림. 모든 기록 목록은 기록 보관함에만 있음. 개별 프로젝트는 맨 위 정보 줄 두 줄을 가짐: 설명과 ‘프로젝트 수정’, 그리고 ‘Git 저장소 ● 연결됨/미연결’(경로)·‘채팅 자동 수집 ● 켜짐/꺼짐’과 ‘켜기’/‘끄기’. 그 아래 탭 세 개 ‘기록 · N’, ‘경험 검토 · N’, ‘포트폴리오’ 중 하나만 보이며, 기본과 다른 프로젝트를 열 때는 ‘기록’(맨 위부터). 초안이 도는 동안 탭 줄 끝에 ‘작업 중…’. 기록·채팅은 그 프로젝트를 읽은 뒤에만 보임(`app.rows_project`). 개별 프로젝트의 기본 버튼은 ‘근거 요약’, ‘자료 발췌 초안’(작업 중에는 그대로 두고 누를 수 없음). 기록은 ‘11월 24일 (화) · 3건’ 같은 날짜 제목 아래 묶이고, 기록이 없으면 ‘이 프로젝트에 남긴 기록이 없습니다. ‘+ 기록’으로 시작하세요.’ | `Page::Projects`, `app.project`, `views::projects`, `views::project_picker`, `views::project_choices`, `views::project_cards`, `worker::ProjectCard`, `views::project_info`, `views::project_tabs`, `app.project_tab`(`ProjectTab`), `Message::ProjectTab`, `views::date_heading` |
+| 기록 보관함 | 왼쪽 메뉴 ‘기록 보관함’(0.40.0 전에는 ‘개발 기록’) → 제목 ‘기록 보관함’. 모든 프로젝트의 여러 날짜·여러 종류 기록을 날짜순으로 조회하는 유일한 화면 | `Page::Records`, `views::records`, `app.snapshot.entries` |
 | 날짜 미정 화면 | ‘날짜 미정’. 날짜가 비어 있는 일정을 모아 표시. 여기서 ‘+ 일정’을 누르면 날짜를 비워 둘 수 있음 | `Page::Tasks`, `views::tasks`, `Kind::Task` |
 | 노트 화면 | 왼쪽 메뉴 ‘노트’ → 제목 ‘메모’. ‘+ 메모’로 추가하고 제목을 눌러 편집 | `Page::Notes`, `views::notes`, `app.snapshot.notes` |
 | 설정 화면 | 왼쪽 메뉴 하단 ‘설정’. 제목 아래 영역 버튼 넷 중 고른 영역 하나만 보임. 위젯 상단의 ‘설정’은 ‘바탕화면 위젯’ 영역을 바로 엶 | `Page::Settings`, `views::settings`, `app.settings_section`, `widget_settings::Change::Open` |
@@ -88,7 +88,7 @@
 
 | 가리킬 수 있는 대상 | 확인할 위치 |
 | --- | --- |
-| 왼쪽 ‘개발 기록’ 메뉴 | 현재 ‘기록 보관함’으로 들어가는 메뉴(`Page::Records`). 사용자는 개발 기록 전용 란을 의도하지 않았다. 메뉴의 향후 처리는 별도 확인 사항이다. |
+| 왼쪽 ‘개발 기록’ 메뉴 | 0.40.0에서 ‘기록 보관함’으로 이름을 바꾼 메뉴(`Page::Records`). 사용자는 개발 기록 전용 란을 의도하지 않았다. |
 | 기록 종류 ‘개발 기록’ | 기록 편집기의 ‘기록 종류’ 선택값(`form.entry_kind`의 `development`). ‘자유 노트’, ‘트러블슈팅’ 등과 같은 목록에 있다. |
 | 자동 개발 기록 | 커밋한 작업을 로컬 문서와 다이어리에 보관하는 절차. [자동 개발 기록 절차](project-records.md) |
 

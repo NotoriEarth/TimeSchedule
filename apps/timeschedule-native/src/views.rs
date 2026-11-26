@@ -741,6 +741,83 @@ fn record_list<'a>(app: &'a App, mut c: Column<'a, Message>) -> Column<'a, Messa
     }
     c
 }
+pub(crate) const NO_PROJECTS: &str = "프로젝트를 추가해 보세요.";
+/// The width of a project card; as many as fit go on a line.
+const PROJECT_CARD_WIDTH: f32 = 320.0;
+/// 모든 프로젝트: one card per project, opening it when pressed. Its counts and states,
+/// and the word that there are no projects, show only when this screen was read and
+/// its latest read did not fail; while a read runs the last ones stay.
+fn project_cards(app: &App) -> Element<'_, Message> {
+    let read = app.rows_project == Some(None) && !app.last_read_failed;
+    if app.snapshot.projects.is_empty() {
+        if !read {
+            return quiet("기록 확인 중");
+        }
+        return column![
+            quiet(NO_PROJECTS),
+            row![control("+ 프로젝트", Message::New(Kind::Project, None))]
+        ]
+        .spacing(10)
+        .into();
+    }
+    let p = theme::palette(app.preferences.theme);
+    let dot = |on: bool| text("●").size(10).color(if on { p.green } else { p.muted });
+    let mut cards = Row::new().spacing(12);
+    for project in &app.snapshot.projects {
+        let mut body = column![text(&project.title).size(16)].spacing(6);
+        if !project.description.trim().is_empty() {
+            body = body.push(
+                text(project.description.trim())
+                    .size(13)
+                    .style(theme::muted)
+                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            );
+        }
+        match app.snapshot.project_cards.get(&project.id).filter(|_| read) {
+            Some(card) => {
+                body = body.push(quiet(match &card.last {
+                    Some(last) => format!(
+                        "기록 {}건 · 마지막 {}",
+                        card.records,
+                        date_heading(last, Local::now().year())
+                    ),
+                    None => "아직 기록이 없습니다".to_owned(),
+                }));
+                let linked = !project.repo_path.is_empty();
+                let mut states = row![
+                    dot(linked),
+                    quiet(if linked {
+                        "저장소 연결됨"
+                    } else {
+                        "저장소 미연결"
+                    })
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center);
+                if linked {
+                    states = states
+                        .push(quiet("·"))
+                        .push(dot(card.capturing))
+                        .push(quiet(if card.capturing {
+                            "수집 켜짐"
+                        } else {
+                            "수집 꺼짐"
+                        }));
+                }
+                body = body.push(states);
+            }
+            None => body = body.push(quiet("기록 확인 중")),
+        }
+        cards = cards.push(
+            button(body)
+                .padding(14)
+                .width(PROJECT_CARD_WIDTH)
+                .style(theme::secondary)
+                .on_press(Message::Project(Some(project.id.clone()))),
+        );
+    }
+    cards.wrap().vertical_spacing(12).into()
+}
 pub(crate) fn projects(app: &App) -> Element<'_, Message> {
     let mut c = column![].spacing(12);
     let Some(p) = app
@@ -749,8 +826,8 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
         .iter()
         .find(|p| Some(&p.id) == app.project.as_ref())
     else {
-        // 모든 프로젝트: every record, no tabs.
-        return scrollable(record_list(app, c))
+        // 모든 프로젝트: a card per project; every record lives in 기록 보관함.
+        return scrollable(project_cards(app))
             .id("projects-page")
             .spacing(crate::calendar_ui::SCROLL_GAP)
             .height(Length::Fill)
