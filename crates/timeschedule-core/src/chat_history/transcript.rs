@@ -18,20 +18,31 @@ pub(super) struct Transcript {
 // Skip large protocol blobs without allocating their full line. Only completed,
 // user-visible chat events enter a diary record.
 const LINE_LIMIT: u64 = 8 * 1024 * 1024;
+/// Reads one row into `buf` with its line end. A row whose text, without `\r\n` or
+/// `\n`, is longer than `LINE_LIMIT` is skipped and handed back empty. `false` at the
+/// end of the file and for a last row with no line end, unless that row is over the
+/// limit: it is skipped like a long finished row (a known limit in `docs/daily-record.md`).
 pub(crate) fn line(input: &mut impl BufRead, buf: &mut Vec<u8>) -> Result<bool, String> {
     buf.clear();
+    // Room for the text, `\r` and `\n`: a row of exactly the limit is not long,
+    // whichever line end it has.
     input
-        .take(LINE_LIMIT + 1)
+        .take(LINE_LIMIT + 2)
         .read_until(b'\n', buf)
         .map_err(|e| e.to_string())?;
-    if buf.len() as u64 > LINE_LIMIT {
-        if buf.last() != Some(&b'\n') {
+    let end = match buf.as_slice() {
+        [.., b'\r', b'\n'] => 2,
+        [.., b'\n'] => 1,
+        _ => 0,
+    };
+    if (buf.len() - end) as u64 > LINE_LIMIT {
+        if end == 0 {
             input.skip_until(b'\n').map_err(|e| e.to_string())?;
         }
         buf.clear();
         return Ok(true);
     }
-    Ok(buf.last() == Some(&b'\n'))
+    Ok(end > 0)
 }
 
 fn clip(s: &str, bytes: usize) -> String {
@@ -134,5 +145,81 @@ impl ChatText {
                 self.excerpts.finish()
             ),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A row whose text, without its line end, is `body` bytes long, then a short row.
+    fn rows(body: usize, end: &str) -> Vec<u8> {
+        let mut file = vec![b'x'; body];
+        file.extend_from_slice(end.as_bytes());
+        file.extend_from_slice(b"next");
+        file.extend_from_slice(end.as_bytes());
+        file
+    }
+
+    #[test]
+    fn the_limit_is_on_the_text_without_its_line_end() {
+        let limit = LINE_LIMIT as usize;
+        let mut wrong = Vec::new();
+        for end in ["\n", "\r\n"] {
+            for (body, kept) in [
+                (limit - 1, true),
+                (limit, true),
+                (limit + 1, false),
+                (limit + 2, false),
+            ] {
+                let file = rows(body, end);
+                let mut input = &file[..];
+                let mut buf = Vec::new();
+                let first = (line(&mut input, &mut buf).unwrap(), buf.len());
+                let expected = (true, if kept { body + end.len() } else { 0 });
+                let second = (line(&mut input, &mut buf).unwrap(), buf.clone());
+                let after = line(&mut input, &mut buf).unwrap();
+                if first != expected || second != (true, format!("next{end}").into_bytes()) || after
+                {
+                    wrong.push(format!("{body} bytes, {end:?}: read {first:?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    #[test]
+    fn a_line_end_alone_is_a_row_and_a_second_cr_is_text() {
+        let limit = LINE_LIMIT as usize;
+        let mut buf = Vec::new();
+        for end in ["\n", "\r\n"] {
+            let mut input = end.as_bytes();
+            assert!(line(&mut input, &mut buf).unwrap());
+            assert_eq!(buf, end.as_bytes());
+        }
+        // `\r\r\n` is one `\r` of text and a CRLF line end.
+        let mut file = vec![b'x'; limit];
+        file.extend_from_slice(b"\r\r\nnext\n");
+        let mut input = &file[..];
+        assert!(line(&mut input, &mut buf).unwrap());
+        assert!(buf.is_empty());
+        assert!(line(&mut input, &mut buf).unwrap());
+        assert_eq!(buf, b"next\n");
+    }
+
+    #[test]
+    fn a_last_row_with_no_line_end_is_unfinished_unless_it_is_over_the_limit() {
+        let limit = LINE_LIMIT as usize;
+        let mut buf = Vec::new();
+        let file = vec![b'x'; limit];
+        let mut input = &file[..];
+        assert!(!line(&mut input, &mut buf).unwrap());
+        assert_eq!(buf.len(), limit);
+
+        let file = vec![b'x'; limit + 1];
+        let mut input = &file[..];
+        assert!(line(&mut input, &mut buf).unwrap());
+        assert!(buf.is_empty());
+        assert!(!line(&mut input, &mut buf).unwrap());
     }
 }
