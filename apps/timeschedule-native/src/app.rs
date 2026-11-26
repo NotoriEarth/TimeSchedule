@@ -296,6 +296,9 @@ pub enum Message {
     ChatsScanned(Result<worker::ChatScan, String>),
     SetDailyMode(preferences::DailyRecordMode),
     SettingsSection(SettingsSection),
+    /// Opens or closes the advanced part of the AI connection section.
+    McpAdvanced(bool),
+    SetTheme(AppTheme),
     /// Make the daily record of this day now (the selected day's button).
     MakeDaily(NaiveDate),
     DailyMade(Result<worker::DailyMade, String>),
@@ -433,6 +436,9 @@ pub struct App {
     /// screen load succeeds: a failed load never passes the previous rows off as these.
     pub entries_project: Option<String>,
     pub settings_section: SettingsSection,
+    /// Whether the owner opened (true) or closed (false) the advanced part of the
+    /// AI connection section; until then it opens itself when it needs attention.
+    pub mcp_advanced: Option<bool>,
     pub expanded: HashSet<String>,
 
     record_sync: crate::record_sync::Runner,
@@ -603,6 +609,7 @@ impl App {
             project: None,
             entries_project: None,
             settings_section: SettingsSection::General,
+            mcp_advanced: None,
             expanded: HashSet::new(),
 
             record_sync: crate::record_sync::Runner::default(),
@@ -709,6 +716,8 @@ impl App {
             if let Some(reason) = started.recovered {
                 self.log(&format!("mcp token file unusable ({reason}); reissued"));
                 self.mcp_setup.token = crate::mcp_setup_ui::TokenPanel::Recovered;
+                // A new warning opens the advanced part, even if the owner had closed it.
+                self.mcp_advanced = Some(true);
             }
             match started.server {
                 Ok(server) => {
@@ -1425,10 +1434,30 @@ impl App {
             Message::Calendar(action) => return crate::calendar_ui::update(self, action),
             Message::Category(action) => return crate::category_ui::update(self, action),
             Message::McpSetup(action) => {
+                use crate::mcp_setup_ui::Action;
+                // What the owner starts, and a failed reissue, shows in the advanced part,
+                // so it opens and stays open until the owner closes it. Results that only
+                // arrive (a board reading, a finished check) leave the owner's choice alone.
+                let opens = !matches!(
+                    action,
+                    Action::Refresh
+                        | Action::Loaded(..)
+                        | Action::Finished(_)
+                        | Action::Reissued(_, Ok(()))
+                );
                 let endpoint = self.mcp_endpoint();
-                return self
+                let task = self
                     .mcp_setup
                     .update(action, self.data_dir.clone(), endpoint);
+                if opens {
+                    self.mcp_advanced = Some(true);
+                } else if self.mcp_advanced.is_none()
+                    && crate::mcp_setup_ui::advanced_needed(&self.mcp_setup)
+                {
+                    // Opened by itself once, it no longer folds while the state moves on.
+                    self.mcp_advanced = Some(true);
+                }
+                return task;
             }
             Message::SetMcpEnabled(enabled) => {
                 if !self.can_set_mcp(enabled) {
@@ -1515,6 +1544,10 @@ impl App {
                 return Task::batch(tasks);
             }
             Message::SettingsSection(section) => return self.open_settings_section(section),
+            Message::McpAdvanced(open) => self.mcp_advanced = Some(open),
+            Message::SetTheme(theme) if theme != self.preferences.theme => {
+                return self.update(Message::ToggleTheme);
+            }
             Message::SetDailyMode(mode) => {
                 if self.preferences.daily_record != mode {
                     self.preferences.daily_record = mode;
@@ -2742,6 +2775,7 @@ mod tests {
             project: None,
             entries_project: None,
             settings_section: SettingsSection::General,
+            mcp_advanced: None,
             expanded: HashSet::new(),
 
             record_sync: crate::record_sync::Runner::default(),
