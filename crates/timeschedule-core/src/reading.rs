@@ -170,7 +170,8 @@ pub struct ProjectRow {
     pub first_date: Option<String>,
     pub last_date: Option<String>,
     /// Files listed in the kept originals of the project's folder, and days of daily
-    /// records. `None` when the document store was not read.
+    /// records. 0 when the folder is not there; `None` when the document store was
+    /// not read, or the folder could not be read.
     pub originals: Option<usize>,
     pub daily_days: Option<usize>,
 }
@@ -331,6 +332,8 @@ pub struct LineView {
     pub clipped: bool,
     /// The line is longer than 8 MiB; only its first 8 MiB were read.
     pub long: bool,
+    /// Bytes of the line that are not UTF-8 text were shown as `�`.
+    pub lossy: bool,
 }
 
 /// Where to go on from: the same command with `--line`, `--offset` and `--lines`, which
@@ -351,6 +354,10 @@ fn is_zero(n: &usize) -> bool {
 pub struct OriginalView {
     pub project: ProjectName,
     pub file: String,
+    /// Earlier contents of the file kept beside it (`<name>.prev-<time>`), relative to
+    /// the project's originals folder. The file was replaced by content that did not
+    /// go on from them, so a line cited before then may now hold other text.
+    pub earlier: Vec<String>,
     pub lines: Vec<LineView>,
     pub next: Option<LineOffset>,
 }

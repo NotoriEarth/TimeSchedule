@@ -139,9 +139,7 @@ pub(crate) fn perform(
             // The store is counted for the projects of this page only.
             let counted = rows.into_iter().skip(offset).map(|mut row| {
                 if let Ok(root) = &vault {
-                    let (files, days) = reading::store_counts(root, &row.folder);
-                    row.originals = Some(files);
-                    row.daily_days = Some(days);
+                    (row.originals, row.daily_days) = reading::store_counts(root, &row.folder);
                 }
                 row
             });

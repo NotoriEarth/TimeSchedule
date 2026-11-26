@@ -808,3 +808,51 @@ fn only_record_files_count_as_days_of_daily_records() {
     std::fs::create_dir_all(f.vault.join("daily").join(&f.group).join("2026-11-30.json")).unwrap();
     assert_eq!(f.ok(&["projects"])["projects"][0]["dailyDays"], 1);
 }
+
+#[test]
+fn an_original_says_when_the_file_was_replaced_and_when_bytes_were_not_text() {
+    let f = fixture();
+    let kept = f.vault.join("originals").join(&f.group).join(FILE);
+    let earlier = kept.with_file_name("s1.jsonl.zst.prev-20261125T000000Z");
+    std::fs::copy(&kept, &earlier).unwrap();
+    let mut text = b"ok\n".to_vec();
+    text.extend_from_slice(b"\xbf\xc0 cp949\n");
+    std::fs::write(&kept, zstd::encode_all(&text[..], 3).unwrap()).unwrap();
+    let read = f.ok(&[
+        "original",
+        "--project",
+        &f.project,
+        "--file",
+        FILE,
+        "--line",
+        "1",
+        "--lines",
+        "2",
+    ]);
+    assert_eq!(
+        read["earlier"],
+        json!(["claude/C--work/s1.jsonl.zst.prev-20261125T000000Z"])
+    );
+    assert_eq!(read["lines"][0]["lossy"], false);
+    assert_eq!(read["lines"][1]["lossy"], true);
+}
+
+#[test]
+fn a_full_page_reads_no_more_days() {
+    let f = fixture();
+    let page = f.ok(&[
+        "transcript",
+        "--project",
+        &f.project,
+        "--from",
+        DAY,
+        "--to",
+        "2026-11-26",
+        "--query",
+        "긴 설명",
+        "--max-chars",
+        "1000",
+    ]);
+    assert_eq!(page["daysRead"], 1);
+    assert_eq!(page["next"], json!({"from": "2026-11-25", "offset": 0}));
+}

@@ -2,7 +2,7 @@
 //! store by the rules of the day transcript.
 use super::*;
 use crate::{
-    chat_originals::{group_name, is_link},
+    chat_originals::group_name,
     daily_record::{day_transcript, open_kept, project_dir, read_index, DayTranscript},
     project_records::repo_key,
 };
@@ -169,6 +169,14 @@ pub fn search_days(
             break;
         }
         day = day.succ_opt().ok_or("날짜를 넘길 수 없습니다.")?;
+        // A full page reads no more days: the next page starts on the next one.
+        if used >= budget {
+            view.next = Some(DayOffset {
+                from: day.to_string(),
+                offset: 0,
+            });
+            break;
+        }
     }
     (view.warnings, view.warnings_total) = capped(warnings);
     Ok(view)
@@ -213,6 +221,7 @@ pub fn read_original(
             title: info.title,
         },
         file: file.to_owned(),
+        earlier: earlier_contents(&dir, file),
         lines: Vec::new(),
         next: None,
     };
@@ -221,7 +230,7 @@ pub fn read_original(
     let mut left = count.max(1);
     let mut number = line_number;
     loop {
-        let Some((text, long)) = whole_line(&mut input, &mut buf)? else {
+        let Some((text, long, lossy)) = whole_line(&mut input, &mut buf)? else {
             if view.lines.is_empty() {
                 return Err(format!(
                     "이 파일은 {}줄입니다. --line {line_number}이 없습니다.",
@@ -256,6 +265,7 @@ pub fn read_original(
             text: chars[skip..end].iter().collect(),
             clipped,
             long,
+            lossy,
         });
         if clipped {
             view.next = Some(LineOffset {
@@ -275,14 +285,14 @@ pub fn read_original(
     Ok(view)
 }
 
-/// The next line of `input` without its line end, and whether it is longer than
-/// `LINE_LIMIT` and was cut there. `None` at the end of the file and for a last line
+/// The next line of `input` without its line end, whether it is longer than
+/// `LINE_LIMIT` and was cut there, and whether bytes that are not UTF-8 were replaced. `None` at the end of the file and for a last line
 /// with no line end, which the tool may still be writing: the day transcript does not
 /// count it as a line either.
 fn whole_line(
     input: &mut impl BufRead,
     buf: &mut Vec<u8>,
-) -> Result<Option<(String, bool)>, String> {
+) -> Result<Option<(String, bool, bool)>, String> {
     buf.clear();
     // Room for the line, `\r` and `\n`: a line of exactly the limit is not long,
     // whichever line end it has.
@@ -309,7 +319,41 @@ fn whole_line(
             }
         }
     }
-    Ok(Some((String::from_utf8_lossy(buf).into_owned(), long)))
+    let text = String::from_utf8_lossy(buf);
+    let lossy = matches!(text, std::borrow::Cow::Owned(_));
+    Ok(Some((text.into_owned(), long, lossy)))
+}
+
+/// The earlier contents of the kept `file` below the project folder `dir`: the
+/// `<name>.prev-…` files the archive keeps when it replaces a file with content that
+/// does not go on from it.
+fn earlier_contents(dir: &Path, file: &str) -> Vec<String> {
+    let (folder, name) = file.rsplit_once('/').unwrap_or(("", file));
+    let Ok(place) = crate::chat_originals::kept_path(dir, file) else {
+        return Vec::new();
+    };
+    let Some(parent) = place.parent() else {
+        return Vec::new();
+    };
+    let prefix = format!("{name}.prev-");
+    let mut found: Vec<String> = std::fs::read_dir(parent)
+        .map(|list| {
+            list.flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with(&prefix))
+                .map(|n| {
+                    if folder.is_empty() {
+                        n
+                    } else {
+                        format!("{folder}/{n}")
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
 }
 
 /// Reads past the rest of a line; whether it had a line end.
@@ -329,37 +373,50 @@ fn rest_of_line(input: &mut impl BufRead) -> Result<bool, String> {
 }
 
 /// How many files the kept originals of `folder` list, and how many days of daily
-/// records it has, from the store at `vault`. Counted, not read.
-pub fn store_counts(vault: &Path, folder: &str) -> (usize, usize) {
+/// records it has, from the store at `vault`. Counted, not read. 0 for a folder that is
+/// not there; `None` for one that could not be read, or is reached through a link.
+pub fn store_counts(vault: &Path, folder: &str) -> (Option<usize>, Option<usize>) {
     let group = group_name(&repo_key(folder));
-    // Nothing is read through a link, as for the code that reads these folders.
-    let plain = |parts: &[&str]| {
+    // Nothing is read through a link, as for the code that reads these folders. An
+    // error other than "not found" is not taken for an empty folder.
+    let plain = |parts: &[&str]| -> Result<Option<std::path::PathBuf>, ()> {
         let mut path = vault.to_path_buf();
         for part in parts {
             path.push(part);
-            if is_link(&path).unwrap_or(true) {
-                return None;
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.file_type().is_symlink() => return Err(()),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(_) => return Err(()),
             }
         }
-        Some(path)
+        Ok(Some(path))
     };
-    let files = plain(&["originals", &group, "index.jsonl"])
-        .and_then(|index| std::fs::read_to_string(index).ok())
-        .map_or(0, |text| {
-            text.lines().filter(|l| !l.trim().is_empty()).count()
-        });
-    let days = plain(&["daily", &group])
-        .and_then(|daily| std::fs::read_dir(daily).ok())
-        .map_or(0, |list| {
-            list.flatten()
-                // A record is a file: not a folder, and not a link.
-                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-                .filter(|e| {
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    name.strip_suffix(".json")
-                        .is_some_and(|d| crate::storage::validate_date(d).is_ok())
-                })
-                .count()
-        });
+    let files = match plain(&["originals", &group, "index.jsonl"]) {
+        Ok(None) => Some(0),
+        Ok(Some(index)) => std::fs::read_to_string(index)
+            .ok()
+            .map(|text| text.lines().filter(|l| !l.trim().is_empty()).count()),
+        Err(()) => None,
+    };
+    let days = match plain(&["daily", &group]) {
+        Ok(None) => Some(0),
+        Ok(Some(daily)) => std::fs::read_dir(daily).ok().and_then(|list| {
+            let mut days = 0;
+            for entry in list {
+                // An entry that cannot be read leaves the count unknown, not smaller.
+                let entry = entry.ok()?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let dated = name
+                    .strip_suffix(".json")
+                    .is_some_and(|d| crate::storage::validate_date(d).is_ok());
+                if dated && entry.file_type().ok()?.is_file() {
+                    days += 1;
+                }
+            }
+            Some(days)
+        }),
+        Err(()) => None,
+    };
     (files, days)
 }

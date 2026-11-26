@@ -46,8 +46,16 @@ impl Storage {
 
     /// Every project, with how many records of each origin it has.
     pub fn read_projects(&self) -> Result<Vec<ProjectRow>, String> {
-        let projects = self.list_projects()?;
         let c = self.connection()?;
+        // The projects and their counts are read in one transaction, so they agree.
+        let c = c.unchecked_transaction().map_err(database_error)?;
+        let projects: Vec<(String, String, String)> = c
+            .prepare("SELECT id,title,repo_path FROM projects ORDER BY updated_at DESC,id")
+            .map_err(database_error)?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
+            .map_err(database_error)?;
         // The app collects a project's chats while it is registered for the folder it
         // has now (`Storage::chat_capture_enabled`).
         let capture: Vec<(String, String)> = c
@@ -72,6 +80,13 @@ impl Storage {
             .map_err(database_error)?;
         Ok(projects
             .into_iter()
+            .map(|(id, title, repo_path)| crate::diary::Project {
+                id,
+                title,
+                description: String::new(),
+                repo_path,
+                updated_at: String::new(),
+            })
             .map(|p| {
                 let mine = counts.iter().filter(|c| c.0 == p.id);
                 let records = mine.clone().map(|c| (Origin::of(&c.1).key(), c.2)).fold(
@@ -292,7 +307,9 @@ impl Storage {
         let mut said = 0;
         if offset == 0 {
             self.describe(&c, &mut view, &body, source_ref.as_deref(), document)?;
-            said = chars_of(&(&view.edited, &view.daily, &view.agent));
+            if view.edited.is_some() || view.daily.is_some() || view.agent.is_some() {
+                said = chars_of(&(&view.edited, &view.daily, &view.agent));
+            }
         }
         let room = budget.saturating_sub(said).max(1000);
         let end = (offset + room).min(chars.len());
