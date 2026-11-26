@@ -204,6 +204,16 @@ impl Storage {
         input: crate::diary::ProjectInput,
         short_name: &str,
     ) -> Result<crate::diary::Project, String> {
+        self.save_calendar_project_with(input, short_name, |_, _| Ok(()))
+    }
+    /// `save_calendar_project`, with `also` writing more for the saved project's ID in
+    /// the same transaction: when it fails, nothing of the save is kept.
+    pub(crate) fn save_calendar_project_with(
+        &self,
+        input: crate::diary::ProjectInput,
+        short_name: &str,
+        also: impl FnOnce(&Connection, &str) -> Result<(), String>,
+    ) -> Result<crate::diary::Project, String> {
         let short_name = line(short_name, "프로젝트 표시 이름", 24)?;
         let title = validated_title(&input.title)?;
         validate_text(&input.description, "프로젝트 설명", 20000)?;
@@ -223,6 +233,7 @@ impl Storage {
         let changed=tx.execute(if updating{"UPDATE projects SET title=?2,description=?3,repo_path=?4,updated_at=?5 WHERE id=?1"}else{"INSERT INTO projects VALUES(?1,?2,?3,?4,?5)"},params![project.id,project.title,project.description,project.repo_path,project.updated_at]).map_err(database_error)?;
         require_changed(changed, "프로젝트")?;
         tx.execute("INSERT INTO project_display VALUES(?1,?2) ON CONFLICT(project_id) DO UPDATE SET short_name=excluded.short_name",params![project.id,short_name]).map_err(database_error)?;
+        also(&tx, &project.id)?;
         tx.commit().map_err(database_error)?;
         Ok(project)
     }

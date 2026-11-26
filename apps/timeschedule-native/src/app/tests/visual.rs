@@ -4580,6 +4580,83 @@ fn render_past_days_previews() {
 }
 
 #[test]
+#[ignore = "manual previews of a project's completion state, GitHub link and editor"]
+fn render_project_meta_previews() {
+    use timeschedule_core::diary::ProjectInput;
+    let output = PathBuf::from(std::env::var_os("TIMESCHEDULE_PREVIEW_DIR").unwrap());
+    std::fs::create_dir_all(&output).unwrap();
+    let mut app = fixture();
+    let store = app.store.clone().unwrap();
+    let save = |title: &str, description: &str, repo: &str| {
+        store
+            .save_project(ProjectInput {
+                id: None,
+                title: title.into(),
+                description: description.into(),
+                repo_path: repo.into(),
+            })
+            .unwrap()
+            .id
+    };
+    let open = save("midi", "MIDI 편집 프로그램", "");
+    let done = save("TimeSchedule", "일정·다이어리 앱", r"C:\LSH\TimeSchedule");
+    let day = Local::now()
+        .date_naive()
+        .with_month(12)
+        .unwrap()
+        .with_day(1)
+        .unwrap();
+    store
+        .set_project_completed(&done, Some(&day.to_string()))
+        .unwrap();
+    store
+        .save_project_link(&done, "https://github.com/NotoriEarth/TimeSchedule")
+        .unwrap();
+    let frame = |app: &mut App, name: &str, size: Size| {
+        app.manager_size = size;
+        let app = &*app;
+        let mut element = crate::views::view(app, app.manager);
+        let mut renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        render_scaled_frame(
+            app,
+            &mut element,
+            &mut tree,
+            &node,
+            &mut renderer,
+            size,
+            &output.join(format!("{name}.png")),
+            1.,
+        );
+    };
+    run_message(&mut app, Message::Project(Some(open)));
+    frame(&mut app, "meta-1-in-progress", Size::new(1160., 820.));
+    run_message(&mut app, Message::Project(Some(done.clone())));
+    frame(
+        &mut app,
+        "meta-2-completed-with-link",
+        Size::new(1160., 820.),
+    );
+    run_message(&mut app, Message::Project(None));
+    frame(&mut app, "meta-3-cards", Size::new(1160., 820.));
+    let project = app
+        .snapshot
+        .projects
+        .iter()
+        .find(|p| p.id == done)
+        .unwrap()
+        .clone();
+    let form = worker::hydrate_form(&store, Form::project(project)).unwrap();
+    let _ = app.open_form(form);
+    frame(&mut app, "meta-4-editor", Size::new(1160., 1100.));
+}
+
+#[test]
 fn a_project_date_heading_names_the_weekday_and_drops_this_year() {
     use crate::views::date_heading;
     assert_eq!(date_heading("2026-11-24", 2026), "11월 24일 (화)");
@@ -5265,6 +5342,127 @@ fn a_project_shows_its_repository_and_capture_as_states_and_buttons() {
         press(&app, "끄기").as_slice(),
         [Message::SetChatCapture(p, false)] if *p == id
     ));
+}
+
+#[test]
+fn a_project_shows_its_completion_and_its_github_link_only_when_it_has_one() {
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let id = app.snapshot.projects[0].id.clone();
+    run_message(&mut app, Message::Project(Some(id.clone())));
+    let size = Size::new(1160., 1600.);
+    let press = |app: &App, label: &str| {
+        let target = calendar_text_bounds(crate::views::projects(app), size)
+            .into_iter()
+            .find(|(s, _)| s == label)
+            .unwrap_or_else(|| panic!("{label} is on screen"))
+            .1;
+        click_text(crate::views::projects(app), size, target)
+    };
+    let labels = |app: &App| calendar_texts(crate::views::projects(app), size);
+    // In progress, with no link: no GitHub button.
+    let shown = labels(&app);
+    for label in ["진행 중", "완료로 표시"] {
+        assert!(shown.iter().any(|s| s == label), "{label}: {shown:?}");
+    }
+    assert!(!shown.iter().any(|s| s == "GitHub"), "{shown:?}");
+    assert!(matches!(
+        press(&app, "완료로 표시").as_slice(),
+        [Message::SetProjectCompleted(p, true)] if *p == id
+    ));
+    // Completed on a day of this year, with a link: the day without the year, the
+    // way back, and the button that opens the link.
+    let day = Local::now()
+        .date_naive()
+        .with_month(12)
+        .unwrap()
+        .with_day(1)
+        .unwrap();
+    store
+        .set_project_completed(&id, Some(&day.to_string()))
+        .unwrap();
+    store
+        .save_project_link(&id, "https://github.com/o/r")
+        .unwrap();
+    run_message(&mut app, Message::Load);
+    let shown = labels(&app);
+    for label in ["완료 · 12월 1일", "진행 중으로", "GitHub", "Git 저장소"] {
+        assert!(shown.iter().any(|s| s == label), "{label}: {shown:?}");
+    }
+    assert!(!shown.iter().any(|s| s == "진행 중"), "{shown:?}");
+    assert!(matches!(
+        press(&app, "진행 중으로").as_slice(),
+        [Message::SetProjectCompleted(p, false)] if *p == id
+    ));
+    assert!(matches!(
+        press(&app, "GitHub").as_slice(),
+        [Message::OpenGithub(p)] if *p == id
+    ));
+    // 모든 프로젝트: the card says it is completed.
+    run_message(&mut app, Message::Project(None));
+    let cards = labels(&app);
+    assert!(cards.iter().any(|s| s == "완료 · 12월 1일"), "{cards:?}");
+}
+
+#[test]
+fn completing_the_open_project_keeps_today_shows_it_at_once_and_undoing_clears_it() {
+    let (dir, mut app) = scanning_app();
+    let id = capturing(&dir, &mut app);
+    let store = app.store.clone().unwrap();
+    let today = Local::now().date_naive().to_string();
+    // What was saved shows before the read that follows it, and stays if that read
+    // fails.
+    let _ = app.update(Message::ProjectCompleted(
+        id.clone(),
+        Ok(Some(today.clone())),
+    ));
+    assert_eq!(
+        app.snapshot.project_meta[&id].completed_on.as_deref(),
+        Some(today.as_str())
+    );
+    run_message(&mut app, Message::SetProjectCompleted(id.clone(), true));
+    assert!(!app.busy);
+    assert_eq!(store.project_meta(&id).unwrap().completed_on, Some(today));
+    // A project not open on the screen is left as it is.
+    run_message(
+        &mut app,
+        Message::SetProjectCompleted("other".into(), false),
+    );
+    assert!(app.error.is_empty(), "{}", app.error);
+    run_message(&mut app, Message::SetProjectCompleted(id.clone(), false));
+    assert_eq!(store.project_meta(&id).unwrap().completed_on, None);
+    assert_eq!(app.snapshot.project_meta[&id].completed_on, None);
+    // A reply that arrives while an editor asks whether to discard still ends the job.
+    app.editor = Some(Editor::new(Form::new(Kind::Note, String::new(), None), 1));
+    app.editor.as_mut().unwrap().confirmation = Some(crate::editor::Confirmation::Discard(
+        crate::editor::CloseIntent::Editor,
+    ));
+    app.busy = true;
+    let _ = app.update(Message::ProjectCompleted(id.clone(), Err("잠김".into())));
+    assert!(!app.busy);
+    assert_eq!(app.error, "잠김");
+    app.error.clear();
+    app.busy = true;
+    let _ = app.update(Message::ProjectCompleted(id.clone(), Ok(None)));
+    assert!(!app.busy);
+    app.editor = None;
+    // Without the app's instance lock nothing is written.
+    app._instance = None;
+    run_message(&mut app, Message::SetProjectCompleted(id.clone(), true));
+    assert_eq!(store.project_meta(&id).unwrap().completed_on, None);
+}
+
+#[test]
+fn a_completion_day_drops_only_this_year() {
+    let this = Local::now().year();
+    assert_eq!(
+        crate::views::completed_label(&format!("{this}-12-01")),
+        "완료 · 12월 1일"
+    );
+    assert_eq!(
+        crate::views::completed_label(&format!("{}-03-09", this - 1)),
+        format!("완료 · {}년 3월 9일", this - 1)
+    );
 }
 
 #[test]

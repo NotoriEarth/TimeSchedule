@@ -144,6 +144,7 @@ pub enum Field {
     EntryKind(String),
     Source(String),
     Repo(String),
+    GithubUrl(String),
     Start(String),
     End(String),
 
@@ -307,6 +308,12 @@ pub enum Message {
     Tick,
     RecordsDue,
     SetChatCapture(String, bool),
+    /// Marks the open project completed today (`true`) or in progress again.
+    SetProjectCompleted(String, bool),
+    /// The completion day saved for a project, or `None` for in progress.
+    ProjectCompleted(String, Result<Option<String>, String>),
+    /// Opens the GitHub link stored for this project ID in the default browser.
+    OpenGithub(String),
     ScanChats,
     ChatsScanned(Result<worker::ChatScan, String>),
     SetDailyMode(preferences::DailyRecordMode),
@@ -1445,6 +1452,7 @@ impl App {
                     | Message::SearchDone(..)
                     | Message::Saved(..)
                     | Message::MutationDone(_)
+                    | Message::ProjectCompleted(..)
                     | Message::Drafted(..)
                     | Message::ChatReview(
                         crate::chat_review_ui::Action::Read(..)
@@ -1534,6 +1542,58 @@ impl App {
                         Err(e) => self.error = e,
                     }
                 }
+            }
+            Message::SetProjectCompleted(id, completed) if !self.busy => {
+                if let Some(store) = self
+                    .store
+                    .clone()
+                    .filter(|_| self._instance.is_some() && self.project.as_ref() == Some(&id))
+                {
+                    let day = completed.then(|| Local::now().date_naive().to_string());
+                    self.busy = true;
+                    let key = id.clone();
+                    return worker::job(
+                        store,
+                        move |s| s.set_project_completed(&id, day.as_deref()).map(|()| day),
+                        move |r| Message::ProjectCompleted(key.clone(), r),
+                    );
+                }
+            }
+            Message::ProjectCompleted(id, result) => {
+                self.busy = false;
+                match result {
+                    // Only the day changed, so it is shown as saved without reading the
+                    // screen again: another project opened meanwhile keeps its rows.
+                    Ok(day) => {
+                        self.snapshot
+                            .project_meta
+                            .entry(id)
+                            .or_default()
+                            .completed_on = day;
+                    }
+                    Err(e) => self.error = e,
+                }
+            }
+            Message::OpenGithub(id) => {
+                // The link is read again when pressed, so a button left from before an
+                // edit never opens the link that was replaced.
+                let Some(store) = self.store.clone() else {
+                    return Task::none();
+                };
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let url = store.project_meta(&id)?.github_url;
+                            if url.is_empty() {
+                                return Err("이 프로젝트에는 GitHub 저장소 링크가 없습니다.".into());
+                            }
+                            timeschedule_desktop::open_source_url(&url)
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::SourceDone,
+                );
             }
             Message::ScanChats => return self.scan_chats(),
             Message::ChatsScanned(result) => {
@@ -2364,6 +2424,7 @@ impl App {
                         Field::EntryKind(v) => e.form.entry_kind = v,
                         Field::Source(v) => e.form.source_url = v,
                         Field::Repo(v) => e.form.repo_path = v,
+                        Field::GithubUrl(v) => e.form.github_url = v,
                         Field::Start(v) => e.form.start = v,
                         Field::End(v) => e.form.end = v,
 
@@ -4431,6 +4492,26 @@ mod tests {
             app.notice
         );
         assert!(!app.daily_retry_after_scan, "only an automatic job retries");
+    }
+    #[test]
+    fn the_project_editor_keeps_a_github_link_and_refuses_another_address_before_saving() {
+        let (_dir, app) = scanning_app();
+        let store = app.store.clone().unwrap();
+        let mut form = Form::new(Kind::Project, String::new(), None);
+        form.title = "링크".into();
+        form.github_url = "https://example.com/o/r".into();
+        assert!(form.save(&store).is_err());
+        assert!(store.list_projects().unwrap().is_empty(), "nothing written");
+        form.github_url = " https://github.com/o/r/ ".into();
+        form.save(&store).unwrap();
+        let project = store.list_projects().unwrap().remove(0);
+        // Reopened, the editor shows the stored link; blanking it removes it.
+        let mut opened = worker::hydrate_form(&store, Form::project(project)).unwrap();
+        assert_eq!(opened.github_url, "https://github.com/o/r");
+        opened.github_url.clear();
+        opened.save(&store).unwrap();
+        let id = opened.id.unwrap();
+        assert_eq!(store.project_meta(&id).unwrap().github_url, "");
     }
     #[test]
     fn the_folder_dialog_fills_the_open_project_editor_and_a_cancel_changes_nothing() {

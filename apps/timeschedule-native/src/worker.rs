@@ -39,6 +39,8 @@ pub struct Snapshot {
     pub entry_totals: HashMap<String, u32>,
     /// What each project card shows, by project ID; read only when `Scope::cards`.
     pub project_cards: HashMap<String, ProjectCard>,
+    /// Each project's GitHub link and completion date, by project ID.
+    pub project_meta: HashMap<String, timeschedule_core::project_meta::ProjectMeta>,
 }
 /// A project's record count, latest record date and whether its chats are captured.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -167,6 +169,7 @@ pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
     let project_cards = project_cards(store, scope, &projects)?;
     Ok(Snapshot {
         project_cards,
+        project_meta: store.all_project_meta()?,
         days,
         widget_days,
         today,
@@ -221,7 +224,10 @@ pub fn hydrate_form(store: &Storage, mut form: Form) -> Result<Form, String> {
                     .unwrap_or_else(|| "10:00".into());
                 form.task_version = Some(value);
             }
-            Kind::Project => form.project_short_name = store.project_short_name(&id)?,
+            Kind::Project => {
+                form.project_short_name = store.project_short_name(&id)?;
+                form.github_url = store.project_meta(&id)?.github_url;
+            }
             Kind::Event => form = Form::event(store.get_event(&id)?),
             Kind::Note => {}
         }

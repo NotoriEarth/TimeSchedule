@@ -48,6 +48,8 @@ pub struct Form {
     /// A record's typed time of day (`HH:mm`, KST). Blank means unknown.
     pub time: String,
     pub project_short_name: String,
+    /// The project's GitHub link, `https://github.com/<owner>/<repo>` or blank.
+    pub github_url: String,
     pub entry_version: Option<EntryEdit>,
     pub task_version: Option<TaskEdit>,
     pub hydrated: bool,
@@ -74,6 +76,7 @@ impl Form {
             short_title: String::new(),
             time: String::new(),
             project_short_name: String::new(),
+            github_url: String::new(),
             entry_version: None,
             task_version: None,
             hydrated: false,
@@ -178,7 +181,7 @@ impl Form {
                 )
                 .map(|_| ()),
             Kind::Project => store
-                .save_calendar_project(
+                .save_project_with_link(
                     ProjectInput {
                         id: self.id.clone(),
                         title: self.title.clone(),
@@ -186,6 +189,7 @@ impl Form {
                         repo_path: self.repo_path.clone(),
                     },
                     &self.project_short_name,
+                    &self.github_url,
                 )
                 .map(|_| ()),
             Kind::Note => store
