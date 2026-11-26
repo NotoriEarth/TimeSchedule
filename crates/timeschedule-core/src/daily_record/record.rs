@@ -80,10 +80,10 @@ quote는 그 블록의 글에서 한 군데를 글자 그대로 옮긴다. 100�
 fn evidence_schema() -> Value {
     json!({"type": "array", "items": {"type": "integer"}})
 }
-fn text_or_null() -> Value {
+pub(crate) fn text_or_null() -> Value {
     json!({"type": ["string", "null"]})
 }
-fn object(properties: Value) -> Value {
+pub(crate) fn object(properties: Value) -> Value {
     let required: Vec<String> = properties
         .as_object()
         .expect("properties")
@@ -136,7 +136,7 @@ pub fn prompt(transcript: &DayTranscript) -> String {
 /// Whether `value` has the shape `schema` asks for, for the parts of JSON Schema that
 /// `schema()` uses: `type` (one or a list), `enum`, `items`, and objects whose keys are
 /// all required and closed. `at` names the place for the error.
-fn conforms(value: &Value, schema: &Value, at: &str) -> Result<(), String> {
+pub(crate) fn conforms(value: &Value, schema: &Value, at: &str) -> Result<(), String> {
     let kind = match value {
         Value::Null => "null",
         Value::Bool(_) => "boolean",
@@ -735,7 +735,7 @@ pub enum Outcome {
     Busy { path: PathBuf },
 }
 
-fn text(e: io::Error) -> String {
+pub(crate) fn text(e: io::Error) -> String {
     e.to_string()
 }
 
@@ -752,34 +752,36 @@ fn day_dir(vault: &Path, transcript: &DayTranscript) -> Result<PathBuf, String> 
 
 /// Stops at a record file that is a link. Read through, a link to the latest record
 /// would pass for a kept revision that holds the same bytes, and the next record
-/// would then be the only one either name reads.
-fn refuse_link(path: &Path) -> Result<(), String> {
+/// would then be the only one either name reads. The project record keeps its files
+/// by the same rules.
+pub(crate) fn refuse_link(path: &Path) -> Result<(), String> {
     if is_link(path).map_err(text)? {
         return Err(format!(
-            "하루 기록 파일({})이 링크입니다. 링크를 거쳐 읽거나 쓰지 않고 멈췄습니다. 파일을 확인해 주세요.",
+            "기록 파일({})이 링크입니다. 링크를 거쳐 읽거나 쓰지 않고 멈췄습니다. 파일을 확인해 주세요.",
             path.display()
         ));
     }
     Ok(())
 }
 
-/// The latest kept record of a day: its bytes, and the two values the next run needs.
-/// Only those two are read, so a record of an older shape can still be followed.
-struct Latest {
-    bytes: Vec<u8>,
-    revision: u32,
+/// The latest kept record: its bytes, and the two values the next run needs. Only
+/// those two are read (`revision` and `input.fingerprint`), so a record of an older
+/// shape can still be followed.
+pub(crate) struct Latest {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) revision: u32,
     fingerprint: String,
 }
 
 impl Latest {
     /// Whether this record was made from the input with `fingerprint`: asking the model
     /// again would be asking the same question.
-    fn made_from(&self, fingerprint: &str) -> bool {
+    pub(crate) fn made_from(&self, fingerprint: &str) -> bool {
         self.fingerprint == fingerprint
     }
 }
 
-fn read_latest(path: &Path) -> Result<Option<Latest>, String> {
+pub(crate) fn read_latest(path: &Path) -> Result<Option<Latest>, String> {
     #[derive(Deserialize)]
     struct Kept {
         revision: u32,
@@ -796,7 +798,7 @@ fn read_latest(path: &Path) -> Result<Option<Latest>, String> {
         Err(e) => return Err(text(e)),
     };
     let kept: Kept = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("이전 하루 기록을 읽지 못했습니다({}): {e}", path.display()))?;
+        .map_err(|e| format!("이전 기록을 읽지 못했습니다({}): {e}", path.display()))?;
     Ok(Some(Latest {
         bytes,
         revision: kept.revision,
@@ -822,7 +824,7 @@ struct UsageLine<'a> {
     message: Option<String>,
 }
 
-fn tenths(seconds: f64) -> f64 {
+pub(crate) fn tenths(seconds: f64) -> f64 {
     (seconds * 10.0).round() / 10.0
 }
 
@@ -835,7 +837,7 @@ fn tenths(seconds: f64) -> f64 {
 /// project's `.usage.lock`, or a line another run cut short in between would be joined
 /// to this one. This lock is waited for: it is held for one small write, and a run that
 /// gave up instead would lose the line of a call that was made.
-fn log_usage(dir: &Path, line: &UsageLine) -> Result<(), String> {
+pub(crate) fn log_usage(dir: &Path, line: &impl Serialize) -> Result<(), String> {
     use io::{Read, Seek, SeekFrom};
     let path = dir.join("usage.jsonl");
     let result = (|| {
@@ -1017,7 +1019,8 @@ pub fn summarize(
         decisions: body.decisions,
         sources: transcript.sources.iter().map(SourceKept::from).collect(),
     };
-    keep(&dir, &path, previous.as_ref(), &record)
+    let bytes = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
+    keep(&dir, &path, &date, previous.as_ref(), &bytes)
         .map_err(|e| failed("save_failed", &reply.usage, reply.seconds, e))?;
     log("saved", &reply.usage, reply.seconds, None)
         .map_err(|e| format!("하루 기록은 저장했습니다({}). {e}", path.display()))?;
@@ -1029,7 +1032,7 @@ pub fn summarize(
 }
 
 /// Writes `bytes` whole to a temporary file in `dir` and renames it to `to`.
-fn publish(dir: &Path, to: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn publish(dir: &Path, to: &Path, bytes: &[u8]) -> Result<(), String> {
     let temp = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| {
         let mut file = fs::File::create_new(&temp)?;
@@ -1044,12 +1047,17 @@ fn publish(dir: &Path, to: &Path, bytes: &[u8]) -> Result<(), String> {
     result.map_err(text)
 }
 
-/// Makes sure `<date>.r<revision>.json` holds the latest record as it is now. A file
+/// Makes sure `<stem>.r<revision>.json` holds the latest record as it is now. A file
 /// of that name that already holds the same bytes is a run that stopped after this
 /// step, and is taken as done. One that holds anything else is never replaced: that is
 /// an error, and so is one that is a link. With `write` false the file is only looked at.
-fn set_aside(dir: &Path, date: &str, latest: &Latest, write: bool) -> Result<(), String> {
-    let aside = dir.join(format!("{date}.r{}.json", latest.revision));
+pub(crate) fn set_aside(
+    dir: &Path,
+    stem: &str,
+    latest: &Latest,
+    write: bool,
+) -> Result<(), String> {
+    let aside = dir.join(format!("{stem}.r{}.json", latest.revision));
     refuse_link(&aside)?;
     match fs::read(&aside) {
         Ok(kept) if kept == latest.bytes => Ok(()),
@@ -1067,18 +1075,19 @@ fn set_aside(dir: &Path, date: &str, latest: &Latest, write: bool) -> Result<(),
     }
 }
 
-/// Publishes `record` as the day's file, after the record it replaces is set aside.
-/// The caller holds the day's lock.
+/// Publishes `bytes` as the record file `path` (`<dir>/<stem>.json`), after the
+/// record it replaces is set aside. The caller holds the record's lock.
 ///
 /// The lock keeps out other runs, not a person or a program that puts a file there
-/// while the model is answering (a restored backup, say). So the day's file is read
-/// again here: if it is not what the run read before the call, nothing is published,
-/// and the file that is there now stays as it is.
-fn keep(
+/// while the model is answering (a restored backup, say). So the file is read again
+/// here: if it is not what the run read before the call, nothing is published, and
+/// the file that is there now stays as it is.
+pub(crate) fn keep(
     dir: &Path,
     path: &Path,
+    stem: &str,
     previous: Option<&Latest>,
-    record: &DailyRecord,
+    bytes: &[u8],
 ) -> Result<(), String> {
     let now = read_latest(path)?;
     let same = match (previous, &now) {
@@ -1088,15 +1097,14 @@ fn keep(
     };
     if !same {
         return Err(format!(
-            "모델을 기다리는 동안 하루 기록({})이 바뀌었습니다. 새 판을 쓰지 않았습니다. 다시 실행해 주세요.",
+            "모델을 기다리는 동안 기록({})이 바뀌었습니다. 새 판을 쓰지 않았습니다. 다시 실행해 주세요.",
             path.display()
         ));
     }
     if let Some(previous) = previous {
-        set_aside(dir, &record.date, previous, true)?;
+        set_aside(dir, stem, previous, true)?;
     }
-    let bytes = serde_json::to_vec_pretty(record).map_err(|e| e.to_string())?;
-    publish(dir, path, &bytes)
+    publish(dir, path, bytes)
 }
 
 impl DailyRecord {

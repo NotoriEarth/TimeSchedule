@@ -144,6 +144,16 @@ pub struct RecordRow {
 }
 
 /// Where to go on from: the same command with `--offset`.
+/// A record read whole, for a reader that takes all of a project's records at once.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WholeRecord {
+    pub id: String,
+    pub date: String,
+    pub origin: Origin,
+    pub title: String,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Offset {
     pub offset: usize,

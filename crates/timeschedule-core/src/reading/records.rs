@@ -244,6 +244,48 @@ impl Storage {
         })
     }
 
+    /// Every record of `project` from `origins`, whole, oldest first. One statement reads
+    /// them, so a record moved to another project or edited meanwhile is either all in
+    /// or all out, and none is read twice.
+    pub fn read_whole_records(
+        &self,
+        project: &str,
+        origins: &[Origin],
+    ) -> Result<Vec<WholeRecord>, String> {
+        validate_id(project)?;
+        let keys = format!(
+            ",{},",
+            origins
+                .iter()
+                .map(|o| o.key())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let c = self.connection()?;
+        let mut q = c
+            .prepare(&format!(
+                "SELECT id,date,origin,title,body FROM (SELECT e.id AS id,e.date AS date,
+                    {ORIGIN} AS origin,e.title AS title,e.body AS body
+                    FROM diary_entries e WHERE e.project_id=?1)
+                 WHERE instr(?2, ','||origin||',')>0 ORDER BY date,id"
+            ))
+            .map_err(database_error)?;
+        let rows = q
+            .query_map(rusqlite::params![project, keys], |r| {
+                Ok(WholeRecord {
+                    id: r.get(0)?,
+                    date: r.get(1)?,
+                    origin: Origin::of(&r.get::<_, String>(2)?),
+                    title: r.get(3)?,
+                    body: r.get(4)?,
+                })
+            })
+            .map_err(database_error)?
+            .collect::<Result<_, _>>()
+            .map_err(database_error)?;
+        Ok(rows)
+    }
+
     /// One record of a project, its body from `offset` characters on, up to `budget`.
     ///
     /// `document` finds the original `record.md` of an agent record's work: its path,
