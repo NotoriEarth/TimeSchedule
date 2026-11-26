@@ -5183,7 +5183,7 @@ fn a_project_shows_capture_only_from_its_own_rows() {
 }
 
 #[test]
-fn deleting_the_open_project_shows_every_project_s_records() {
+fn deleting_the_open_project_shows_the_remaining_cards() {
     let mut app = calendar_record_fixture();
     let store = app.store.clone().unwrap();
     let gone = store
@@ -5199,9 +5199,14 @@ fn deleting_the_open_project_shows_every_project_s_records() {
     store.delete_project(&gone.id).unwrap();
     run_message(&mut app, Message::Load);
     assert_eq!(app.project, None);
+    // 모든 프로젝트 now shows the cards read again: the deleted one is gone, the other
+    // one is there with its record counted.
+    let labels = calendar_texts(crate::views::projects(&app), Size::new(1160., 1600.));
+    assert!(!labels.iter().any(|s| s == "지울 프로젝트"), "{labels:?}");
+    assert!(labels.iter().any(|s| s == "TS"), "{labels:?}");
     assert!(
-        app.snapshot.entries.iter().any(|e| e.title == "연동기록"),
-        "the other project's record shows under 모든 프로젝트"
+        labels.iter().any(|s| s.starts_with("기록 1건")),
+        "{labels:?}"
     );
 }
 
@@ -5468,4 +5473,161 @@ fn all_projects_never_lists_rows_read_for_a_calendar() {
     ));
     let labels = calendar_texts(crate::views::projects(&app), Size::new(1160., 1600.));
     assert!(!labels.iter().any(|s| s == "+ 연동기록"), "{labels:?}");
+}
+
+#[test]
+fn all_projects_shows_a_card_per_project_that_opens_it() {
+    let mut app = calendar_record_fixture();
+    let store = app.store.clone().unwrap();
+    let dir = crate::record_inbox::tests::TestDir::new();
+    let captured = store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: None,
+            title: "수집 프로젝트".into(),
+            description: "채팅을 모으는 프로젝트".into(),
+            repo_path: dir.0.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+    // The capture is on for an empty folder: no session is read.
+    store.set_chat_capture(&captured.id, true).unwrap();
+    run_message(&mut app, Message::Navigate(Page::Projects));
+    let size = Size::new(1160., 1600.);
+    let labels = calendar_texts(crate::views::projects(&app), size);
+    let heading = crate::views::date_heading(
+        &app.selected.to_string(),
+        chrono::Datelike::year(&chrono::Local::now()),
+    );
+    for label in [
+        "TS".to_owned(),
+        format!("기록 1건 · 마지막 {heading}"),
+        "저장소 미연결".to_owned(),
+        "수집 프로젝트".to_owned(),
+        "채팅을 모으는 프로젝트".to_owned(),
+        "아직 기록이 없습니다".to_owned(),
+        "저장소 연결됨".to_owned(),
+        "수집 켜짐".to_owned(),
+    ] {
+        assert!(labels.iter().any(|s| *s == label), "{label}: {labels:?}");
+    }
+    // The records themselves live in 기록 보관함, not here.
+    assert!(!labels.iter().any(|s| s == "+ 연동기록"), "{labels:?}");
+    // A card opens its project.
+    let target = calendar_text_bounds(crate::views::projects(&app), size)
+        .into_iter()
+        .find(|(s, _)| s == "수집 프로젝트")
+        .unwrap()
+        .1;
+    let messages = click_text(crate::views::projects(&app), size, target);
+    assert!(
+        matches!(messages.as_slice(), [Message::Project(Some(id))] if *id == captured.id),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn project_cards_wait_for_their_own_read_and_say_when_there_are_none() {
+    let mut app = fixture();
+    run_message(&mut app, Message::Navigate(Page::Projects));
+    let size = Size::new(1160., 1600.);
+    let labels = calendar_texts(crate::views::projects(&app), size);
+    assert!(
+        labels.iter().any(|s| s == crate::views::NO_PROJECTS),
+        "{labels:?}"
+    );
+    // Counts read for a calendar are not passed off as this screen's.
+    let mut app = calendar_record_fixture();
+    run_message(&mut app, Message::Navigate(Page::Month));
+    let _ = app.update(Message::Navigate(Page::Projects));
+    let _ = app.update(Message::Loaded(
+        app.view_generation,
+        Err("읽기 실패".into()),
+    ));
+    let labels = calendar_texts(crate::views::projects(&app), size);
+    assert!(labels.iter().any(|s| s == "기록 확인 중"), "{labels:?}");
+}
+
+#[test]
+fn the_record_menu_is_named_after_its_screen() {
+    let mut app = fixture();
+    run_message(&mut app, Message::Navigate(Page::Settings));
+    let labels = calendar_texts(crate::shell::view(&app), Size::new(1160., 1600.));
+    assert!(labels.iter().any(|s| s == "기록 보관함"), "{labels:?}");
+    assert!(!labels.iter().any(|s| s == "개발 기록"), "{labels:?}");
+}
+
+#[test]
+fn project_cards_never_pass_a_failed_read_off_as_current() {
+    let mut app = fixture();
+    let store = app.store.clone().unwrap();
+    let project = store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: None,
+            title: "새 프로젝트".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap();
+    run_message(&mut app, Message::Navigate(Page::Projects));
+    let size = Size::new(1160., 1600.);
+    let labels = |app: &App| calendar_texts(crate::views::projects(app), size);
+    assert!(labels(&app).iter().any(|s| s == "아직 기록이 없습니다"));
+    // The first record is saved; the read after it fails: the old "none" is not shown.
+    let mut form = Form::new(Kind::Entry, app.selected.to_string(), Some(project.id));
+    form.title = "첫 기록".into();
+    form.save(&store).unwrap();
+    let _ = app.update(Message::Load);
+    let _ = app.update(Message::Loaded(
+        app.view_generation,
+        Err("읽기 실패".into()),
+    ));
+    let shown = labels(&app);
+    assert!(
+        !shown.iter().any(|s| s == "아직 기록이 없습니다"),
+        "{shown:?}"
+    );
+    assert!(shown.iter().any(|s| s == "기록 확인 중"), "{shown:?}");
+    // The next read succeeds and counts it.
+    run_message(&mut app, Message::Load);
+    assert!(labels(&app).iter().any(|s| s.starts_with("기록 1건")));
+    // A first read that fails does not claim there are no projects.
+    let mut app = fixture();
+    let _ = app.update(Message::Navigate(Page::Projects));
+    let _ = app.update(Message::Loaded(
+        app.view_generation,
+        Err("읽기 실패".into()),
+    ));
+    assert!(!labels(&app).iter().any(|s| s == crate::views::NO_PROJECTS));
+}
+
+#[test]
+fn a_project_card_counts_the_same_records_as_its_list() {
+    let mut app = fixture();
+    let store = app.store.clone().unwrap();
+    let project = store
+        .save_project(timeschedule_core::diary::ProjectInput {
+            id: None,
+            title: "옛 기록".into(),
+            description: String::new(),
+            repo_path: String::new(),
+        })
+        .unwrap();
+    // A record dated before the lists' range is not counted by the card either.
+    for (date, title) in [("1899-12-31", "범위 밖"), ("2026-10-29", "범위 안")] {
+        let mut form = Form::new(Kind::Entry, date.into(), Some(project.id.clone()));
+        form.title = title.into();
+        form.save(&store).unwrap();
+    }
+    run_message(&mut app, Message::Navigate(Page::Projects));
+    let card = app
+        .snapshot
+        .project_cards
+        .get(&project.id)
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        (card.records, card.last.as_deref()),
+        (1, Some("2026-10-29"))
+    );
+    run_message(&mut app, Message::Project(Some(project.id)));
+    assert_eq!(app.snapshot.entries.len(), 1);
 }

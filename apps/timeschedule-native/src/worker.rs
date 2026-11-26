@@ -19,6 +19,8 @@ pub struct Scope {
     pub widget_to: String,
     pub today: String,
     pub project: Option<String>,
+    /// Whether the project cards are read: only for 모든 프로젝트 on the projects screen.
+    pub cards: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -35,6 +37,47 @@ pub struct Snapshot {
     pub entries: Vec<EntrySummary>,
     /// Every record of each listed date, including ones not loaded yet.
     pub entry_totals: HashMap<String, u32>,
+    /// What each project card shows, by project ID; read only when `Scope::cards`.
+    pub project_cards: HashMap<String, ProjectCard>,
+}
+/// A project's record count, latest record date and whether its chats are captured.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProjectCard {
+    pub records: u32,
+    pub last: Option<String>,
+    pub capturing: bool,
+}
+/// The cards of every project, counted over the scope's range like its record list.
+/// The capture is looked up only for a project with a repository, the only kind that
+/// can capture.
+/// It takes the same project list the snapshot shows, so every listed card has its data.
+fn project_cards(
+    store: &Storage,
+    scope: &Scope,
+    projects: &[timeschedule_core::diary::Project],
+) -> Result<HashMap<String, ProjectCard>, String> {
+    if !scope.cards {
+        return Ok(HashMap::new());
+    }
+    let totals = store.project_record_totals(&scope.from, &scope.to)?;
+    projects
+        .iter()
+        .map(|p| {
+            let (records, last) = totals
+                .get(&p.id)
+                .map(|(n, d)| (*n, Some(d.clone())))
+                .unwrap_or((0, None));
+            let capturing = !p.repo_path.is_empty() && store.chat_capture_enabled(&p.id)?;
+            Ok((
+                p.id.clone(),
+                ProjectCard {
+                    records,
+                    last,
+                    capturing,
+                },
+            ))
+        })
+        .collect()
 }
 /// A page of list rows and the full count of each date they cover.
 pub fn entry_page(
@@ -120,12 +163,15 @@ pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
             .unwrap_or_default()
     };
     let (entries, entry_totals) = entry_page(store, scope, 0)?;
+    let projects = store.list_projects()?;
+    let project_cards = project_cards(store, scope, &projects)?;
     Ok(Snapshot {
+        project_cards,
         days,
         widget_days,
         today,
         categories: store.list_categories()?,
-        projects: store.list_projects()?,
+        projects,
         reviewable_chats: scope
             .project
             .as_deref()
@@ -873,6 +919,7 @@ mod tests {
             widget_to: "2026-10-31".into(),
             today: "2026-10-29".into(),
             project: None,
+            cards: false,
         }
     }
     #[test]

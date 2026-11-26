@@ -66,7 +66,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         (Page::Month, Icon::Calendar, "월간"),
         (Page::Week, Icon::Week, "주간"),
         (Page::Projects, Icon::Folder, "프로젝트"),
-        (Page::Records, Icon::Record, "개발 기록"),
+        (Page::Records, Icon::Record, "기록 보관함"),
         (Page::Tasks, Icon::Task, "날짜 미정"),
         (Page::Notes, Icon::Note, "노트"),
     ] {
