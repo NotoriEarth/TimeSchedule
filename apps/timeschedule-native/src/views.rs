@@ -578,17 +578,30 @@ fn project_picker(app: &App) -> Element<'_, Message> {
         .width(220)
         .into()
 }
-/// "label ● state": a coloured dot for on or off and the state in words.
-fn status<'a>(app: &App, label: &'a str, on: bool, state: &'a str) -> Element<'a, Message> {
+/// "label ● state": a coloured dot for on or off and the state in words. A blank
+/// label leaves only the dot and the state.
+fn status<'a>(
+    app: &App,
+    label: &'a str,
+    on: bool,
+    state: impl Into<String>,
+) -> Element<'a, Message> {
     let p = theme::palette(app.preferences.theme);
-    row![
-        text(label).size(13),
-        text("●").size(11).color(if on { p.green } else { p.muted }),
-        text(state).size(13),
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center)
-    .into()
+    let mut line = Row::new().spacing(6).align_y(Alignment::Center);
+    if !label.is_empty() {
+        line = line.push(text(label).size(13));
+    }
+    line.push(text("●").size(11).color(if on { p.green } else { p.muted }))
+        .push(text(state.into()).size(13))
+        .into()
+}
+/// "완료 · 12월 1일" for a completion date; the year shows only when it is not this one.
+pub(crate) fn completed_label(day: &str) -> String {
+    match NaiveDate::parse_from_str(day, "%Y-%m-%d") {
+        Ok(d) if d.year() == Local::now().year() => format!("완료 · {}월 {}일", d.month(), d.day()),
+        Ok(d) => format!("완료 · {}년 {}월 {}일", d.year(), d.month(), d.day()),
+        Err(_) => "완료".into(),
+    }
 }
 /// The two lines on top of a project: what it is with its edit button, then its
 /// repository and chat capture, each as a state in words and an action as a button.
@@ -606,10 +619,29 @@ fn project_info<'a>(
             .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
             .into()
     };
-    // A long description wraps below; the edit button stays on its first line.
+    let meta = app.snapshot.project_meta.get(&p.id);
+    let completed = meta.and_then(|m| m.completed_on.as_deref());
+    let state: Element<'_, Message> = match completed {
+        Some(day) => status(app, "", true, completed_label(day)),
+        None => status(app, "", false, "진행 중"),
+    };
+    // A long description wraps below; the edit button and the state stay on its
+    // first line.
     let about = row![
         description,
         control("프로젝트 수정", Message::EditForm(Form::project(p.clone()))),
+        state,
+        control(
+            if completed.is_some() {
+                "진행 중으로"
+            } else {
+                "완료로 표시"
+            },
+            Message::SetProjectCompleted(p.id.clone(), completed.is_none()),
+        )
+        .on_press_maybe(
+            (!app.busy).then(|| Message::SetProjectCompleted(p.id.clone(), completed.is_none())),
+        ),
     ]
     .spacing(10)
     .align_y(Alignment::Start);
@@ -619,15 +651,16 @@ fn project_info<'a>(
     // so a kept older state could say the opposite of what was just saved.)
     let known = app.entries_project.as_ref() == Some(&p.id);
     let watching = known && app.snapshot.chat_capture_project.as_ref() == Some(&p.id);
-    let mut sources = Row::new()
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .push(status(
-            app,
-            "Git 저장소",
-            linked,
-            if linked { "연결됨" } else { "미연결" },
-        ));
+    let mut sources = Row::new().spacing(10).align_y(Alignment::Center);
+    if meta.is_some_and(|m| !m.github_url.is_empty()) {
+        sources = sources.push(control("GitHub", Message::OpenGithub(p.id.clone())));
+    }
+    sources = sources.push(status(
+        app,
+        "Git 저장소",
+        linked,
+        if linked { "연결됨" } else { "미연결" },
+    ));
     if linked {
         sources = sources.push(
             text(&p.repo_path)
@@ -764,7 +797,22 @@ fn project_cards(app: &App) -> Element<'_, Message> {
     let dot = |on: bool| text("●").size(10).color(if on { p.green } else { p.muted });
     let mut cards = Row::new().spacing(12);
     for project in &app.snapshot.projects {
-        let mut body = column![text(&project.title).size(16)].spacing(6);
+        let mut heading = row![text(&project.title).size(16).width(Length::Fill)]
+            .spacing(8)
+            .align_y(Alignment::Center);
+        if let Some(day) = app
+            .snapshot
+            .project_meta
+            .get(&project.id)
+            .and_then(|m| m.completed_on.as_deref())
+        {
+            heading = heading.push(
+                row![dot(true), quiet(completed_label(day))]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+            );
+        }
+        let mut body = column![heading].spacing(6);
         if !project.description.trim().is_empty() {
             body = body.push(
                 text(project.description.trim())
@@ -1359,6 +1407,17 @@ pub(crate) fn editor_view(app: &App) -> Element<'_, Message> {
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center)
+            ]
+            .spacing(5),
+        );
+        fields = fields.push(
+            column![
+                quiet("GitHub 저장소 링크"),
+                text_input("https://github.com/<소유자>/<저장소>", &form.github_url)
+                    .on_input(|v| Message::Field(Field::GithubUrl(v)))
+                    .padding(8)
+                    .size(14)
+                    .width(Length::Fill),
             ]
             .spacing(5),
         );
