@@ -102,7 +102,7 @@ fn origins(options: &HashMap<&str, &str>) -> Result<Vec<Origin>, String> {
 }
 
 /// The app's database, opened for reading only. The data folder is not made.
-fn database(options: &HashMap<&str, &str>) -> Result<Storage, String> {
+pub(crate) fn database(options: &HashMap<&str, &str>) -> Result<Storage, String> {
     let dir = paths::data_dir(options.get("--data-dir").map(PathBuf::from), true)?;
     Storage::open_read_only(dir.join("schedule.db"))
 }

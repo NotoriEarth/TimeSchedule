@@ -9,6 +9,7 @@ pub mod diary;
 pub mod evidence;
 pub mod portfolio;
 pub mod project_meta;
+pub mod project_record;
 pub mod project_records;
 pub mod reading;
 mod search;

@@ -91,7 +91,7 @@ test('record daily --dry-run writes the transcript and the result, and makes no 
       ['--dry-run', '--transcript', record, '--result', result]]) {
       const kept = daily(...args);
       assert.equal(kept.status, 1, kept.stderr || kept.stdout);
-      assert.match(JSON.parse(kept.stdout).message, /daily와 originals 폴더 밖/);
+      assert.match(JSON.parse(kept.stdout).message, /daily, originals, project 폴더 밖/);
       assert.equal(readFileSync(record, 'utf8'), '앞서 만든 기록');
     }
   }

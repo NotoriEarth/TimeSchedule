@@ -138,6 +138,13 @@ pub fn document_in(root: &Path, work_id: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+/// The document store a record state folder names, as `originals_vault` would find it
+/// once that folder is registered, or `None` when it names none that can be found.
+pub(crate) fn state_vault(state_dir: &Path) -> Option<PathBuf> {
+    let root = vault_root(state_dir, home_dir().as_deref()).ok()?;
+    std::fs::canonicalize(root).ok()
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)

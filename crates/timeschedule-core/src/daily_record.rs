@@ -329,7 +329,7 @@ fn session_id(entry: &Entry) -> &str {
 }
 
 /// The text with every kind of line end as `\n`, so a line of it is a line to any reader.
-fn plain_lines(text: &str) -> String {
+pub(crate) fn plain_lines(text: &str) -> String {
     text.replace("\r\n", "\n").replace(
         ['\r', '\u{b}', '\u{c}', '\u{85}', '\u{2028}', '\u{2029}'],
         "\n",
@@ -337,7 +337,7 @@ fn plain_lines(text: &str) -> String {
 }
 
 /// The text on one line.
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     plain_lines(text).replace('\n', " ")
 }
 
