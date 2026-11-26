@@ -211,16 +211,16 @@ pub struct DayTranscript {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectFile {
-    project_id: String,
-    title: String,
+pub(crate) struct ProjectFile {
+    pub(crate) project_id: String,
+    pub(crate) title: String,
     repo_key: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Entry {
-    file: String,
+pub(crate) struct Entry {
+    pub(crate) file: String,
     tool: String,
     session: String,
     client: String,
@@ -238,7 +238,7 @@ fn linked(path: &Path) -> Result<bool, String> {
 /// The project's folder in `<vault>/originals`. `project` is a project ID or an absolute
 /// folder path of the project. Like the code that keeps the files, it reads nothing
 /// through a link: a linked folder or `project.json` is not opened to see whose it is.
-fn project_dir(vault: &Path, project: &str) -> Result<(PathBuf, ProjectFile), String> {
+pub(crate) fn project_dir(vault: &Path, project: &str) -> Result<(PathBuf, ProjectFile), String> {
     let originals = vault.join("originals");
     if linked(&originals)? {
         return Err(LINKED.into());
@@ -363,7 +363,7 @@ impl Block {
 
 /// The kept file of `entry`, decompressed. Both readers of kept files open them here, so
 /// the rules about which path may be read are one.
-fn open_kept(dir: &Path, entry: &Entry) -> Result<impl std::io::BufRead, String> {
+pub(crate) fn open_kept(dir: &Path, entry: &Entry) -> Result<impl std::io::BufRead, String> {
     let path = kept_path(dir, &entry.file).map_err(|e| e.to_string())?;
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let decoder = zstd::stream::read::Decoder::new(file).map_err(|e| e.to_string())?;
@@ -371,7 +371,7 @@ fn open_kept(dir: &Path, entry: &Entry) -> Result<impl std::io::BufRead, String>
 }
 
 /// The rows of the project's `index.jsonl`: every kept file, not only dialogue.
-fn read_index(dir: &Path) -> Result<Vec<Entry>, String> {
+pub(crate) fn read_index(dir: &Path) -> Result<Vec<Entry>, String> {
     let index = dir.join("index.jsonl");
     if linked(&index)? {
         return Err(LINKED.into());

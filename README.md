@@ -1,6 +1,8 @@
 # TimeSchedule
 
-## 최신 앱 · TimeSchedule 0.40.1
+## 최신 앱 · TimeSchedule 0.41.0
+
+0.41.0은 **기록과 원문을 명령줄로 읽습니다.** 포트폴리오를 만들 때 Codex나 Claude Code 같은 에이전트가 `TimeSchedule.exe record projects`, `list`, `search --query`, `show --id`, `transcript`, `original`로 프로젝트의 기록을 찾고, 하루 정리의 근거가 된 대화와 보관된 원문의 줄까지 따라가 읽습니다. 읽기만 하고 모델을 부르지 않으며 앱이 켜져 있어도 됩니다. 채팅 원문에 붙여 넣은 내용과 명령 출력도 `original`로 그대로 나옵니다. [기록 읽기 명령](docs/record-reading.md)을 참고하세요.
 
 0.40.1은 **본문이 정확히 8 MiB인 대화 행도 읽습니다.** 하루 대화록이 한 행의 크기를 줄 끝까지 세어, 한도에 딱 맞는 행(Windows 줄 끝이면 1바이트 모자란 행부터)을 너무 길다고 버리던 문제를 고쳤습니다. 이 PC의 대화 보관본에는 그런 행이 없어, 지금 있는 하루 기록 중 바뀌는 날은 없습니다.
 
