@@ -556,11 +556,12 @@ fn reading_takes_no_lock_and_leaves_the_data_and_the_store_as_they_were() {
     assert_eq!(listing(&f.vault), store_before);
     drop(owner);
 
-    // A result file is written only outside the store and the data folder.
-    for inside in [
+    // A reading command takes no result file: it is refused wherever it is named, and
+    // nothing is written.
+    for named in [
         f.vault.join("daily").join("out.json"),
-        f.vault.join("out.json"),
         f.data.join("schedule.db"),
+        f.dir.0.join("out.json"),
     ] {
         let code = run(&[
             "record",
@@ -568,26 +569,16 @@ fn reading_takes_no_lock_and_leaves_the_data_and_the_store_as_they_were() {
             "--data-dir",
             f.data.to_str().unwrap(),
             "--result",
-            inside.to_str().unwrap(),
+            named.to_str().unwrap(),
         ]
         .map(String::from));
         assert_eq!(code, 1);
     }
     assert_eq!(std::fs::read(&db).unwrap(), before);
-    assert!(!f.vault.join("out.json").exists());
-    let outside = f.dir.0.join("out.json");
-    let code = run(&[
-        "record",
-        "list",
-        "--data-dir",
-        f.data.to_str().unwrap(),
-        "--result",
-        outside.to_str().unwrap(),
-    ]
-    .map(String::from));
-    assert_eq!(code, 0);
-    let written: Value = serde_json::from_slice(&std::fs::read(&outside).unwrap()).unwrap();
-    assert_eq!(written["total"], 3);
+    assert_eq!(listing(&f.vault), store_before);
+    assert!(!f.dir.0.join("out.json").exists());
+    let refused = f.read(&["list", "--result", "x.json"]).unwrap_err();
+    assert!(refused.contains("--result를 받지 않습니다"), "{refused}");
 
     // No data folder is made to read from.
     let missing = f.dir.0.join("no-data-folder");

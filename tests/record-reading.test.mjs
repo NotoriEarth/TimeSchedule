@@ -56,11 +56,13 @@ test('the reading commands print the dialogue and the original line, and make no
   assert.equal(past.status, 1);
   assert.match(JSON.parse(past.stdout).message, /3줄입니다/);
 
-  // A result inside the document store is refused and not written.
-  const inside = path.join(vault, 'out.json');
-  const refused = record('transcript', '--project', project, '--date', '2026-11-24', '--result', inside);
-  assert.equal(refused.status, 1);
-  assert.equal(existsSync(inside), false);
+  // A reading command takes no result file, wherever it is named.
+  for (const named of [path.join(vault, 'out.json'), path.join(root, 'out.json')]) {
+    const refused = record('transcript', '--project', project, '--date', '2026-11-24', '--result', named);
+    assert.equal(refused.status, 1);
+    assert.match(JSON.parse(refused.stdout).message, /--result를 받지 않습니다/);
+    assert.equal(existsSync(named), false);
+  }
 
   // The records are in the app's database, which is not there: the command says so.
   const list = record('list');

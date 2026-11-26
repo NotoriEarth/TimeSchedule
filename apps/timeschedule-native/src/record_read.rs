@@ -1,7 +1,7 @@
 //! The `record` commands that only read what the app keeps: projects, diary records and
 //! their evidence, the dialogue of a day, and lines of a kept original. They ask no
-//! model, take no lock, make no folder and write nothing but the `--result` file the
-//! caller names, so they run whether the app is open or not. See
+//! model, take no lock, make no folder and write no file, not even a `--result` file:
+//! the answer is what they print. So they run whether the app is open or not. See
 //! `docs/record-reading.md`.
 use serde::Serialize;
 use serde_json::Value;

@@ -6,7 +6,7 @@ use std::{
 use timeschedule_core::storage::Storage;
 use timeschedule_desktop::paths::{self, InstanceLock};
 
-const USAGE: &str = "record enqueue --input FILE | drain | status --work-id UUID --revision N | configure-local-chats --project UUID --enabled true/false | scan-local-chats | daily --project UUID|FOLDER [--dry-run] [--date YYYY-MM-DD] [--model NAME] [--transcript FILE] | projects | list [--project UUID|FOLDER] [--from DATE] [--to DATE] [--origin LIST] | search --query WORDS [list's filters] | show --id UUID [--evidence] | transcript --project UUID|FOLDER (--date DATE [--query WORDS | --file FILE --line N [--context K]] | --from DATE --to DATE --query WORDS) | original --project UUID|FOLDER --file FILE --line N [--lines K]; reading commands take [--offset N] [--max-chars N]; every command takes [--data-dir DIR] [--result FILE]";
+const USAGE: &str = "record enqueue --input FILE | drain | status --work-id UUID --revision N | configure-local-chats --project UUID --enabled true/false | scan-local-chats | daily --project UUID|FOLDER [--dry-run] [--date YYYY-MM-DD] [--model NAME] [--transcript FILE] | projects | list [--project UUID|FOLDER] [--from DATE] [--to DATE] [--origin LIST] | search --query WORDS [list's filters] | show --id UUID [--evidence] | transcript --project UUID|FOLDER (--date DATE [--query WORDS | --file FILE --line N [--context K]] | --from DATE --to DATE --query WORDS) | original --project UUID|FOLDER --file FILE --line N [--lines K]; reading commands take [--offset N] [--max-chars N] and print only; every command takes [--data-dir DIR], and all but the reading ones [--result FILE]";
 
 fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
     if args.len() < 2 || args[0] != "record" {
@@ -40,6 +40,14 @@ fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
             index += 1;
             continue;
         }
+        // A reading command writes nothing, not even a result file: its answer is what
+        // it prints.
+        let reading = crate::record_read::arguments(command).is_some();
+        if key == "--result" && reading {
+            return Err(
+                "읽기 명령은 --result를 받지 않습니다. 결과는 표준 출력으로만 나옵니다.".into(),
+            );
+        }
         if !["--data-dir", "--result"].contains(&key)
             && !extra.contains(&key)
             && !optional.contains(&key)
@@ -69,7 +77,7 @@ fn parse(args: &[String]) -> Result<(&str, HashMap<&str, &str>), String> {
 pub(crate) fn execute(args: &[String]) -> Result<serde_json::Value, String> {
     let (command, options) = parse(args)?;
     let store = document_store(command, &options);
-    let refused = refused_outputs(command, &options, store.as_ref());
+    let refused = refused_outputs(&options, store.as_ref());
     perform(command, &options, refused, store)
 }
 
@@ -236,11 +244,6 @@ fn within(path: &str, folder: &str) -> bool {
 /// the daily records of the document store at `vault`. The program keeps those two
 /// folders itself, and an output there could replace a record or a kept revision.
 fn in_kept_folders(vault: &Path, path: &str) -> bool {
-    in_folders(&[vault.join("daily"), vault.join("originals")], path)
-}
-
-/// Whether an output file named `path` would be written in one of `folders` or below it.
-fn in_folders(folders: &[PathBuf], path: &str) -> bool {
     let path = Path::new(path);
     // The file the output names may itself be a link: `place` follows it to where it
     // points, but writing replaces the name. So the name's own place, its folder
@@ -261,8 +264,8 @@ fn in_folders(folders: &[PathBuf], path: &str) -> bool {
         _ => None,
     };
     let places = [Some(place(path)), entry];
-    folders.iter().any(|folder| {
-        let folder = place(folder);
+    ["daily", "originals"].iter().any(|folder| {
+        let folder = place(&vault.join(folder));
         places.iter().flatten().any(|at| within(at, &folder))
     })
 }
@@ -284,19 +287,13 @@ fn document_store(command: &str, options: &HashMap<&str, &str>) -> Option<Store>
     })
 }
 
-/// Why `daily` or a reading command must not write the files its arguments name, if it
-/// must not. `store` is `document_store` of the run. Such a run writes neither file,
-/// the result included: a refusal must leave a transcript, a record or a kept revision
-/// as it was. This is asked once, before anything is written: writing makes folders,
-/// and a path can resolve differently after.
-///
-/// A reading command writes nothing in the document store or the data folder: it is
-/// to leave both as they were.
-fn refused_outputs(
-    command: &str,
-    options: &HashMap<&str, &str>,
-    store: Option<&Store>,
-) -> Option<String> {
+/// Why `daily` must not write the files its arguments name, if it must not. `store` is
+/// `document_store` of the run. Such a run writes neither file, the result included: a
+/// refusal must leave a transcript, a record or a kept revision as it was. This is
+/// asked once, before anything is written: writing makes folders, and a path can
+/// resolve differently after. A reading command names no file to write (`parse`
+/// refuses `--result` for it), so this has nothing to refuse there.
+fn refused_outputs(options: &HashMap<&str, &str>, store: Option<&Store>) -> Option<String> {
     let store = store?;
     if result_is_transcript(options) {
         return Some("--transcript와 --result는 서로 다른 파일이어야 합니다.".into());
@@ -318,15 +315,6 @@ fn refused_outputs(
             ))
         }
     };
-    if command != "daily" {
-        let data = paths::data_dir(options.get("--data-dir").map(PathBuf::from), true);
-        let mut folders = vec![vault.clone()];
-        folders.extend(data.ok());
-        return named.into_iter().find_map(|(key, path)| {
-            in_folders(&folders, path)
-                .then(|| format!("{key}는 문서 저장소와 데이터 폴더 밖의 파일이어야 합니다."))
-        });
-    }
     named.into_iter().find_map(|(key, path)| {
         in_kept_folders(vault, path).then(|| {
             format!("{key}는 문서 저장소의 daily와 originals 폴더 밖의 파일이어야 합니다.")
@@ -539,26 +527,17 @@ pub fn run(args: &[String]) -> i32 {
     let refused = parsed
         .as_ref()
         .ok()
-        .and_then(|(command, options)| refused_outputs(command, options, store.as_ref()));
+        .and_then(|(_, options)| refused_outputs(options, store.as_ref()));
     let writes_result = refused.is_none();
-    // A reading command writes nothing before its result, so where the result goes is
-    // looked at again right before it is written: a junction on the way may have been
-    // turned to the store or the data folder while the command read.
-    let store_again = store.clone();
     let output = parsed
         .as_ref()
         .map_err(String::clone)
         .and_then(|(command, options)| perform(command, options, refused, store))
         .unwrap_or_else(|message| serde_json::json!({"outcome": "error", "message": message}));
     let bytes = serde_json::to_vec_pretty(&output).expect("JSON value serialization");
-    if let Ok((command, options)) = &parsed {
+    if let Ok((_, options)) = &parsed {
         if let Some(path) = options.get("--result").filter(|_| writes_result) {
             let result = (|| -> Result<(), String> {
-                if crate::record_read::arguments(command).is_some() {
-                    if let Some(why) = refused_outputs(command, options, store_again.as_ref()) {
-                        return Err(why);
-                    }
-                }
                 let path = Path::new(path);
                 if let Some(input) = options.get("--input") {
                     if std::fs::canonicalize(input).ok().is_some_and(|source| {
