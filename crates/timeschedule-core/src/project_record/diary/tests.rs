@@ -117,6 +117,7 @@ impl Fixture {
         self.vault
             .join("project")
             .join(group_name(&self.key))
+            .join(&self.project)
             .join("record.json")
     }
 
@@ -310,12 +311,12 @@ fn an_older_revision_or_a_record_of_another_folder_or_project_is_not_shown() {
         r["project"]["repoKey"] = "c:/other".into();
     });
     assert_eq!(f.scan().other_folder, 1);
-    // The record of another project that shares the folder is shown only in that one.
+    // A file copied in from another project's folder.
     f.rewrite(|r| {
         r["project"]["repoKey"] = f.key.clone().into();
         r["project"]["id"] = "someone-else".into();
     });
-    assert_eq!(f.scan(), DiaryReport::default());
+    assert_eq!(f.scan().failed, 1);
     // Unreadable.
     fs::write(f.path(), "not a record").unwrap();
     assert_eq!(f.scan().failed, 1);
@@ -355,7 +356,7 @@ fn a_project_moved_to_another_folder_no_longer_shows_the_old_folders_record() {
     let record: ProjectRecord = serde_json::from_slice(&bytes).unwrap();
     assert!(matches!(
         f.store
-            .show_project_record(&holder, &group_name(&f.key), &record, (&f.path(), &bytes))
+            .show_project_record(&holder, &group_name(&f.key), &record, (&f.vault, &bytes))
             .unwrap(),
         Shown::OtherFolder
     ));
@@ -465,10 +466,9 @@ fn a_record_read_before_the_file_was_replaced_writes_nothing() {
         id: f.project.clone(),
         key: f.key.clone(),
     };
-    let path = f.path();
     assert!(matches!(
         f.store
-            .show_project_record(&holder, &group_name(&f.key), &record, (&path, &stale))
+            .show_project_record(&holder, &group_name(&f.key), &record, (&f.vault, &stale))
             .unwrap(),
         Shown::Unchanged
     ));
@@ -529,7 +529,8 @@ fn showing_one_project_reports_only_that_project() {
     let other_dir = f
         .vault
         .join("project")
-        .join(group_name(&repo_key(&other_repo.to_string_lossy())));
+        .join(group_name(&repo_key(&other_repo.to_string_lossy())))
+        .join(&other);
     fs::create_dir_all(&other_dir).unwrap();
     fs::write(other_dir.join("record.json"), "not a record").unwrap();
     let report = f.store.import_project_record(&f.vault, &f.project).unwrap();
@@ -550,10 +551,44 @@ fn a_record_that_cannot_be_read_again_is_a_failure_not_nothing_new() {
         id: f.project.clone(),
         key: f.key.clone(),
     };
-    let path = f.path();
     assert!(f
         .store
-        .show_project_record(&holder, &group_name(&f.key), &record, (&path, &bytes))
+        .show_project_record(&holder, &group_name(&f.key), &record, (&f.vault, &bytes))
         .is_err());
+    assert!(f.shown().is_empty());
+}
+
+#[test]
+fn a_project_id_that_is_not_one_is_one_failure_and_the_other_projects_go_on() {
+    let f = setup();
+    // A restored database may hold an ID no program of this app makes.
+    let repo = f.root.join("repo");
+    f.store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO projects(id,title,description,repo_path,updated_at)
+             VALUES('../../outside','밖','',?1,'2026-11-27T00:00:00Z')",
+            [repo.to_string_lossy().into_owned()],
+        )
+        .unwrap();
+    let report = f.scan();
+    assert_eq!((report.added, report.failed), (1, 1));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_record_file_that_is_a_link_is_not_followed() {
+    let f = setup();
+    let outside = f.root.join("outside.json");
+    fs::copy(f.path(), &outside).unwrap();
+    fs::remove_file(f.path()).unwrap();
+    // Making a file link needs a privilege or developer mode; without it
+    // (ERROR_PRIVILEGE_NOT_HELD), nothing can be tested here. Any other failure is one.
+    if let Err(e) = std::os::windows::fs::symlink_file(&outside, f.path()) {
+        assert_eq!(e.raw_os_error(), Some(1314), "{e}");
+        return;
+    }
+    assert_eq!(f.scan().failed, 1);
     assert!(f.shown().is_empty());
 }

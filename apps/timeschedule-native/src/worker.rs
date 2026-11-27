@@ -1769,7 +1769,8 @@ mod tests {
     fn keep_project_record(vault: &std::path::Path, id: &str, key: &str) {
         let made = vault
             .join("project")
-            .join(timeschedule_core::chat_originals::group_name(key));
+            .join(timeschedule_core::chat_originals::group_name(key))
+            .join(id);
         std::fs::create_dir_all(&made).unwrap();
         let record = serde_json::json!({
             "schemaVersion": 1,

@@ -1,7 +1,7 @@
 //! Shows each project's kept project record in the diary, as one entry per project and
 //! folder, the way `daily_record::diary` shows the daily records.
 //!
-//! The record file (`project/<folder>/record.json`) is the source and the entry is its
+//! The record file (`project/<folder>/<project ID>/record.json`) is the source and the entry is its
 //! display. A receipt per project and folder remembers the entry, the date and the text
 //! the program last put there, and the revision it last saw. A newer record replaces the
 //! text, and moves the entry to the day that record was made, only while the entry is
@@ -14,6 +14,7 @@ use crate::{
     daily_record::{
         diary::{fitted, DiaryReport, BODY_LIMIT},
         one_line,
+        record::read_plain,
     },
     project_records::repo_key,
     storage::{database_error, timestamp, validate_text, Storage},
@@ -160,8 +161,8 @@ struct Holder {
 impl Storage {
     /// Shows the project record kept in `vault` of every project with a local folder.
     /// Each record is read and shown on its own: one that fails is counted and the rest
-    /// go on. Two projects can be given one folder; the record is shown only in the
-    /// project it was made for.
+    /// go on. Each project's record is in its own folder, so two projects given one
+    /// folder each show their own.
     pub fn import_project_records(&self, vault: &Path) -> Result<DiaryReport, String> {
         self.import_records_of(vault, None)
     }
@@ -181,8 +182,7 @@ impl Storage {
         let holders = self.holders()?;
         for holder in holders.iter().filter(|h| only.is_none_or(|id| h.id == id)) {
             let folder = group_name(&holder.key);
-            let path = root.join(&folder).join("record.json");
-            let bytes = match read_record(&path) {
+            let bytes = match read_record(vault, &folder, &holder.id) {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) => continue,
                 Err(_) => {
@@ -194,11 +194,12 @@ impl Storage {
                 report.failed += 1;
                 continue;
             };
-            // The other project of a shared folder: the record is shown in its own.
+            // A file copied in from another project's folder is not this project's.
             if record.project.id != holder.id {
+                report.failed += 1;
                 continue;
             }
-            match self.show_project_record(holder, &folder, &record, (&path, &bytes)) {
+            match self.show_project_record(holder, &folder, &record, (vault, &bytes)) {
                 Ok(Shown::Added) => report.added += 1,
                 Ok(Shown::Updated) => report.updated += 1,
                 Ok(Shown::Kept) => report.kept += 1,
@@ -233,7 +234,7 @@ impl Storage {
         Ok(holders)
     }
 
-    /// Shows `record`, read as `read` (its path and bytes), in the diary.
+    /// Shows `record`, read from the store at `read.0` as the bytes `read.1`, in the diary.
     fn show_project_record(
         &self,
         holder: &Holder,
@@ -250,7 +251,7 @@ impl Storage {
         let body = fitted(
             entry_body(record),
             "프로젝트 기록",
-            &format!("project/{folder}/record.json"),
+            &format!("project/{folder}/{}/record.json", holder.id),
         );
         validate_text(&body, "기록 본문", BODY_LIMIT)?;
         let revision = i64::from(record.revision);
@@ -276,10 +277,10 @@ impl Storage {
         // The file may have been replaced since it was read (a run kept a newer record
         // and showed it meanwhile): the older read writes nothing, and the next showing
         // reads the file that is there.
-        match read_record(read.0) {
+        match read_record(read.0, folder, &holder.id) {
             Ok(Some(now)) if now == read.1 => {}
             Ok(_) => return Ok(Shown::Unchanged),
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(e),
         }
         let receipt: Option<(String, i64, String, String, String)> = tx
             .query_row(
@@ -374,24 +375,28 @@ impl Storage {
     }
 }
 
-/// The latest record file at `path`: `None` when there is none. A link, or something
-/// that is not a folder where the project's records belong, is an error.
-fn read_record(path: &Path) -> io::Result<Option<Vec<u8>>> {
-    let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    match fs::symlink_metadata(dir) {
-        // No record for this project yet.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e),
-        Ok(meta) if !meta.is_dir() => return Err(io::ErrorKind::InvalidInput.into()),
-        Ok(_) => {}
+/// The latest record file of the project `id` in the store `vault`: `None` when there
+/// is none. It is found the way it is made (`record_dir`: the ID checked, no folder a
+/// link), and the file is opened without following a link.
+fn read_record(vault: &Path, folder: &str, id: &str) -> Result<Option<Vec<u8>>, String> {
+    let dir = super::record_dir(vault, folder, id)?;
+    // The folder's group (`project/<folder>`) first, then the project's own folder.
+    for at in [dir.parent().ok_or("프로젝트 기록 폴더가 없습니다.")?, &dir] {
+        match fs::symlink_metadata(at) {
+            // No record for this project yet.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.to_string()),
+            Ok(meta) if !meta.is_dir() => {
+                return Err(format!("{}이 폴더가 아닙니다.", at.display()))
+            }
+            Ok(_) => {}
+        }
     }
-    if is_link(path)? {
-        return Err(io::ErrorKind::InvalidInput.into());
-    }
-    match fs::read(path) {
+    let path = dir.join("record.json");
+    match read_plain(&path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+        Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
 
