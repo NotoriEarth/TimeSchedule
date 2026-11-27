@@ -19,14 +19,14 @@ use crate::{
     daily_record::{
         one_line, plain_lines, project_dir,
         record::{
-            conforms, estimated_tokens, keep, log_usage, object, read_latest, set_aside, tenths,
-            text, text_or_null, DailyRecord, Decider, Latest, Proposer, Spent,
+            conforms, estimated_tokens, keep, log_usage, object, open_plain, read_latest,
+            set_aside, tenths, text, text_or_null, DailyRecord, Decider, Latest, Proposer, Spent,
         },
         session_days,
     },
     project_records::repo_key,
     reading::{Origin, WholeRecord},
-    storage::{validate_date, Storage},
+    storage::{validate_date, validate_id, Storage},
     terra::{Failed, Reply, Usage},
 };
 use chrono::{SecondsFormat, Utc};
@@ -106,16 +106,17 @@ fn day_of(name: &str) -> Option<&str> {
 /// the days that have dialogue and no daily record. Nothing is written.
 pub fn gather(store: &Storage, vault: &Path, project: &str) -> Result<Dossier, String> {
     let p = store.project_of(project)?;
-    if p.repo_path.is_empty() {
+    // The diary shows the records of projects with an absolute folder only.
+    if !Path::new(&p.repo_path).is_absolute() {
         return Err(
-            "로컬 Git 저장소 경로가 없는 프로젝트는 하루 기록이 없어 프로젝트 기록을 만들지 않습니다."
+            "로컬 Git 저장소 경로(절대 경로)가 없는 프로젝트는 하루 기록이 없어 프로젝트 기록을 만들지 않습니다."
                 .into(),
         );
     }
     let key = repo_key(&p.repo_path);
     let folder = group_name(&key);
     let record_seen = owned_record(
-        &record_dir(vault, &folder)?.join(format!("{STEM}.json")),
+        &record_dir(vault, &folder, &p.id)?.join(format!("{STEM}.json")),
         &p.id,
     )?
     .map(|latest| latest.bytes);
@@ -123,7 +124,7 @@ pub fn gather(store: &Storage, vault: &Path, project: &str) -> Result<Dossier, S
     // project renamed before then shows its new name, and one moved to another folder
     // meanwhile is read again by the next run.
     let p = store.project_of(&p.id)?;
-    if p.repo_path.is_empty() || repo_key(&p.repo_path) != key {
+    if !Path::new(&p.repo_path).is_absolute() || repo_key(&p.repo_path) != key {
         return Err("프로젝트의 로컬 저장소 경로가 방금 바뀌었습니다. 다시 실행해 주세요.".into());
     }
     // Read before the records: a project completed meanwhile then shows with every
@@ -551,7 +552,7 @@ pub struct Project {
     pub repo_key: String,
 }
 
-/// The project record, as kept in `<vault>/project/<folder>/record.json`.
+/// The project record, as kept in `<vault>/project/<folder>/<project ID>/record.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRecord {
@@ -838,10 +839,15 @@ pub enum Outcome {
     Busy { path: PathBuf },
 }
 
-fn record_dir(vault: &Path, folder: &str) -> Result<PathBuf, String> {
+/// The folder of one project's records: `project/<folder>/<project ID>`. Each project
+/// has its own, so two projects given one folder, or a project made again for the
+/// folder of a deleted one, never meet each other's records or revisions.
+pub(crate) fn record_dir(vault: &Path, folder: &str, project: &str) -> Result<PathBuf, String> {
+    validate_id(project)?;
     let root = vault.join("project");
-    let dir = root.join(folder);
-    for folder in [&root, &dir] {
+    let group = root.join(folder);
+    let dir = group.join(project);
+    for folder in [&root, &group, &dir] {
         if is_link(folder).map_err(text)? {
             return Err("링크 폴더에는 프로젝트 기록을 쓰지 않습니다.".into());
         }
@@ -851,11 +857,11 @@ fn record_dir(vault: &Path, folder: &str) -> Result<PathBuf, String> {
 
 /// Where the project's latest record file is.
 pub fn record_path(vault: &Path, dossier: &Dossier) -> Result<PathBuf, String> {
-    Ok(record_dir(vault, &dossier.folder)?.join(format!("{STEM}.json")))
+    Ok(record_dir(vault, &dossier.folder, &dossier.project_id)?.join(format!("{STEM}.json")))
 }
 
-/// The latest record at `path`, which must be the project `project`'s: two projects
-/// can be given one folder, and one never replaces the other's record.
+/// The latest record at `path`, which must be the project `project`'s: a file copied in
+/// from another project's folder is not replaced.
 fn owned_record(path: &Path, project: &str) -> Result<Option<Latest>, String> {
     let latest = read_latest(path)?;
     if let Some(latest) = &latest {
@@ -864,7 +870,7 @@ fn owned_record(path: &Path, project: &str) -> Result<Option<Latest>, String> {
             .and_then(|v| v["project"]["id"].as_str().map(str::to_owned));
         if owner.as_deref() != Some(project) {
             return Err(format!(
-                "{}에 다른 프로젝트의 기록이 있습니다. 같은 폴더를 쓰는 프로젝트가 둘이면 프로젝트 기록은 한쪽만 만들 수 있습니다. 덮어쓰지 않고 멈췄습니다.",
+                "{}에 이 프로젝트가 아닌 다른 프로젝트의 기록이 있습니다(다른 폴더에서 옮겨 온 파일). 덮어쓰지 않고 멈췄습니다.",
                 path.display()
             ));
         }
@@ -897,6 +903,24 @@ pub fn is_current(
         .is_some_and(|latest| latest.made_from(&fingerprint)))
 }
 
+/// Whether the project of `dossier` is still in `store` with the folder the bundle was
+/// read from. A record kept for a project deleted meanwhile would stand in the way of
+/// the next project given that folder.
+pub fn holds(store: &Storage, dossier: &Dossier) -> Result<(), String> {
+    let moved = || {
+        "모델이 답하는 동안 프로젝트가 지워졌거나 폴더가 바뀌어 새 판을 쓰지 않았습니다."
+            .to_string()
+    };
+    let project = store.project_of(&dossier.project_id).map_err(|_| moved())?;
+    if Path::new(&project.repo_path).is_absolute()
+        && repo_key(&project.repo_path) == dossier.repo_key
+    {
+        Ok(())
+    } else {
+        Err(moved())
+    }
+}
+
 /// One line of `usage.jsonl`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -925,6 +949,20 @@ pub fn summarize(
     effort: &str,
     infer: impl FnOnce(&str, &Value) -> Result<Reply, Failed>,
 ) -> Result<Outcome, String> {
+    summarize_while(vault, dossier, model, effort, infer, || Ok(()))
+}
+
+/// `summarize`, with `holds` asked once the answer is checked and before it is kept:
+/// an error there (the project was deleted or moved to another folder while the model
+/// answered, say) keeps nothing.
+pub fn summarize_while(
+    vault: &Path,
+    dossier: &Dossier,
+    model: &str,
+    effort: &str,
+    infer: impl FnOnce(&str, &Value) -> Result<Reply, Failed>,
+    holds: impl FnOnce() -> Result<(), String>,
+) -> Result<Outcome, String> {
     // A daily record can be kept with every item left out, so days alone do not say
     // there is anything to cite.
     if dossier.citable() == 0 {
@@ -935,16 +973,18 @@ pub fn summarize(
     }
     let chars = dossier.chars();
     check_size(chars)?;
-    let dir = record_dir(vault, &dossier.folder)?;
+    let dir = record_dir(vault, &dossier.folder, &dossier.project_id)?;
     let path = dir.join(format!("{STEM}.json"));
     fs::create_dir_all(&dir).map_err(text)?;
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join(format!(".{STEM}.lock")))
-        .map_err(text)?;
+    let lock = open_plain(
+        &dir.join(format!(".{STEM}.lock")),
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .map_err(text)?;
     match lock.try_lock() {
         Ok(()) => {}
         Err(fs::TryLockError::WouldBlock) => return Ok(Outcome::Busy { path }),
@@ -971,7 +1011,15 @@ pub fn summarize(
         set_aside(&dir, STEM, previous, false)?;
         revision = previous.revision + 1;
     }
+    // The folders are checked again before anything is written after the model call:
+    // the call can take many minutes, and a folder may have been made a link meanwhile.
+    let still_plain = || {
+        record_dir(vault, &dossier.folder, &dossier.project_id)
+            .map(|_| ())
+            .map_err(|e| format!("모델을 기다리는 동안 저장 폴더가 바뀌어 쓰지 않았습니다: {e}"))
+    };
     let log = |outcome: &str, usage: &Usage, seconds: f64, message: Option<&str>| {
+        still_plain()?;
         log_usage(
             &dir,
             &UsageLine {
@@ -1053,6 +1101,8 @@ pub fn summarize(
         limits: body.limits,
     };
     let bytes = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
+    holds().map_err(|e| failed("save_failed", &reply.usage, reply.seconds, e))?;
+    still_plain().map_err(|e| failed("save_failed", &reply.usage, reply.seconds, e))?;
     keep(&dir, &path, STEM, previous.as_ref(), &bytes)
         .map_err(|e| failed("save_failed", &reply.usage, reply.seconds, e))?;
     log("saved", &reply.usage, reply.seconds, None)
@@ -1063,6 +1113,8 @@ pub fn summarize(
         record: Box::new(record),
     })
 }
+
+pub mod diary;
 
 #[cfg(test)]
 mod tests;

@@ -24,6 +24,7 @@ mod month_jump;
 mod native_alpha_tests;
 mod popup;
 mod portfolio_ui;
+mod project_record_ui;
 mod quick_editor;
 mod record_cli;
 mod record_inbox;

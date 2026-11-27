@@ -66,16 +66,17 @@ pub fn entry_body(record: &DailyRecord) -> String {
 }
 
 /// The diary's limit for an entry's text.
-const BODY_LIMIT: usize = 100_000;
+pub(crate) const BODY_LIMIT: usize = 100_000;
 
-/// The text cut to the diary's limit, with a line saying where the whole record is.
-/// A record is never too long to show: the record file keeps all of it.
-fn fitted(body: String, folder: &str, date: &str) -> String {
+/// The text cut to the diary's limit, with a line saying where the whole record is:
+/// `what` names the record and `file` is its place in the document store. A record is
+/// never too long to show: the record file keeps all of it.
+pub(crate) fn fitted(body: String, what: &str, file: &str) -> String {
     if body.chars().count() <= BODY_LIMIT {
         return body;
     }
     let note = format!(
-        "\n… 하루 기록이 길어 다이어리에는 앞부분만 보입니다. 전체는 문서 저장소의 daily/{folder}/{date}.json에 있습니다.\n"
+        "\n… {what}이 길어 다이어리에는 앞부분만 보입니다. 전체는 문서 저장소의 {file}에 있습니다.\n"
     );
     let keep = BODY_LIMIT - note.chars().count();
     let cut: String = body.chars().take(keep).collect();
@@ -170,7 +171,11 @@ impl Storage {
         if record.project.repo_key != project.root {
             return Ok(Shown::OtherFolder);
         }
-        let body = fitted(entry_body(&record), &group_name(&project.root), date);
+        let body = fitted(
+            entry_body(&record),
+            "하루 기록",
+            &format!("daily/{}/{date}.json", group_name(&project.root)),
+        );
         validate_text(&body, "기록 본문", BODY_LIMIT)?;
         let revision = i64::from(record.revision);
         let fingerprint = &record.input.fingerprint;

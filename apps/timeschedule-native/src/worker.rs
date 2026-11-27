@@ -382,6 +382,8 @@ pub struct ChatScan {
     pub excerpts: Result<timeschedule_core::chat_history::ScanReport, String>,
     pub originals: Result<timeschedule_core::chat_originals::OriginalsReport, String>,
     pub daily: Result<timeschedule_core::daily_record::diary::DiaryReport, String>,
+    /// The project records shown in the diary.
+    pub project: Result<timeschedule_core::daily_record::diary::DiaryReport, String>,
 }
 
 impl ChatScan {
@@ -391,6 +393,7 @@ impl ChatScan {
         self.excerpts.as_ref().map_or(true, |r| r.failed > 0)
             || self.originals.as_ref().map_or(true, |o| o.failed > 0)
             || self.daily.as_ref().map_or(true, |d| d.failed > 0)
+            || self.project.as_ref().map_or(true, |d| d.failed > 0)
     }
 
     /// What went wrong in each part, for the app's error line. One cause that stopped
@@ -417,6 +420,13 @@ impl ChatScan {
                 |d| d.failed,
                 |n| {
                     format!("하루 기록 {n}개를 다이어리에 반영하지 못했습니다. 다음 확인 때 재시도합니다.")
+                },
+            ),
+            problem(
+                &self.project,
+                |d| d.failed,
+                |n| {
+                    format!("프로젝트 기록 {n}개를 다이어리에 반영하지 못했습니다. 다음 확인 때 재시도합니다.")
                 },
             ),
             problem(
@@ -447,6 +457,12 @@ impl ChatScan {
         if shown > 0 {
             notices.push(format!("하루 기록 {shown}건을 다이어리에 반영했습니다."));
         }
+        let shown = self.project.as_ref().map_or(0, |d| d.added + d.updated);
+        if shown > 0 {
+            notices.push(format!(
+                "프로젝트 기록 {shown}건을 다이어리에 반영했습니다."
+            ));
+        }
         notices
     }
 }
@@ -459,8 +475,8 @@ pub fn scan_chats(store: &Storage, data_dir: &std::path::Path, reread: bool) -> 
 }
 
 /// The scan with its places given: the Codex home or why there is none, the Claude Code
-/// home, and how to find the document store. The store is looked for only when a
-/// project's chats are captured.
+/// home, and how to find the document store. Originals and daily records are kept and
+/// shown only when a project's chats are captured.
 fn scan_from(
     store: &Storage,
     codex: Result<std::path::PathBuf, String>,
@@ -473,7 +489,10 @@ fn scan_from(
     let captured = projects
         .as_ref()
         .map_or(true, |projects| projects.iter().any(|p| p.capture));
-    let vault = captured.then(vault);
+    // Project records need no captured chats, so the store is looked for every time;
+    // without captured chats, a store that cannot be found only means nothing to show.
+    let found = vault();
+    let vault = captured.then(|| found.clone());
     let originals = (|| {
         let projects = projects?;
         let Some(vault) = &vault else {
@@ -494,6 +513,12 @@ fn scan_from(
             .and_then(|vault| store.import_daily_records(vault)),
         None => Ok(Default::default()),
     };
+    // Project records the record command made are shown the same way.
+    let project = match &found {
+        Ok(vault) => store.import_project_records(vault),
+        Err(e) if captured => Err(e.clone()),
+        Err(_) => Ok(Default::default()),
+    };
     let excerpts = codex
         .as_ref()
         .map_err(String::clone)
@@ -502,6 +527,7 @@ fn scan_from(
         excerpts,
         originals,
         daily,
+        project,
     }
 }
 
@@ -1739,6 +1765,60 @@ mod tests {
         assert!(made.saved.is_empty());
         assert!(!made.failed.is_empty(), "the owner is told");
     }
+    /// A project record the record command made, kept in `vault`.
+    fn keep_project_record(vault: &std::path::Path, id: &str, key: &str) {
+        let made = vault
+            .join("project")
+            .join(timeschedule_core::chat_originals::group_name(key))
+            .join(id);
+        std::fs::create_dir_all(&made).unwrap();
+        let record = serde_json::json!({
+            "schemaVersion": 1,
+            "project": {"id": id, "title": "작업", "repoKey": key},
+            "revision": 1, "generatedAt": "2026-11-26T03:00:00Z",
+            "model": "gpt-6.2-astra", "effort": "high", "promptVersion": 1, "completedOn": null,
+            "input": {"days": 1, "daily": [], "firstDay": "2026-11-20", "lastDay": "2026-11-20",
+                      "records": {}, "chars": 10, "fingerprint": "fp", "missingDays": [], "warnings": []},
+            "usage": {"seconds": 1.0},
+            "checks": {"withoutEvidence": 0, "decisionsWithoutDaily": 0, "reasonsUnsupported": 0,
+                       "rejectedUnsupported": 0, "resultsUnsupported": 0},
+            "overview": {"text": "작업 앱", "evidence": ["D:2026-11-20:개요:1"]},
+            "features": [], "decisions": [], "troubleshooting": [], "results": [], "limits": []
+        });
+        std::fs::write(made.join("record.json"), record.to_string()).unwrap();
+    }
+    #[test]
+    fn a_project_record_is_shown_though_no_chats_are_captured() {
+        let dir = crate::record_inbox::tests::TestDir::new();
+        let repo = dir.0.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let store = Storage::open(":memory:").unwrap();
+        let mut project = Form::new(Kind::Project, String::new(), None);
+        project.title = "작업".into();
+        project.repo_path = repo.to_string_lossy().into_owned();
+        project.save(&store).unwrap();
+        let id = store.list_projects().unwrap().remove(0).id;
+        let key = store.originals_projects().unwrap().remove(0).root;
+        let vault = dir.0.join("vault");
+        keep_project_record(&vault, &id, &key);
+        let no_home = "Codex 사용자 폴더를 찾을 수 없습니다.";
+        // Without captured chats, no store found is nothing to show, not a problem.
+        let scan = scan_from(&store, Err(no_home.into()), None, true, || {
+            Err("문서 저장소를 찾지 못했습니다.".into())
+        });
+        assert_eq!(scan.project, Ok(Default::default()));
+        assert!(scan.originals.is_ok());
+        let scan = scan_from(
+            &store,
+            Err(no_home.into()),
+            None,
+            true,
+            || Ok(vault.clone()),
+        );
+        assert_eq!(scan.project.as_ref().unwrap().added, 1);
+        assert_eq!(scan.daily, Ok(Default::default()));
+        assert!(scan.originals.is_ok());
+    }
     #[test]
     fn a_scan_part_that_cannot_start_does_not_hide_the_others() {
         use timeschedule_core::chat_originals::group_name;
@@ -1772,6 +1852,7 @@ mod tests {
             "sources": []
         });
         std::fs::write(records.join("2026-11-20.json"), record.to_string()).unwrap();
+        keep_project_record(&vault, &id, &key);
         // No home folder of Codex: nothing to keep or excerpt, but the store is there.
         let no_home = "Codex 사용자 폴더를 찾을 수 없습니다.";
         let scan = scan_from(
@@ -1786,7 +1867,23 @@ mod tests {
         assert_eq!(scan.originals.as_ref().unwrap_err(), no_home);
         assert!(scan.needs_attention());
         assert_eq!(scan.problems(), [no_home]);
-        assert_eq!(scan.notices(), ["하루 기록 1건을 다이어리에 반영했습니다."]);
+        assert_eq!(scan.project.as_ref().unwrap().added, 1);
+        assert_eq!(
+            scan.notices(),
+            [
+                "하루 기록 1건을 다이어리에 반영했습니다.",
+                "프로젝트 기록 1건을 다이어리에 반영했습니다."
+            ]
+        );
+        assert_eq!(
+            store
+                .list_entries("2026-11-26", "2026-11-26", None, 0)
+                .unwrap()
+                .iter()
+                .map(|e| (e.kind.as_str(), e.title.as_str()))
+                .collect::<Vec<_>>(),
+            [("portfolio", "프로젝트 기록 · 작업")]
+        );
         assert_eq!(
             store
                 .list_entries("2026-11-20", "2026-11-20", None, 0)

@@ -404,6 +404,7 @@ pub enum Message {
     SearchDue(u64, String),
     SearchDone(u64, Result<Vec<SearchHit>, String>),
     Portfolio(crate::portfolio_ui::Action),
+    ProjectRecord(crate::project_record_ui::Action),
     ChatReview(crate::chat_review_ui::Action),
     Draft(bool),
     Drafted(u64, u64, Result<Form, String>),
@@ -517,6 +518,8 @@ pub struct App {
     daily_kind: DailyKind,
     /// Where the past days of a project stand (project screen).
     pub past_days: BTreeMap<String, Past>,
+    /// The project record being checked or made, or the last one's outcome.
+    pub project_record: Option<crate::project_record_ui::Panel>,
     /// Set to end the making of the past days after the day it is on.
     past_stop: Arc<std::sync::atomic::AtomicBool>,
     /// Inputs that failed; the automatic mode does not send them again until the
@@ -682,6 +685,7 @@ impl App {
             daily_retry_after_scan: false,
             daily_kind: DailyKind::Auto,
             past_days: BTreeMap::new(),
+            project_record: None,
             past_stop: Default::default(),
             daily_failed: Default::default(),
             daily_auto: Arc::new(std::sync::atomic::AtomicBool::new(daily_auto)),
@@ -1313,6 +1317,16 @@ impl App {
             CloseIntent::Application => self.exit_when_idle(),
         }
     }
+    /// Whether this instance may start work that writes the owner's records: it holds
+    /// the single-instance lock and is not quitting.
+    pub(crate) fn may_start_writing(&self) -> bool {
+        self._instance.is_some() && !self.quit_when_idle
+    }
+    fn project_record_running(&self) -> bool {
+        self.project_record
+            .as_ref()
+            .is_some_and(crate::project_record_ui::Panel::running)
+    }
     fn exit_when_idle(&mut self) -> Task<Message> {
         // Quitting does not wait for dozens of days: the check of the past days and their
         // making stop after the day in progress.
@@ -1330,6 +1344,7 @@ impl App {
             || self.mcp_setup.busy
             || self.chat_scanning
             || self.daily_making
+            || self.project_record_running()
         {
             self.quit_when_idle = true;
             self.notice = "진행 중인 저장·Git·설정 작업을 마친 뒤 종료합니다.".into();
@@ -1461,6 +1476,10 @@ impl App {
                     | Message::Portfolio(
                         crate::portfolio_ui::Action::Answered(..)
                             | crate::portfolio_ui::Action::Exported(..)
+                    )
+                    | Message::ProjectRecord(
+                        crate::project_record_ui::Action::Checked(..)
+                            | crate::project_record_ui::Action::Made(..)
                     )
                     | Message::EntryLoaded(..)
                     | Message::FormLoaded(..)
@@ -1977,6 +1996,7 @@ impl App {
                     && !self.mcp_setup.busy
                     && !self.chat_scanning
                     && !self.daily_making
+                    && !self.project_record_running()
                 {
                     self.quit_when_idle = false;
                     return self.request_close(CloseIntent::Application);
@@ -2607,6 +2627,9 @@ impl App {
             }
             Message::ChatReview(action) => return crate::chat_review_ui::update(self, action),
             Message::Portfolio(action) => return crate::portfolio_ui::update(self, action),
+            Message::ProjectRecord(action) => {
+                return crate::project_record_ui::update(self, action)
+            }
             Message::Draft(portfolio) if !self.busy && self.editor.is_none() => {
                 let Some(store) = self.store.clone() else {
                     return Task::none();
@@ -2932,6 +2955,7 @@ mod tests {
             daily_retry_after_scan: false,
             daily_kind: DailyKind::Auto,
             past_days: BTreeMap::new(),
+            project_record: None,
             past_stop: Default::default(),
             daily_failed: Default::default(),
             daily_auto: Default::default(),
@@ -3954,6 +3978,7 @@ mod tests {
             excerpts: Ok(Default::default()),
             originals: Ok(Default::default()),
             daily: Ok(Default::default()),
+            project: Ok(Default::default()),
         }
     }
     /// A project with a folder, open on the project screen, whose capture is turned on.
@@ -4238,6 +4263,66 @@ mod tests {
         let _ = app.exit_when_idle();
         assert!(app.quit_when_idle);
         assert!(app.past_stop.load(std::sync::atomic::Ordering::Acquire));
+    }
+    #[test]
+    fn a_project_record_is_checked_first_made_after_the_second_press_and_quitting_waits() {
+        use crate::project_record_ui::{Action, Check, State};
+        let (_dir, mut app) = scanning_app();
+        let id = "p1".to_owned();
+        let state = |app: &App| app.project_record.as_ref().map(|p| p.state.clone());
+        // ‘만들기’ before a check starts nothing.
+        let _ = app.update(Message::ProjectRecord(Action::Make(id.clone())));
+        assert_eq!(state(&app), None);
+        let _ = app.update(Message::ProjectRecord(Action::Check(id.clone())));
+        assert_eq!(state(&app), Some(State::Checking));
+        // One project at a time.
+        let _ = app.update(Message::ProjectRecord(Action::Check("p2".into())));
+        assert_eq!(app.project_record.as_ref().unwrap().project, id);
+        let check = Check {
+            days: 3,
+            records: 70,
+            tokens: 87_825,
+            model: "gpt-6.2-astra".into(),
+            missing: vec![],
+            warnings: vec![],
+            completed_on: None,
+            current: false,
+            refused: None,
+            folder: "c:/lsh/timeschedule".into(),
+        };
+        let _ = app.update(Message::ProjectRecord(Action::Checked(
+            id.clone(),
+            Ok(check.clone()),
+        )));
+        assert_eq!(state(&app), Some(State::Ask(check.clone())));
+        let _ = app.update(Message::ProjectRecord(Action::Cancel(id.clone())));
+        assert_eq!(state(&app), None);
+        let _ = app.update(Message::ProjectRecord(Action::Check(id.clone())));
+        let _ = app.update(Message::ProjectRecord(Action::Checked(
+            id.clone(),
+            Ok(check),
+        )));
+        let _ = app.update(Message::ProjectRecord(Action::Make(id.clone())));
+        assert_eq!(state(&app), Some(State::Making));
+        // Quitting waits for the record being made.
+        let _ = app.exit_when_idle();
+        assert!(app.quit_when_idle);
+        // A late answer for another project changes nothing.
+        let _ = app.update(Message::ProjectRecord(Action::Made(
+            "p2".into(),
+            Ok("다른 것".into()),
+        )));
+        assert_eq!(state(&app), Some(State::Making));
+        let _ = app.update(Message::ProjectRecord(Action::Made(
+            id.clone(),
+            Err("모델이 답하지 않았습니다".into()),
+        )));
+        assert_eq!(
+            state(&app),
+            Some(State::Failed(
+                "프로젝트 기록을 만들지 못했습니다: 모델이 답하지 않았습니다".into()
+            ))
+        );
     }
     #[test]
     fn the_automatic_turn_goes_before_a_check_that_is_owed() {

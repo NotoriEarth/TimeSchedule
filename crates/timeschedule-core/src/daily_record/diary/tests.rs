@@ -420,7 +420,7 @@ fn opening_a_schema_15_database_backs_it_up_and_adds_the_receipts() {
         let version: i64 = c
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 17);
+        assert_eq!(version, 18);
         c.query_row("SELECT count(*) FROM daily_record_entries", [], |r| {
             r.get::<_, i64>(0)
         })
@@ -429,7 +429,7 @@ fn opening_a_schema_15_database_backs_it_up_and_adds_the_receipts() {
     let backups: Vec<PathBuf> = fs::read_dir(&root)
         .unwrap()
         .map(|e| e.unwrap().path())
-        .filter(|p| p.to_string_lossy().contains(".pre-v17-"))
+        .filter(|p| p.to_string_lossy().contains(".pre-v18-"))
         .collect();
     assert_eq!(backups.len(), 1);
     let backup = Connection::open(&backups[0]).unwrap();

@@ -792,7 +792,7 @@ pub(crate) fn read_latest(path: &Path) -> Result<Option<Latest>, String> {
         fingerprint: String,
     }
     refuse_link(path)?;
-    let bytes = match fs::read(path) {
+    let bytes = match read_plain(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(text(e)),
@@ -841,21 +841,21 @@ pub(crate) fn log_usage(dir: &Path, line: &impl Serialize) -> Result<(), String>
     use io::{Read, Seek, SeekFrom};
     let path = dir.join("usage.jsonl");
     let result = (|| {
-        if is_link(&path)? {
-            return Err(io::Error::other("링크 파일"));
-        }
-        let lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dir.join(".usage.lock"))?;
+        let lock = open_plain(
+            &dir.join(".usage.lock"),
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+        )?;
         lock.lock()?;
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(&path)?;
+        // Opened once the lock is held, and never through a link: a link put there while
+        // this run waited is refused, not followed.
+        let mut file = open_plain(
+            &path,
+            fs::OpenOptions::new().read(true).append(true).create(true),
+        )?;
         let mut bytes = Vec::new();
         if file.seek(SeekFrom::End(0))? > 0 {
             let mut last = [0_u8];
@@ -871,6 +871,39 @@ pub(crate) fn log_usage(dir: &Path, line: &impl Serialize) -> Result<(), String>
         file.sync_all()
     })();
     result.map_err(|e| format!("사용량 기록을 쓰지 못했습니다({}): {e}", path.display()))
+}
+
+/// Opens `path` with `options` without following a link there: a link is refused. On
+/// Windows the link itself is opened (`FILE_FLAG_OPEN_REPARSE_POINT`) and the open
+/// handle is checked, so a link put in place between a check and the open is never
+/// followed.
+pub(crate) fn open_plain(path: &Path, options: &mut fs::OpenOptions) -> io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(not(windows))]
+    if is_link(path)? {
+        return Err(io::Error::other("링크 파일"));
+    }
+    let file = options.open(path)?;
+    if file.metadata()?.file_type().is_symlink() {
+        return Err(io::Error::other("링크 파일"));
+    }
+    Ok(file)
+}
+
+/// The bytes of the file at `path`, read through `open_plain`: a link there is refused
+/// even when it was put in place after a check.
+pub(crate) fn read_plain(path: &Path) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(
+        &mut open_plain(path, fs::OpenOptions::new().read(true))?,
+        &mut bytes,
+    )?;
+    Ok(bytes)
 }
 
 /// Refuses a day whose transcript of `chars` characters is too large to send in one call.
@@ -1059,7 +1092,7 @@ pub(crate) fn set_aside(
 ) -> Result<(), String> {
     let aside = dir.join(format!("{stem}.r{}.json", latest.revision));
     refuse_link(&aside)?;
-    match fs::read(&aside) {
+    match read_plain(&aside) {
         Ok(kept) if kept == latest.bytes => Ok(()),
         Ok(_) => Err(format!(
             "남겨 둔 판({})이 지금의 최신 판과 다릅니다. 덮어쓰지 않고 멈췄습니다. 두 파일을 확인해 주세요.",

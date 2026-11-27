@@ -334,7 +334,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 17);
+        assert_eq!(version, 18);
         let stem = old.file_stem().unwrap().to_string_lossy().into_owned();
         let backups: Vec<_> = std::fs::read_dir(std::env::temp_dir())
             .unwrap()
@@ -342,7 +342,7 @@ mod tests {
             .map(|e| e.path())
             .filter(|p| {
                 let name = p.file_name().unwrap().to_string_lossy();
-                name.starts_with(&stem) && name.contains("pre-v17")
+                name.starts_with(&stem) && name.contains("pre-v18")
             })
             .collect();
         assert_eq!(backups.len(), 1);

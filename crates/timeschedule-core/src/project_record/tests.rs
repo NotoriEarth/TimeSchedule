@@ -193,7 +193,7 @@ fn an_answer_citing_a_key_the_bundle_lacks_is_refused_whole_and_logged() {
     })
     .unwrap_err();
     assert!(error.contains("D:2026-11-20:결정:9"), "{error}");
-    let dir = f.vault.join("project").join(&d.folder);
+    let dir = f.vault.join("project").join(&d.folder).join(&d.project_id);
     assert!(!dir.join("record.json").exists());
     let usage = fs::read_to_string(dir.join("usage.jsonl")).unwrap();
     assert!(usage.contains("\"outcome\":\"refused\""), "{usage}");
@@ -423,11 +423,38 @@ fn a_kept_record_is_not_asked_again_and_a_completion_makes_the_next_revision() {
 }
 
 #[test]
+fn an_answer_is_not_kept_once_the_project_no_longer_holds() {
+    let f = fixture();
+    f.day("2026-11-20", &f.project, ("ai", "human_approved"));
+    let d = f.dossier();
+    let error = summarize_while(
+        &f.vault,
+        &d,
+        "m",
+        "high",
+        |_, _| {
+            reply(answer(
+                &["D:2026-11-20:결정:1"],
+                "x",
+                &["D:2026-11-20:개요:1"],
+            ))
+        },
+        || Err("프로젝트가 지워졌습니다".into()),
+    )
+    .unwrap_err();
+    assert!(error.contains("프로젝트가 지워졌습니다"), "{error}");
+    let dir = f.vault.join("project").join(&d.folder).join(&d.project_id);
+    assert!(!dir.join("record.json").exists());
+    let usage = fs::read_to_string(dir.join("usage.jsonl")).unwrap();
+    assert!(usage.contains("\"outcome\":\"save_failed\""), "{usage}");
+}
+
+#[test]
 fn a_second_run_while_one_holds_the_lock_is_busy_and_asks_nothing() {
     let f = fixture();
     f.day("2026-11-20", &f.project, ("ai", "human_approved"));
     let d = f.dossier();
-    let dir = f.vault.join("project").join(&d.folder);
+    let dir = f.vault.join("project").join(&d.folder).join(&d.project_id);
     fs::create_dir_all(&dir).unwrap();
     let held = fs::OpenOptions::new()
         .create(true)
@@ -468,7 +495,7 @@ fn a_record_body_cannot_pass_for_an_item_of_the_bundle() {
 }
 
 #[test]
-fn a_record_of_another_project_in_the_folder_is_not_replaced_and_the_days_read_are_kept() {
+fn projects_on_one_folder_keep_their_own_records_and_the_days_read_are_kept() {
     let f = fixture();
     f.day("2026-11-20", &f.project, ("ai", "human_approved"));
     let d = f.dossier();
@@ -492,14 +519,30 @@ fn a_record_of_another_project_in_the_folder_is_not_replaced_and_the_days_read_a
             fingerprint: "f".into()
         }]
     );
-    // Another project given the same folder finds this record there and stops.
+    // Another project given the same folder keeps its record in a folder of its own.
     let mut other = d.clone();
     other.project_id = uuid::Uuid::new_v4().to_string();
+    other.record_seen = None;
     let before = fs::read(&path).unwrap();
+    assert!(!is_current(&f.vault, &other, "m", "high").unwrap());
+    let Outcome::Saved {
+        path: theirs,
+        record: their_record,
+    } = summarize(&f.vault, &other, "m", "high", |_, _| good()).unwrap()
+    else {
+        panic!("saved")
+    };
+    assert_eq!(their_record.revision, 1);
+    assert_ne!(theirs, path);
+    assert_eq!(
+        theirs.parent().unwrap().parent(),
+        path.parent().unwrap().parent()
+    );
+    assert_eq!(fs::read(&path).unwrap(), before);
+    // A file copied in from another project's folder is not replaced.
+    fs::copy(&path, &theirs).unwrap();
     let error = summarize(&f.vault, &other, "m", "high", |_, _| panic!("asked")).unwrap_err();
     assert!(error.contains("다른 프로젝트의 기록"), "{error}");
-    assert_eq!(fs::read(&path).unwrap(), before);
-    // The dry look says so too, instead of a path it could not write.
     assert!(is_current(&f.vault, &other, "m", "high").is_err());
 }
 
@@ -552,4 +595,82 @@ fn a_bundle_with_nothing_to_cite_is_not_sent() {
 fn a_bundle_too_large_is_not_sent() {
     assert!(check_size(10).is_ok());
     assert!(check_size(1_000_000).is_err());
+}
+
+#[test]
+fn a_project_deleted_or_moved_after_its_bundle_was_read_no_longer_holds() {
+    let f = fixture();
+    f.day("2026-11-20", &f.project, ("ai", "human_approved"));
+    let d = f.dossier();
+    assert!(holds(&f.store, &d).is_ok());
+    let other = f.root.join("other");
+    fs::create_dir_all(&other).unwrap();
+    f.store
+        .save_project(ProjectInput {
+            id: Some(f.project.clone()),
+            title: "앱".into(),
+            description: String::new(),
+            repo_path: other.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+    assert!(holds(&f.store, &d).is_err());
+    f.store.delete_project(&f.project).unwrap();
+    assert!(holds(&f.store, &d).is_err());
+}
+
+#[test]
+fn a_project_made_again_for_a_deleted_ones_folder_makes_its_own_record() {
+    let f = fixture();
+    f.day("2026-11-20", &f.project, ("ai", "human_approved"));
+    let Outcome::Saved { path: old, .. } =
+        summarize(&f.vault, &f.dossier(), "m", "high", |_, _| {
+            reply(answer(
+                &["D:2026-11-20:결정:1"],
+                "x",
+                &["D:2026-11-20:개요:1"],
+            ))
+        })
+        .unwrap()
+    else {
+        panic!("saved")
+    };
+    let kept = fs::read(&old).unwrap();
+    f.store.delete_project(&f.project).unwrap();
+    let next = f
+        .store
+        .save_project(ProjectInput {
+            id: None,
+            title: "새 앱".into(),
+            description: String::new(),
+            repo_path: f.repo.clone(),
+        })
+        .unwrap()
+        .id;
+    let note = uuid::Uuid::new_v4().to_string();
+    f.store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO diary_entries(id,project_id,date,kind,title,body,updated_at)
+             VALUES(?1,?2,'2026-11-25','note','메모','새 앱을 시작했다','2026-11-25T00:00:00Z')",
+            rusqlite::params![note, next],
+        )
+        .unwrap();
+    let d = gather(&f.store, &f.vault, &next).unwrap();
+    let Outcome::Saved { path, record } = summarize(&f.vault, &d, "m", "high", |_, _| {
+        reply(json!({
+            "overview": {"text": "새 앱", "evidence": [format!("R:{note}")]},
+            "features": [], "decisions": [], "troubleshooting": [], "results": [], "limits": []
+        }))
+    })
+    .unwrap() else {
+        panic!("saved")
+    };
+    assert_eq!(
+        (record.revision, record.project.id.as_str()),
+        (1, next.as_str())
+    );
+    assert_ne!(path, old);
+    // The deleted project's record stays where it was, untouched.
+    assert_eq!(fs::read(&old).unwrap(), kept);
 }

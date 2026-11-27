@@ -53,7 +53,7 @@ pub(crate) fn perform(
     if options.contains_key("--dry-run") {
         return Ok(out);
     }
-    match summarize_project(vault, &dossier, model).map_err(|e| e.message)? {
+    match summarize_project(store, vault, &dossier, model).map_err(|e| e.message)? {
         Outcome::Saved { path, record } => {
             out["outcome"] = "saved".into();
             out["record"] = json!({
@@ -83,14 +83,17 @@ pub(crate) fn perform(
 }
 
 /// Has `model` make the project record of `dossier` through the logged-in Codex CLI,
-/// checked and kept below `vault`.
+/// checked and kept below `vault`. Nothing is kept when, by the time the model has
+/// answered, the project is gone from `store` or has another folder: its record would
+/// stand in the way of the project's next owner of that folder.
 pub(crate) fn summarize_project(
+    store: &Storage,
     vault: &Path,
     dossier: &Dossier,
     model: &str,
 ) -> Result<Outcome, DailyError> {
     let asked = std::cell::Cell::new(false);
-    project_record::summarize(
+    project_record::summarize_while(
         vault,
         dossier,
         model,
@@ -112,6 +115,7 @@ pub(crate) fn summarize_project(
             asked.set(reply.as_ref().map_or_else(|failed| failed.sent, |_| true));
             reply
         },
+        || project_record::holds(store, dossier),
     )
     .map_err(|message| DailyError {
         message,
