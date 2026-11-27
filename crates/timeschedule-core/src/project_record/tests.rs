@@ -674,3 +674,48 @@ fn a_project_made_again_for_a_deleted_ones_folder_makes_its_own_record() {
     // The deleted project's record stays where it was, untouched.
     assert_eq!(fs::read(&old).unwrap(), kept);
 }
+
+/// The store is reached through a junction, and while the model answers the junction is
+/// pointed at another folder that has the same `project/<folder>/<project ID>` in it.
+/// The record and the usage line go to the store the run started in, and nothing is made
+/// in the other folder.
+#[cfg(windows)]
+#[test]
+fn a_junction_above_the_store_pointed_elsewhere_while_the_model_answers_is_not_followed() {
+    let point = |link: &Path, target: &Path| {
+        if link.exists() {
+            fs::remove_dir(link).unwrap();
+        }
+        let made = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{made:?}");
+    };
+    let f = fixture();
+    f.day("2026-11-20", &f.project, ("ai", "human_approved"));
+    let link = f.root.join("link");
+    point(&link, &f.vault);
+    let d = gather(&f.store, &link, &f.project).unwrap();
+    let other = f.root.join("other");
+    let other_dir = other.join("project").join(&d.folder).join(&d.project_id);
+    fs::create_dir_all(&other_dir).unwrap();
+    let outcome = summarize(&link, &d, "m", "high", |_, _| {
+        point(&link, &other);
+        reply(answer(
+            &["D:2026-11-20:결정:1"],
+            "x",
+            &["D:2026-11-20:개요:1"],
+        ))
+    })
+    .unwrap();
+    let made_there: Vec<_> = fs::read_dir(&other_dir).unwrap().collect();
+    fs::remove_dir(&link).unwrap();
+    assert!(made_there.is_empty(), "{made_there:?}");
+    assert!(matches!(outcome, Outcome::Saved { .. }));
+    let dir = f.vault.join("project").join(&d.folder).join(&d.project_id);
+    assert!(dir.join("record.json").is_file());
+    assert!(dir.join("usage.jsonl").is_file());
+}

@@ -2516,6 +2516,7 @@ dependencies = [
  "serde_json",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "zstd",
 ]
 
@@ -2531,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "timeschedule-native"
-version = "0.44.0"
+version = "0.44.1"
 dependencies = [
  "axum",
  "base64",
