@@ -925,6 +925,29 @@ pub fn is_current(
         .is_some_and(|latest| latest.made_from(&fingerprint)))
 }
 
+/// The completion day the latest kept record of `project` was made for, from its
+/// current folder: `None` when it has no record there, `Some(None)` when that record was
+/// made before completion ("완료 전 종합"). It only reads.
+pub fn kept_completion(
+    vault: &Path,
+    project: &crate::diary::Project,
+) -> Result<Option<Option<String>>, String> {
+    if !Path::new(&project.repo_path).is_absolute() {
+        return Ok(None);
+    }
+    let folder = group_name(&repo_key(&project.repo_path));
+    let Some(dir) =
+        Folder::found(vault, &record_folder(&folder, &project.id)?).map_err(folder_error)?
+    else {
+        return Ok(None);
+    };
+    let Some(latest) = owned_record(&dir, &project.id)? else {
+        return Ok(None);
+    };
+    let record: Value = serde_json::from_slice(&latest.bytes).map_err(|e| e.to_string())?;
+    Ok(Some(record["completedOn"].as_str().map(str::to_owned)))
+}
+
 /// Whether the project of `dossier` is still in `store` with the folder the bundle was
 /// read from. A record kept for a project deleted meanwhile would stand in the way of
 /// the next project given that folder.
