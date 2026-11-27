@@ -4760,6 +4760,25 @@ fn render_project_record_previews() {
         frame(&mut app, name);
     }
     app.project_record = None;
+    // Completed: the info rows ask for the final record until one is made for that day.
+    store
+        .set_project_completed(&id, Some("2026-12-01"))
+        .unwrap();
+    run_message(&mut app, Message::Project(Some(id.clone())));
+    app.project_tab = crate::app::ProjectTab::Portfolio;
+    frame(&mut app, "record-8-completed-asks");
+    app.snapshot
+        .record_completion
+        .insert(id.clone(), Some("2026-12-01".into()));
+    app.project_record = Some(Panel {
+        project: id.clone(),
+        state: State::Done(
+            "프로젝트 기록을 만들었습니다(판 2). 다이어리의 프로젝트 기록 항목을 새 판으로 바꿨습니다."
+                .into(),
+        ),
+    });
+    frame(&mut app, "record-9-completed-made");
+    app.project_record = None;
     run_message(&mut app, Message::Project(Some(bare)));
     app.project_tab = crate::app::ProjectTab::Portfolio;
     frame(&mut app, "record-7-no-folder");

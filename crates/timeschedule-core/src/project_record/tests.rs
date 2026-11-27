@@ -380,6 +380,8 @@ fn a_kept_record_is_not_asked_again_and_a_completion_makes_the_next_revision() {
             &["D:2026-11-20:트러블:1"],
         ))
     };
+    let project = || f.store.project_of(&f.project).unwrap();
+    assert_eq!(kept_completion(&f.vault, &project()).unwrap(), None);
     let d = f.dossier();
     let Outcome::Saved { path, record } = summarize(&f.vault, &d, "m", "high", |prompt, schema| {
         assert!(prompt.contains("상태: 진행 중"));
@@ -391,6 +393,7 @@ fn a_kept_record_is_not_asked_again_and_a_completion_makes_the_next_revision() {
     };
     assert_eq!(record.revision, 1);
     assert_eq!(record.completed_on, None);
+    assert_eq!(kept_completion(&f.vault, &project()).unwrap(), Some(None));
     assert_eq!(record.decisions[0].daily[0].proposed_by, Proposer::Ai);
     assert!(is_current(&f.vault, &d, "m", "high").unwrap());
     let asked = Cell::new(false);
@@ -414,6 +417,10 @@ fn a_kept_record_is_not_asked_again_and_a_completion_makes_the_next_revision() {
     };
     assert_eq!(record.revision, 2);
     assert_eq!(record.completed_on.as_deref(), Some("2026-12-01"));
+    assert_eq!(
+        kept_completion(&f.vault, &project()).unwrap(),
+        Some(Some("2026-12-01".into()))
+    );
     let dir = path.parent().unwrap();
     let first: ProjectRecord =
         serde_json::from_slice(&fs::read(dir.join("record.r1.json")).unwrap()).unwrap();

@@ -69,6 +69,8 @@ impl Panel {
 #[derive(Clone, Debug)]
 pub enum Action {
     Check(String),
+    /// ‘최종 기록 만들기’ on the info rows: the ‘포트폴리오’ tab, then `Check`.
+    Final(String),
     Checked(String, Result<Check, String>),
     Make(String),
     Made(String, Result<String, String>),
@@ -80,6 +82,34 @@ fn message(a: Action) -> Message {
 }
 
 pub(crate) const NO_FOLDER: &str = "로컬 Git 저장소 경로를 넣으면 프로젝트 기록을 만들 수 있습니다";
+pub(crate) const FINAL_ASK: &str = "프로젝트를 완료했습니다. 최종 프로젝트 기록을 만들어 두세요.";
+pub(crate) const FINAL_BUTTON: &str = "최종 기록 만들기";
+pub(crate) const IN_PROGRESS_HINT: &str = "진행 중에 만들면 ‘완료 전 종합’이 됩니다. 프로젝트가 끝나면 ‘완료로 표시’한 뒤 다시 만들어 최종본으로 쓰세요.";
+
+/// The day `p` was completed, if it was.
+fn completed_on<'a>(app: &'a App, p: &Project) -> Option<&'a str> {
+    app.snapshot
+        .project_meta
+        .get(&p.id)
+        .and_then(|m| m.completed_on.as_deref())
+}
+
+/// Whether the info rows of `p` ask for its final record: it is completed, a record can
+/// be made for it, and no kept record was made for that completion day. Only once the
+/// screen was read for `p`: right after switching to it, or after a record was made,
+/// the record's day on hand is not its own yet.
+pub(crate) fn wants_final(app: &App, p: &Project) -> bool {
+    let Some(day) = completed_on(app, p) else {
+        return false;
+    };
+    app.entries_project.as_ref() == Some(&p.id)
+        && Path::new(&p.repo_path).is_absolute()
+        && app
+            .snapshot
+            .record_completion
+            .get(&p.id)
+            .is_none_or(|made| made.as_deref() != Some(day))
+}
 
 /// `2026-11-13` as "11월 13일"; anything else as it is.
 fn day(date: &str) -> String {
@@ -150,10 +180,26 @@ pub fn panel<'a>(app: &'a App, p: &'a Project) -> Element<'a, Message> {
         .project_record
         .as_ref()
         .is_some_and(|r| r.project != p.id && r.running());
-    let start = || {
-        control("프로젝트 기록 만들기", message(Action::Check(p.id.clone()))).on_press_maybe(
+    let completed = completed_on(app, p).is_some();
+    let start = || -> Element<'a, Message> {
+        let label = if completed {
+            "최종 프로젝트 기록 만들기"
+        } else {
+            "프로젝트 기록 만들기"
+        };
+        let button = control(label, message(Action::Check(p.id.clone()))).on_press_maybe(
             (!elsewhere && app.store.is_some()).then(|| message(Action::Check(p.id.clone()))),
-        )
+        );
+        if completed {
+            button.into()
+        } else {
+            column![
+                button,
+                text(IN_PROGRESS_HINT).size(12).style(crate::theme::muted)
+            ]
+            .spacing(6)
+            .into()
+        }
     };
     match mine.map(|r| &r.state) {
         Some(State::Checking) => quiet("프로젝트 기록 입력 확인 중…"),
@@ -184,6 +230,14 @@ pub fn panel<'a>(app: &'a App, p: &'a Project) -> Element<'a, Message> {
 
 pub fn update(app: &mut App, a: Action) -> Task<Message> {
     match a {
+        // Only the input is checked: the model is called when ‘만들기’ is pressed there.
+        Action::Final(id) => {
+            if app.project.as_ref() != Some(&id) {
+                return Task::none();
+            }
+            let tab = app.update(Message::ProjectTab(crate::app::ProjectTab::Portfolio));
+            Task::batch([tab, update(app, Action::Check(id))])
+        }
         Action::Check(id) => {
             if app.project_record.as_ref().is_some_and(Panel::running) {
                 return Task::none();

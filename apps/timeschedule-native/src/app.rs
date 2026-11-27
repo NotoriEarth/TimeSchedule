@@ -878,6 +878,7 @@ impl App {
                 None
             },
             cards: self.page == Page::Projects && self.project.is_none(),
+            data_dir: self.data_dir.clone(),
         }
     }
     /// Makes the daily records `scope` names for a job of `kind`, unless records are
@@ -4323,6 +4324,78 @@ mod tests {
                 "프로젝트 기록을 만들지 못했습니다: 모델이 답하지 않았습니다".into()
             ))
         );
+    }
+    #[test]
+    fn a_completed_project_asks_for_its_final_record_until_one_is_made_for_that_day() {
+        use crate::project_record_ui::{wants_final, Action, State};
+        let (dir, mut app) = scanning_app();
+        let p = timeschedule_core::diary::Project {
+            id: "p1".into(),
+            title: "앱".into(),
+            description: String::new(),
+            repo_path: dir.0.join("repo").to_string_lossy().into_owned(),
+            updated_at: String::new(),
+        };
+        let complete = |app: &mut App, day: Option<&str>| {
+            app.snapshot
+                .project_meta
+                .entry(p.id.clone())
+                .or_default()
+                .completed_on = day.map(str::to_owned);
+        };
+        // Nothing is asked before the screen was read for this project (just switched
+        // to it, or a record was just made): the record's day on hand is not its own.
+        complete(&mut app, Some("2026-12-01"));
+        assert!(!wants_final(&app, &p));
+        app.entries_project = Some(p.id.clone());
+        // In progress: nothing is asked, with or without a record.
+        complete(&mut app, None);
+        assert!(!wants_final(&app, &p));
+        complete(&mut app, Some("2026-12-01"));
+        // Completed with no record, or with one made before completion or for an
+        // earlier completion: asked.
+        assert!(wants_final(&app, &p));
+        app.snapshot.record_completion.insert(p.id.clone(), None);
+        assert!(wants_final(&app, &p));
+        app.snapshot
+            .record_completion
+            .insert(p.id.clone(), Some("2026-11-20".into()));
+        assert!(wants_final(&app, &p));
+        // Made for this completion: no longer asked.
+        app.snapshot
+            .record_completion
+            .insert(p.id.clone(), Some("2026-12-01".into()));
+        assert!(!wants_final(&app, &p));
+        // Set back in progress and completed again the same day, without the screen
+        // read again: the record of that day still counts.
+        complete(&mut app, None);
+        complete(&mut app, Some("2026-12-01"));
+        assert!(!wants_final(&app, &p));
+        // Completed again on another day: asked again.
+        complete(&mut app, Some("2026-12-05"));
+        assert!(wants_final(&app, &p));
+        // No record can be made without an absolute folder: nothing is asked.
+        let relative = timeschedule_core::diary::Project {
+            repo_path: "repo".into(),
+            ..p.clone()
+        };
+        assert!(!wants_final(&app, &relative));
+        // The button opens the ‘포트폴리오’ tab and only checks the input.
+        app.page = Page::Projects;
+        app.project = Some(p.id.clone());
+        app.project_tab = ProjectTab::Records;
+        let _ = app.update(Message::ProjectRecord(Action::Final(p.id.clone())));
+        assert_eq!(app.project_tab, ProjectTab::Portfolio);
+        assert_eq!(
+            app.project_record.as_ref().map(|r| r.state.clone()),
+            Some(State::Checking)
+        );
+        // Not for a project that is not open.
+        app.project_record = None;
+        app.project_tab = ProjectTab::Records;
+        let _ = app.update(Message::ProjectRecord(Action::Final("p2".into())));
+        assert_eq!(app.project_tab, ProjectTab::Records);
+        assert!(app.project_record.is_none());
     }
     #[test]
     fn the_automatic_turn_goes_before_a_check_that_is_owed() {

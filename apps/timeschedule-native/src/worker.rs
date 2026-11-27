@@ -21,6 +21,8 @@ pub struct Scope {
     pub project: Option<String>,
     /// Whether the project cards are read: only for 모든 프로젝트 on the projects screen.
     pub cards: bool,
+    /// The app's data folder, where the document store is found; empty without one.
+    pub data_dir: std::path::PathBuf,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -41,6 +43,12 @@ pub struct Snapshot {
     pub project_cards: HashMap<String, ProjectCard>,
     /// Each project's GitHub link and completion date, by project ID.
     pub project_meta: HashMap<String, timeschedule_core::project_meta::ProjectMeta>,
+    /// For the open project, when it has a project record: the completion day its
+    /// latest record was made for (`None`: made before completion). Read whether or not
+    /// the project is completed, so marking it completed again on the day of its last
+    /// record asks for nothing. Its info rows ask for a final record until that day is
+    /// the project's.
+    pub record_completion: HashMap<String, Option<String>>,
 }
 /// A project's record count, latest record date and whether its chats are captured.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -167,9 +175,12 @@ pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
     let (entries, entry_totals) = entry_page(store, scope, 0)?;
     let projects = store.list_projects()?;
     let project_cards = project_cards(store, scope, &projects)?;
+    let project_meta = store.all_project_meta()?;
+    let record_completion = record_completion(scope, &projects);
     Ok(Snapshot {
         project_cards,
-        project_meta: store.all_project_meta()?,
+        project_meta,
+        record_completion,
         days,
         widget_days,
         today,
@@ -195,6 +206,33 @@ pub fn snapshot(store: &Storage, scope: &Scope) -> Result<Snapshot, String> {
         entries,
         entry_totals,
     })
+}
+/// `Snapshot::record_completion`, read for the open project only. A store that cannot
+/// be found or read counts as no record: the info rows of a completed project then ask
+/// for one, and making it says what is wrong.
+fn record_completion(scope: &Scope, projects: &[Project]) -> HashMap<String, Option<String>> {
+    if scope.project.is_none() || scope.data_dir.as_os_str().is_empty() {
+        return HashMap::new();
+    }
+    match crate::record_original::originals_vault(&scope.data_dir) {
+        Ok(vault) => completion_in(&vault, scope, projects),
+        Err(_) => HashMap::new(),
+    }
+}
+/// `record_completion` with the document store at `vault`.
+fn completion_in(
+    vault: &Path,
+    scope: &Scope,
+    projects: &[Project],
+) -> HashMap<String, Option<String>> {
+    let mut out = HashMap::new();
+    let open = scope.project.as_deref();
+    if let Some(project) = projects.iter().find(|p| Some(p.id.as_str()) == open) {
+        if let Ok(Some(day)) = timeschedule_core::project_record::kept_completion(vault, project) {
+            out.insert(project.id.clone(), day);
+        }
+    }
+    out
 }
 pub fn hydrate_form(store: &Storage, mut form: Form) -> Result<Form, String> {
     if let Some(id) = form.id.clone() {
@@ -941,6 +979,49 @@ pub fn job<T: Send + 'static, M: Send + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_open_projects_record_day_is_read_while_it_is_in_progress_too() {
+        let dir = crate::record_inbox::tests::TestDir::new();
+        let vault = dir.0.join("vault");
+        let store = Storage::open(":memory:").unwrap();
+        let id = store
+            .save_project(timeschedule_core::diary::ProjectInput {
+                id: None,
+                title: "앱".into(),
+                description: String::new(),
+                repo_path: dir.0.join("repo").to_string_lossy().into_owned(),
+            })
+            .unwrap()
+            .id;
+        let projects = [store.project_of(&id).unwrap()];
+        let open = Scope {
+            project: Some(id.clone()),
+            ..scope()
+        };
+        // No record yet.
+        assert!(completion_in(&vault, &open, &projects).is_empty());
+        // A final record of 12월 1일, read while the project is in progress (set back
+        // after that record): marking it completed again that day asks for nothing.
+        let folder = timeschedule_core::project_record::gather(&store, &vault, &id)
+            .unwrap()
+            .folder;
+        let kept = vault.join("project").join(folder).join(&id);
+        std::fs::create_dir_all(&kept).unwrap();
+        let record = serde_json::json!({
+            "project": {"id": id, "title": "앱", "repoKey": "x"},
+            "revision": 2,
+            "completedOn": "2026-12-01",
+            "input": {"fingerprint": "f"}
+        });
+        std::fs::write(kept.join("record.json"), record.to_string()).unwrap();
+        assert_eq!(store.project_meta(&id).unwrap().completed_on, None);
+        assert_eq!(
+            completion_in(&vault, &open, &projects),
+            HashMap::from([(id.clone(), Some("2026-12-01".to_owned()))])
+        );
+        // Only for the open project.
+        assert!(completion_in(&vault, &scope(), &projects).is_empty());
+    }
     fn scope() -> Scope {
         Scope {
             from: "2026-10-01".into(),
@@ -952,6 +1033,7 @@ mod tests {
             today: "2026-10-29".into(),
             project: None,
             cards: false,
+            data_dir: Default::default(),
         }
     }
     #[test]

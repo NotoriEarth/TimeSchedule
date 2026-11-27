@@ -645,6 +645,31 @@ fn project_info<'a>(
     ]
     .spacing(10)
     .align_y(Alignment::Start);
+    let mut info = column![about].spacing(8);
+    // A completed project without a record made since its completion asks for one.
+    if crate::project_record_ui::wants_final(app, p) {
+        let open = app
+            .project_record
+            .as_ref()
+            .is_some_and(crate::project_record_ui::Panel::running);
+        let make = Message::ProjectRecord(crate::project_record_ui::Action::Final(p.id.clone()));
+        info = info.push(
+            container(
+                row![
+                    text(crate::project_record_ui::FINAL_ASK)
+                        .size(13)
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                    control(crate::project_record_ui::FINAL_BUTTON, make.clone())
+                        .on_press_maybe((!open && app.store.is_some()).then_some(make)),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            )
+            .padding([6, 10])
+            .style(theme::surface),
+        );
+    }
     let linked = !p.repo_path.is_empty();
     // The capture state comes with this project's latest read; while a read runs, or
     // when it failed, the state is unknown and the button waits. (A toggle reads again,
@@ -669,7 +694,6 @@ fn project_info<'a>(
                 .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
         );
     }
-    let mut info = column![about].spacing(8);
     if linked || watching {
         sources = sources
             .push(quiet("·"))
