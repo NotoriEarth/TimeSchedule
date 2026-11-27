@@ -186,6 +186,7 @@ fn perform(
             "report": part(&scan.excerpts),
             "originals": part(&scan.originals),
             "daily": part(&scan.daily),
+            "project": part(&scan.project),
         }));
     }
     let report = record_inbox::drain(&dir, &store)?;

@@ -910,7 +910,11 @@ pub(crate) fn projects(app: &App) -> Element<'_, Message> {
             c = c.push(paper(review));
         }
         ProjectTab::Portfolio => {
-            let mut portfolio = column![draft_row(app, "자료 발췌 초안", true)].spacing(12);
+            let mut portfolio = column![
+                crate::project_record_ui::panel(app, p),
+                draft_row(app, "자료 발췌 초안", true)
+            ]
+            .spacing(12);
             if let Some(state) = app
                 .snapshot
                 .portfolio

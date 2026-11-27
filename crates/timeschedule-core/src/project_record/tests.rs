@@ -423,6 +423,33 @@ fn a_kept_record_is_not_asked_again_and_a_completion_makes_the_next_revision() {
 }
 
 #[test]
+fn an_answer_is_not_kept_once_the_project_no_longer_holds() {
+    let f = fixture();
+    f.day("2026-11-20", &f.project, ("ai", "human_approved"));
+    let d = f.dossier();
+    let error = summarize_while(
+        &f.vault,
+        &d,
+        "m",
+        "high",
+        |_, _| {
+            reply(answer(
+                &["D:2026-11-20:결정:1"],
+                "x",
+                &["D:2026-11-20:개요:1"],
+            ))
+        },
+        || Err("프로젝트가 지워졌습니다".into()),
+    )
+    .unwrap_err();
+    assert!(error.contains("프로젝트가 지워졌습니다"), "{error}");
+    let dir = f.vault.join("project").join(&d.folder);
+    assert!(!dir.join("record.json").exists());
+    let usage = fs::read_to_string(dir.join("usage.jsonl")).unwrap();
+    assert!(usage.contains("\"outcome\":\"save_failed\""), "{usage}");
+}
+
+#[test]
 fn a_second_run_while_one_holds_the_lock_is_busy_and_asks_nothing() {
     let f = fixture();
     f.day("2026-11-20", &f.project, ("ai", "human_approved"));
@@ -552,4 +579,25 @@ fn a_bundle_with_nothing_to_cite_is_not_sent() {
 fn a_bundle_too_large_is_not_sent() {
     assert!(check_size(10).is_ok());
     assert!(check_size(1_000_000).is_err());
+}
+
+#[test]
+fn a_project_deleted_or_moved_after_its_bundle_was_read_no_longer_holds() {
+    let f = fixture();
+    f.day("2026-11-20", &f.project, ("ai", "human_approved"));
+    let d = f.dossier();
+    assert!(holds(&f.store, &d).is_ok());
+    let other = f.root.join("other");
+    fs::create_dir_all(&other).unwrap();
+    f.store
+        .save_project(ProjectInput {
+            id: Some(f.project.clone()),
+            title: "앱".into(),
+            description: String::new(),
+            repo_path: other.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+    assert!(holds(&f.store, &d).is_err());
+    f.store.delete_project(&f.project).unwrap();
+    assert!(holds(&f.store, &d).is_err());
 }

@@ -4657,6 +4657,115 @@ fn render_project_meta_previews() {
 }
 
 #[test]
+#[ignore = "manual previews of the project record panel on the portfolio tab"]
+fn render_project_record_previews() {
+    use crate::project_record_ui::{Check, Panel, State};
+    use timeschedule_core::diary::ProjectInput;
+    let output = PathBuf::from(std::env::var_os("TIMESCHEDULE_PREVIEW_DIR").unwrap());
+    std::fs::create_dir_all(&output).unwrap();
+    let mut app = fixture();
+    let store = app.store.clone().unwrap();
+    let id = store
+        .save_project(ProjectInput {
+            id: None,
+            title: "TimeSchedule".into(),
+            description: "일정·다이어리 앱".into(),
+            repo_path: r"C:\LSH\TimeSchedule".into(),
+        })
+        .unwrap()
+        .id;
+    let bare = store
+        .save_project(ProjectInput {
+            id: None,
+            title: "midi".into(),
+            description: "MIDI 편집 프로그램".into(),
+            repo_path: String::new(),
+        })
+        .unwrap()
+        .id;
+    let size = Size::new(1160., 820.);
+    let frame = |app: &mut App, name: &str| {
+        app.manager_size = size;
+        let app = &*app;
+        let mut element = crate::views::view(app, app.manager);
+        let mut renderer = iced::Renderer::new(iced::Font::with_name("Malgun Gothic"), 14.into());
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        render_scaled_frame(
+            app,
+            &mut element,
+            &mut tree,
+            &node,
+            &mut renderer,
+            size,
+            &output.join(format!("{name}.png")),
+            1.,
+        );
+    };
+    run_message(&mut app, Message::Project(Some(id.clone())));
+    app.project_tab = crate::app::ProjectTab::Portfolio;
+    frame(&mut app, "record-1-start");
+    let check = Check {
+        days: 3,
+        records: 70,
+        tokens: 87_825,
+        model: "gpt-6.2-astra".into(),
+        missing: [
+            "2026-11-13",
+            "2026-11-14",
+            "2026-11-15",
+            "2026-11-16",
+            "2026-11-17",
+            "2026-11-18",
+            "2026-11-19",
+        ]
+        .map(String::from)
+        .to_vec(),
+        warnings: vec![],
+        completed_on: None,
+        current: false,
+        refused: None,
+        folder: "c:/lsh/timeschedule".into(),
+    };
+    for (name, state) in [
+        ("record-2-checking", State::Checking),
+        ("record-3-ask", State::Ask(check.clone())),
+        (
+            "record-4-ask-too-large",
+            State::Ask(Check {
+                tokens: 231_004,
+                refused: Some(
+                    "프로젝트 기록 묶음이 너무 큽니다(추정 입력 231004토큰, 한도 200000).".into(),
+                ),
+                ..check.clone()
+            }),
+        ),
+        ("record-5-making", State::Making),
+        (
+            "record-6-done",
+            State::Done(
+                "프로젝트 기록을 만들었습니다(판 1). 다이어리에 ‘프로젝트 기록 · TimeSchedule’로 보입니다."
+                    .into(),
+            ),
+        ),
+    ] {
+        app.project_record = Some(Panel {
+            project: id.clone(),
+            state,
+        });
+        frame(&mut app, name);
+    }
+    app.project_record = None;
+    run_message(&mut app, Message::Project(Some(bare)));
+    app.project_tab = crate::app::ProjectTab::Portfolio;
+    frame(&mut app, "record-7-no-folder");
+}
+
+#[test]
 fn a_project_date_heading_names_the_weekday_and_drops_this_year() {
     use crate::views::date_heading;
     assert_eq!(date_heading("2026-11-24", 2026), "11월 24일 (화)");

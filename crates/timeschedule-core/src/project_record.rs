@@ -106,9 +106,10 @@ fn day_of(name: &str) -> Option<&str> {
 /// the days that have dialogue and no daily record. Nothing is written.
 pub fn gather(store: &Storage, vault: &Path, project: &str) -> Result<Dossier, String> {
     let p = store.project_of(project)?;
-    if p.repo_path.is_empty() {
+    // The diary shows the records of projects with an absolute folder only.
+    if !Path::new(&p.repo_path).is_absolute() {
         return Err(
-            "로컬 Git 저장소 경로가 없는 프로젝트는 하루 기록이 없어 프로젝트 기록을 만들지 않습니다."
+            "로컬 Git 저장소 경로(절대 경로)가 없는 프로젝트는 하루 기록이 없어 프로젝트 기록을 만들지 않습니다."
                 .into(),
         );
     }
@@ -123,7 +124,7 @@ pub fn gather(store: &Storage, vault: &Path, project: &str) -> Result<Dossier, S
     // project renamed before then shows its new name, and one moved to another folder
     // meanwhile is read again by the next run.
     let p = store.project_of(&p.id)?;
-    if p.repo_path.is_empty() || repo_key(&p.repo_path) != key {
+    if !Path::new(&p.repo_path).is_absolute() || repo_key(&p.repo_path) != key {
         return Err("프로젝트의 로컬 저장소 경로가 방금 바뀌었습니다. 다시 실행해 주세요.".into());
     }
     // Read before the records: a project completed meanwhile then shows with every
@@ -897,6 +898,24 @@ pub fn is_current(
         .is_some_and(|latest| latest.made_from(&fingerprint)))
 }
 
+/// Whether the project of `dossier` is still in `store` with the folder the bundle was
+/// read from. A record kept for a project deleted meanwhile would stand in the way of
+/// the next project given that folder.
+pub fn holds(store: &Storage, dossier: &Dossier) -> Result<(), String> {
+    let moved = || {
+        "모델이 답하는 동안 프로젝트가 지워졌거나 폴더가 바뀌어 새 판을 쓰지 않았습니다."
+            .to_string()
+    };
+    let project = store.project_of(&dossier.project_id).map_err(|_| moved())?;
+    if Path::new(&project.repo_path).is_absolute()
+        && repo_key(&project.repo_path) == dossier.repo_key
+    {
+        Ok(())
+    } else {
+        Err(moved())
+    }
+}
+
 /// One line of `usage.jsonl`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -924,6 +943,20 @@ pub fn summarize(
     model: &str,
     effort: &str,
     infer: impl FnOnce(&str, &Value) -> Result<Reply, Failed>,
+) -> Result<Outcome, String> {
+    summarize_while(vault, dossier, model, effort, infer, || Ok(()))
+}
+
+/// `summarize`, with `holds` asked once the answer is checked and before it is kept:
+/// an error there (the project was deleted or moved to another folder while the model
+/// answered, say) keeps nothing.
+pub fn summarize_while(
+    vault: &Path,
+    dossier: &Dossier,
+    model: &str,
+    effort: &str,
+    infer: impl FnOnce(&str, &Value) -> Result<Reply, Failed>,
+    holds: impl FnOnce() -> Result<(), String>,
 ) -> Result<Outcome, String> {
     // A daily record can be kept with every item left out, so days alone do not say
     // there is anything to cite.
@@ -1053,6 +1086,7 @@ pub fn summarize(
         limits: body.limits,
     };
     let bytes = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
+    holds().map_err(|e| failed("save_failed", &reply.usage, reply.seconds, e))?;
     keep(&dir, &path, STEM, previous.as_ref(), &bytes)
         .map_err(|e| failed("save_failed", &reply.usage, reply.seconds, e))?;
     log("saved", &reply.usage, reply.seconds, None)
@@ -1063,6 +1097,8 @@ pub fn summarize(
         record: Box::new(record),
     })
 }
+
+pub mod diary;
 
 #[cfg(test)]
 mod tests;
