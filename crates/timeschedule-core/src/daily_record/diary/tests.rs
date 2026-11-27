@@ -6,7 +6,7 @@ use crate::{
     timeline::TimeChange,
 };
 use serde_json::json;
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 /// A store with one captured project, its folder, and a document store.
 struct Fixture {
@@ -501,9 +501,11 @@ fn capture_turned_off_after_the_projects_were_listed_writes_nothing() {
     let project = projects.iter().find(|p| p.id == f.project).unwrap();
     // Between listing the projects and writing, the owner turns capture off.
     f.store.set_chat_capture(&f.project, false).unwrap();
-    let path = f.records(&f.key).join("2026-11-20.json");
+    let dir = Folder::found(&f.records(&f.key), &[]).unwrap().unwrap();
     assert!(matches!(
-        f.store.show_record(project, "2026-11-20", &path).unwrap(),
+        f.store
+            .show_record(project, "2026-11-20", &dir, "2026-11-20.json")
+            .unwrap(),
         Shown::OtherFolder
     ));
     assert!(f.shown("2026-11-20").is_empty());

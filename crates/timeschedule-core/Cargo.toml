@@ -12,6 +12,10 @@ chrono = { version = "0.4", features = ["clock"] }
 url = "2"
 zstd = "0.13"
 
+[target.'cfg(windows)'.dependencies]
+# Record folders are opened and used by handle (`vault_folder`).
+windows-sys = { version = "0.61", features = ["Wdk_Foundation", "Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
 [dev-dependencies]
 # Tests count SQLite VM steps (progress handler) to check work does not grow with data size.
 rusqlite = { version = "0.37", features = ["bundled", "hooks"] }

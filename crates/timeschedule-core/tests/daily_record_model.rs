@@ -1489,3 +1489,46 @@ fn a_record_folder_behind_a_link_is_refused_when_looking_as_when_making() {
     assert!(is_current(&v.0, &t, TERRA, "medium").is_err());
     assert!(summarize(&v.0, &t, TERRA, "medium", |_, _| panic!("asked")).is_err());
 }
+
+/// Points the junction `link` at `target`, as a program could while a run is at work.
+#[cfg(windows)]
+fn point(link: &Path, target: &Path) {
+    if link.exists() {
+        std::fs::remove_dir(link).unwrap();
+    }
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+}
+
+/// The store is reached through a junction (say, a moved Documents folder), and while
+/// the model answers the junction is pointed at another folder that has the same
+/// `daily/<folder>` in it. The folders the run opened stay the ones it writes to: the
+/// record and the usage line go to the store it started in, and nothing is made in the
+/// other folder.
+#[cfg(windows)]
+#[test]
+fn a_junction_above_the_store_pointed_elsewhere_while_the_model_answers_is_not_followed() {
+    let v = vault();
+    let t = transcript(&v.0);
+    let link = v.0.with_extension("link");
+    let other = v.0.with_extension("other");
+    let other_day = other.join("daily").join(FOLDER);
+    std::fs::create_dir_all(&other_day).unwrap();
+    point(&link, &v.0);
+    let outcome = summarize(&link, &t, TERRA, "medium", |_, _| {
+        point(&link, &other);
+        reply(answer())
+    });
+    let made_there: Vec<_> = std::fs::read_dir(&other_day).unwrap().collect();
+    std::fs::remove_dir(&link).unwrap();
+    std::fs::remove_dir_all(&other).unwrap();
+    saved(outcome.unwrap());
+    assert!(made_there.is_empty(), "{made_there:?}");
+    assert!(v.day().is_file());
+    assert_eq!(v.usage().len(), 1);
+}

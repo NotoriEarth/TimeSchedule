@@ -15,11 +15,11 @@
 //! one set aside as `record.r<N>.json`, one run at a time under `.record.lock`, and a
 //! line in `usage.jsonl` for every model call.
 use crate::{
-    chat_originals::{group_name, is_link},
+    chat_originals::group_name,
     daily_record::{
         one_line, plain_lines, project_dir,
         record::{
-            conforms, estimated_tokens, keep, log_usage, object, open_plain, read_latest,
+            conforms, estimated_tokens, file_error, keep, log_usage, object, read_latest,
             set_aside, tenths, text, text_or_null, DailyRecord, Decider, Latest, Proposer, Spent,
         },
         session_days,
@@ -28,6 +28,7 @@ use crate::{
     reading::{Origin, WholeRecord},
     storage::{validate_date, validate_id, Storage},
     terra::{Failed, Reply, Usage},
+    vault_folder::{is_linked, Folder, Open},
 };
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -115,11 +116,20 @@ pub fn gather(store: &Storage, vault: &Path, project: &str) -> Result<Dossier, S
     }
     let key = repo_key(&p.repo_path);
     let folder = group_name(&key);
-    let record_seen = owned_record(
-        &record_dir(vault, &folder, &p.id)?.join(format!("{STEM}.json")),
-        &p.id,
-    )?
-    .map(|latest| latest.bytes);
+    // The store is opened once, and the record and the daily records are both read from
+    // it: never one from one store and the other from wherever a link above it points
+    // later.
+    let opened = Folder::store(vault).map_err(text)?;
+    let record_dir = match &opened {
+        Some(opened) => opened
+            .below(&record_folder(&folder, &p.id)?)
+            .map_err(folder_error)?,
+        None => None,
+    };
+    let record_seen = match record_dir {
+        Some(dir) => owned_record(&dir, &p.id)?.map(|latest| latest.bytes),
+        None => None,
+    };
     // Everything the bundle holds is read after the record above, the project too: a
     // project renamed before then shows its new name, and one moved to another folder
     // meanwhile is read again by the next run.
@@ -132,44 +142,44 @@ pub fn gather(store: &Storage, vault: &Path, project: &str) -> Result<Dossier, S
     let completed_on = store.project_meta(&p.id)?.completed_on;
     let mut warnings = Vec::new();
     let mut days = Vec::new();
-    let daily = vault.join("daily");
-    let dir = daily.join(&folder);
-    for at in [&daily, &dir] {
-        if is_link(at).map_err(text)? {
-            return Err("링크인 daily 폴더의 하루 기록은 읽지 않습니다.".into());
+    // The daily records are listed and read through the folder held open, so none is
+    // read from where a link put on the way meanwhile points.
+    let linked_daily = |e: io::Error| {
+        if is_linked(&e) {
+            "링크인 daily 폴더의 하루 기록은 읽지 않습니다.".to_string()
+        } else {
+            text(e)
         }
-    }
-    match fs::read_dir(&dir) {
-        Ok(entries) => {
-            for entry in entries {
-                let entry = entry.map_err(text)?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                let Some(date) = day_of(&name) else {
-                    continue;
-                };
-                let path = entry.path();
-                let read = || -> Result<DailyRecord, String> {
-                    if is_link(&path).map_err(text)? {
-                        return Err("링크입니다".into());
+    };
+    let daily_dir = match &opened {
+        Some(opened) => opened.below(&["daily", &folder]).map_err(linked_daily)?,
+        None => None,
+    };
+    if let Some(dir) = daily_dir {
+        for name in dir.names().map_err(text)? {
+            let Some(date) = day_of(&name) else {
+                continue;
+            };
+            let read = || -> Result<DailyRecord, String> {
+                let bytes = dir.read(&name).map_err(|e| {
+                    if is_linked(&e) {
+                        "링크입니다".to_string()
+                    } else {
+                        text(e)
                     }
-                    let bytes = fs::read(&path).map_err(text)?;
-                    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
-                };
-                match read() {
-                    Ok(r)
-                        if r.project.id == p.id && r.project.repo_key == key && r.date == date =>
-                    {
-                        days.push(r)
-                    }
-                    Ok(_) => warnings.push(format!(
-                        "{name}: 이 프로젝트와 폴더, 날짜의 하루 기록이 아니어서 넣지 않았습니다."
-                    )),
-                    Err(e) => warnings.push(format!("{name}: 읽지 못했습니다({e}).")),
+                })?;
+                serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+            };
+            match read() {
+                Ok(r) if r.project.id == p.id && r.project.repo_key == key && r.date == date => {
+                    days.push(r)
                 }
+                Ok(_) => warnings.push(format!(
+                    "{name}: 이 프로젝트와 폴더, 날짜의 하루 기록이 아니어서 넣지 않았습니다."
+                )),
+                Err(e) => warnings.push(format!("{name}: 읽지 못했습니다({e}).")),
             }
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(text(e)),
     }
     days.sort_by(|a, b| a.date.cmp(&b.date));
     let records = store.read_whole_records(&p.id, &SUPPORTING)?;
@@ -839,31 +849,39 @@ pub enum Outcome {
     Busy { path: PathBuf },
 }
 
-/// The folder of one project's records: `project/<folder>/<project ID>`. Each project
-/// has its own, so two projects given one folder, or a project made again for the
-/// folder of a deleted one, never meet each other's records or revisions.
-pub(crate) fn record_dir(vault: &Path, folder: &str, project: &str) -> Result<PathBuf, String> {
+/// Where one project's records are below the store: `project/<folder>/<project ID>`.
+/// Each project has its own folder, so two projects given one folder, or a project made
+/// again for the folder of a deleted one, never meet each other's records or revisions.
+/// It is opened as a `vault_folder::Folder`, so a link on the way is refused
+/// (`folder_error`).
+pub(crate) fn record_folder<'a>(folder: &'a str, project: &'a str) -> Result<[&'a str; 3], String> {
     validate_id(project)?;
-    let root = vault.join("project");
-    let group = root.join(folder);
-    let dir = group.join(project);
-    for folder in [&root, &group, &dir] {
-        if is_link(folder).map_err(text)? {
-            return Err("링크 폴더에는 프로젝트 기록을 쓰지 않습니다.".into());
-        }
+    Ok(["project", folder, project])
+}
+
+pub(crate) fn folder_error(e: io::Error) -> String {
+    if is_linked(&e) {
+        "링크 폴더에는 프로젝트 기록을 쓰지 않습니다.".into()
+    } else {
+        text(e)
     }
-    Ok(dir)
 }
 
-/// Where the project's latest record file is.
+/// Where the project's latest record file is, for showing.
 pub fn record_path(vault: &Path, dossier: &Dossier) -> Result<PathBuf, String> {
-    Ok(record_dir(vault, &dossier.folder, &dossier.project_id)?.join(format!("{STEM}.json")))
+    validate_id(&dossier.project_id)?;
+    Ok(vault
+        .join("project")
+        .join(&dossier.folder)
+        .join(&dossier.project_id)
+        .join(format!("{STEM}.json")))
 }
 
-/// The latest record at `path`, which must be the project `project`'s: a file copied in
+/// The latest record in `dir`, which must be the project `project`'s: a file copied in
 /// from another project's folder is not replaced.
-fn owned_record(path: &Path, project: &str) -> Result<Option<Latest>, String> {
-    let latest = read_latest(path)?;
+fn owned_record(dir: &Folder, project: &str) -> Result<Option<Latest>, String> {
+    let name = format!("{STEM}.json");
+    let latest = read_latest(dir, &name)?;
     if let Some(latest) = &latest {
         let owner = serde_json::from_slice::<Value>(&latest.bytes)
             .ok()
@@ -871,7 +889,7 @@ fn owned_record(path: &Path, project: &str) -> Result<Option<Latest>, String> {
         if owner.as_deref() != Some(project) {
             return Err(format!(
                 "{}에 이 프로젝트가 아닌 다른 프로젝트의 기록이 있습니다(다른 폴더에서 옮겨 온 파일). 덮어쓰지 않고 멈췄습니다.",
-                path.display()
+                dir.file(&name).display()
             ));
         }
     }
@@ -897,9 +915,13 @@ pub fn is_current(
     model: &str,
     effort: &str,
 ) -> Result<bool, String> {
-    let path = record_path(vault, dossier)?;
+    let Some(dir) = Folder::found(vault, &record_folder(&dossier.folder, &dossier.project_id)?)
+        .map_err(folder_error)?
+    else {
+        return Ok(false);
+    };
     let fingerprint = fingerprint(dossier, model, effort);
-    Ok(owned_record(&path, &dossier.project_id)?
+    Ok(owned_record(&dir, &dossier.project_id)?
         .is_some_and(|latest| latest.made_from(&fingerprint)))
 }
 
@@ -973,25 +995,23 @@ pub fn summarize_while(
     }
     let chars = dossier.chars();
     check_size(chars)?;
-    let dir = record_dir(vault, &dossier.folder, &dossier.project_id)?;
-    let path = dir.join(format!("{STEM}.json"));
-    fs::create_dir_all(&dir).map_err(text)?;
-    let lock = open_plain(
-        &dir.join(format!(".{STEM}.lock")),
-        fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false),
-    )
-    .map_err(text)?;
+    // The folder is held open until the run ends, and every file is opened through it:
+    // the folder cannot be moved while the model answers, and a link put on the way is
+    // not followed.
+    let dir = Folder::made(vault, &record_folder(&dossier.folder, &dossier.project_id)?)
+        .map_err(folder_error)?;
+    let path = dir.file(&format!("{STEM}.json"));
+    let lock_name = format!(".{STEM}.lock");
+    let lock = dir
+        .open(&lock_name, Open::Lock)
+        .map_err(|e| file_error(&dir, &lock_name, e))?;
     match lock.try_lock() {
         Ok(()) => {}
         Err(fs::TryLockError::WouldBlock) => return Ok(Outcome::Busy { path }),
         Err(fs::TryLockError::Error(e)) => return Err(text(e)),
     }
     let fingerprint = fingerprint(dossier, model, effort);
-    let previous = owned_record(&path, &dossier.project_id)?;
+    let previous = owned_record(&dir, &dossier.project_id)?;
     let mut revision = 1;
     if let Some(previous) = &previous {
         if previous.made_from(&fingerprint) {
@@ -1011,15 +1031,7 @@ pub fn summarize_while(
         set_aside(&dir, STEM, previous, false)?;
         revision = previous.revision + 1;
     }
-    // The folders are checked again before anything is written after the model call:
-    // the call can take many minutes, and a folder may have been made a link meanwhile.
-    let still_plain = || {
-        record_dir(vault, &dossier.folder, &dossier.project_id)
-            .map(|_| ())
-            .map_err(|e| format!("모델을 기다리는 동안 저장 폴더가 바뀌어 쓰지 않았습니다: {e}"))
-    };
     let log = |outcome: &str, usage: &Usage, seconds: f64, message: Option<&str>| {
-        still_plain()?;
         log_usage(
             &dir,
             &UsageLine {
@@ -1102,8 +1114,7 @@ pub fn summarize_while(
     };
     let bytes = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
     holds().map_err(|e| failed("save_failed", &reply.usage, reply.seconds, e))?;
-    still_plain().map_err(|e| failed("save_failed", &reply.usage, reply.seconds, e))?;
-    keep(&dir, &path, STEM, previous.as_ref(), &bytes)
+    keep(&dir, STEM, previous.as_ref(), &bytes)
         .map_err(|e| failed("save_failed", &reply.usage, reply.seconds, e))?;
     log("saved", &reply.usage, reply.seconds, None)
         .map_err(|e| format!("프로젝트 기록은 저장했습니다({}). {e}", path.display()))?;

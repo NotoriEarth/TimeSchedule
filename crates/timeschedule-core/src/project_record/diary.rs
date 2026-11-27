@@ -14,14 +14,15 @@ use crate::{
     daily_record::{
         diary::{fitted, DiaryReport, BODY_LIMIT},
         one_line,
-        record::read_plain,
+        record::file_error,
     },
     project_records::repo_key,
     storage::{database_error, timestamp, validate_text, Storage},
     timeline::kst_date,
+    vault_folder::Folder,
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use std::{fmt::Write as _, fs, io, path::Path};
+use std::{fmt::Write as _, io, path::Path};
 
 /// Schema 18. Tests that build an older database by dropping later tables leave this
 /// one in place, so it is made only when missing.
@@ -179,10 +180,15 @@ impl Storage {
         if is_link(&root).map_err(|e| e.to_string())? {
             return Err("링크인 project 폴더의 프로젝트 기록은 읽지 않습니다.".into());
         }
+        // Opened once: every record is read, and read again before it is shown, from the
+        // one store opened here.
+        let Some(store) = Folder::store(vault).map_err(|e| e.to_string())? else {
+            return Ok(report);
+        };
         let holders = self.holders()?;
         for holder in holders.iter().filter(|h| only.is_none_or(|id| h.id == id)) {
             let folder = group_name(&holder.key);
-            let bytes = match read_record(vault, &folder, &holder.id) {
+            let bytes = match read_record(&store, &folder, &holder.id) {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) => continue,
                 Err(_) => {
@@ -199,7 +205,7 @@ impl Storage {
                 report.failed += 1;
                 continue;
             }
-            match self.show_project_record(holder, &folder, &record, (vault, &bytes)) {
+            match self.show_project_record(holder, &folder, &record, (&store, &bytes)) {
                 Ok(Shown::Added) => report.added += 1,
                 Ok(Shown::Updated) => report.updated += 1,
                 Ok(Shown::Kept) => report.kept += 1,
@@ -234,13 +240,13 @@ impl Storage {
         Ok(holders)
     }
 
-    /// Shows `record`, read from the store at `read.0` as the bytes `read.1`, in the diary.
+    /// Shows `record`, read from the open store `read.0` as the bytes `read.1`, in the diary.
     fn show_project_record(
         &self,
         holder: &Holder,
         folder: &str,
         record: &ProjectRecord,
-        read: (&Path, &[u8]),
+        read: (&Folder, &[u8]),
     ) -> Result<Shown, String> {
         // A file copied in from the records of another folder is not of this lineage.
         if record.project.repo_key != holder.key {
@@ -375,28 +381,20 @@ impl Storage {
     }
 }
 
-/// The latest record file of the project `id` in the store `vault`: `None` when there
-/// is none. It is found the way it is made (`record_dir`: the ID checked, no folder a
-/// link), and the file is opened without following a link.
-fn read_record(vault: &Path, folder: &str, id: &str) -> Result<Option<Vec<u8>>, String> {
-    let dir = super::record_dir(vault, folder, id)?;
-    // The folder's group (`project/<folder>`) first, then the project's own folder.
-    for at in [dir.parent().ok_or("프로젝트 기록 폴더가 없습니다.")?, &dir] {
-        match fs::symlink_metadata(at) {
-            // No record for this project yet.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.to_string()),
-            Ok(meta) if !meta.is_dir() => {
-                return Err(format!("{}이 폴더가 아닙니다.", at.display()))
-            }
-            Ok(_) => {}
-        }
-    }
-    let path = dir.join("record.json");
-    match read_plain(&path) {
+/// The latest record file of the project `id` in the open store `store`: `None` when there
+/// is none. It is found the way it is made (`record_folder`: the ID checked, no folder a
+/// link), and read through the folder held open, never through a link.
+fn read_record(store: &Folder, folder: &str, id: &str) -> Result<Option<Vec<u8>>, String> {
+    let Some(dir) = store
+        .below(&super::record_folder(folder, id)?)
+        .map_err(super::folder_error)?
+    else {
+        return Ok(None);
+    };
+    match dir.read("record.json") {
         Ok(bytes) => Ok(Some(bytes)),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{}: {e}", path.display())),
+        Err(e) => Err(file_error(&dir, "record.json", e)),
     }
 }
 

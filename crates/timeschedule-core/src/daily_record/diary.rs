@@ -16,10 +16,11 @@ use crate::project_records::repo_key;
 use crate::{
     chat_originals::{group_name, is_link, OriginalsProject},
     storage::{database_error, timestamp, validate_date, validate_text, Storage},
+    vault_folder::{is_linked, Folder},
 };
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
-use std::{fs, io, path::Path};
+use std::path::Path;
 
 /// Schema 16. Tests that build an older database by dropping later tables leave this
 /// one in place, so it is made only when missing.
@@ -113,32 +114,29 @@ impl Storage {
         if is_link(&daily).map_err(|e| e.to_string())? {
             return Err("링크인 daily 폴더의 하루 기록은 읽지 않습니다.".into());
         }
+        // The store is opened once and every project's records are listed and read
+        // through folders held open from it, so no record is read from where a link put
+        // on the way meanwhile points.
+        let Some(store) = Folder::store(vault).map_err(|e| e.to_string())? else {
+            return Ok(report);
+        };
         for project in self.originals_projects()?.into_iter().filter(|p| p.capture) {
-            let dir = daily.join(group_name(&project.root));
-            let entries = match is_link(&dir) {
-                Ok(false) => fs::read_dir(&dir),
-                Ok(true) => Err(io::ErrorKind::InvalidInput.into()),
+            let folder = group_name(&project.root);
+            let names = match store.below(&["daily", &folder]) {
+                Ok(Some(dir)) => dir.names().map(|names| (dir, names)),
+                // No records for this project yet.
+                Ok(None) => continue,
                 Err(e) => Err(e),
             };
-            let entries = match entries {
-                Ok(entries) => entries,
-                // No records for this project yet.
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(_) => {
-                    report.failed += 1;
-                    continue;
-                }
+            let Ok((dir, names)) = names else {
+                report.failed += 1;
+                continue;
             };
-            for entry in entries {
-                let Ok(entry) = entry else {
-                    report.failed += 1;
-                    continue;
-                };
-                let name = entry.file_name().to_string_lossy().into_owned();
+            for name in names {
                 let Some(date) = day_of(&name) else {
                     continue;
                 };
-                match self.show_record(&project, date, &entry.path()) {
+                match self.show_record(&project, date, &dir, &name) {
                     Ok(Shown::Added) => report.added += 1,
                     Ok(Shown::Updated) => report.updated += 1,
                     Ok(Shown::Kept) => report.kept += 1,
@@ -156,12 +154,16 @@ impl Storage {
         &self,
         project: &OriginalsProject,
         date: &str,
-        path: &Path,
+        dir: &Folder,
+        name: &str,
     ) -> Result<Shown, String> {
-        if is_link(path).map_err(|e| e.to_string())? {
-            return Err("링크인 하루 기록은 읽지 않습니다.".into());
-        }
-        let bytes = fs::read(path).map_err(|e| e.to_string())?;
+        let bytes = dir.read(name).map_err(|e| {
+            if is_linked(&e) {
+                "링크인 하루 기록은 읽지 않습니다.".to_string()
+            } else {
+                e.to_string()
+            }
+        })?;
         let record: DailyRecord = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
         // The file must be the record of this project and this day.
         if record.project.id != project.id || record.date != date {

@@ -8,7 +8,7 @@ use crate::{
     timeline::TimeChange,
 };
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 /// A store with one project and its folder, and a document store holding one daily
 /// record of the project and a project record made from it.
@@ -356,7 +356,12 @@ fn a_project_moved_to_another_folder_no_longer_shows_the_old_folders_record() {
     let record: ProjectRecord = serde_json::from_slice(&bytes).unwrap();
     assert!(matches!(
         f.store
-            .show_project_record(&holder, &group_name(&f.key), &record, (&f.vault, &bytes))
+            .show_project_record(
+                &holder,
+                &group_name(&f.key),
+                &record,
+                (&Folder::store(&f.vault).unwrap().unwrap(), &bytes)
+            )
             .unwrap(),
         Shown::OtherFolder
     ));
@@ -468,7 +473,12 @@ fn a_record_read_before_the_file_was_replaced_writes_nothing() {
     };
     assert!(matches!(
         f.store
-            .show_project_record(&holder, &group_name(&f.key), &record, (&f.vault, &stale))
+            .show_project_record(
+                &holder,
+                &group_name(&f.key),
+                &record,
+                (&Folder::store(&f.vault).unwrap().unwrap(), &stale)
+            )
             .unwrap(),
         Shown::Unchanged
     ));
@@ -553,7 +563,12 @@ fn a_record_that_cannot_be_read_again_is_a_failure_not_nothing_new() {
     };
     assert!(f
         .store
-        .show_project_record(&holder, &group_name(&f.key), &record, (&f.vault, &bytes))
+        .show_project_record(
+            &holder,
+            &group_name(&f.key),
+            &record,
+            (&Folder::store(&f.vault).unwrap().unwrap(), &bytes)
+        )
         .is_err());
     assert!(f.shown().is_empty());
 }
@@ -589,6 +604,26 @@ fn a_record_file_that_is_a_link_is_not_followed() {
         assert_eq!(e.raw_os_error(), Some(1314), "{e}");
         return;
     }
+    assert_eq!(f.scan().failed, 1);
+    assert!(f.shown().is_empty());
+}
+
+/// A project's folder swapped for a junction to a copy outside the store is not read.
+#[cfg(windows)]
+#[test]
+fn a_record_folder_that_is_a_junction_is_not_read() {
+    let f = setup();
+    let group = f.vault.join("project").join(group_name(&f.key));
+    let outside = f.root.join("outside");
+    fs::rename(&group, &outside).unwrap();
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&group)
+        .arg(&outside)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    assert!(outside.join(&f.project).join("record.json").is_file());
     assert_eq!(f.scan().failed, 1);
     assert!(f.shown().is_empty());
 }

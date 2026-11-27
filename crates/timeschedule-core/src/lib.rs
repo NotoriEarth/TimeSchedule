@@ -15,5 +15,6 @@ pub mod reading;
 mod search;
 pub mod storage;
 pub mod timeline;
+mod vault_folder;
 
 pub mod terra;

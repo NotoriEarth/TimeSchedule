@@ -14,8 +14,8 @@
 //! that (see `settle`). What the free text of an item says cannot be checked.
 use super::{one_line, Block, DayTranscript, Source, Speaker};
 use crate::{
-    chat_originals::is_link,
     terra::{Failed, Reply, Usage},
+    vault_folder::{is_linked, Folder, Open},
 };
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
@@ -739,29 +739,34 @@ pub(crate) fn text(e: io::Error) -> String {
     e.to_string()
 }
 
-fn day_dir(vault: &Path, transcript: &DayTranscript) -> Result<PathBuf, String> {
-    let daily = vault.join("daily");
-    let dir = daily.join(&transcript.folder);
-    for folder in [&daily, &dir] {
-        if is_link(folder).map_err(text)? {
-            return Err("링크 폴더에는 하루 기록을 쓰지 않습니다.".into());
-        }
-    }
-    Ok(dir)
+/// Where the day records of the transcript's project are below the store:
+/// `daily/<folder>`. It is opened as a `vault_folder::Folder`, so a link on the way is
+/// refused (`folder_error`).
+fn day_folder(transcript: &DayTranscript) -> [&str; 2] {
+    ["daily", transcript.folder.as_str()]
 }
 
-/// Stops at a record file that is a link. Read through, a link to the latest record
-/// would pass for a kept revision that holds the same bytes, and the next record
-/// would then be the only one either name reads. The project record keeps its files
-/// by the same rules.
-pub(crate) fn refuse_link(path: &Path) -> Result<(), String> {
-    if is_link(path).map_err(text)? {
-        return Err(format!(
-            "기록 파일({})이 링크입니다. 링크를 거쳐 읽거나 쓰지 않고 멈췄습니다. 파일을 확인해 주세요.",
-            path.display()
-        ));
+fn folder_error(e: io::Error) -> String {
+    if is_linked(&e) {
+        "링크 폴더에는 하루 기록을 쓰지 않습니다.".into()
+    } else {
+        text(e)
     }
-    Ok(())
+}
+
+/// The error of the file `name` in `dir`. A record file that is a link is refused, not
+/// read through: a link to the latest record would pass for a kept revision that holds
+/// the same bytes, and the next record would then be the only one either name reads.
+/// The project record keeps its files by the same rules.
+pub(crate) fn file_error(dir: &Folder, name: &str, e: io::Error) -> String {
+    if is_linked(&e) {
+        format!(
+            "기록 파일({})이나 그 폴더가 링크입니다. 링크를 거쳐 읽거나 쓰지 않고 멈췄습니다. 파일과 폴더를 확인해 주세요.",
+            dir.file(name).display()
+        )
+    } else {
+        text(e)
+    }
 }
 
 /// The latest kept record: its bytes, and the two values the next run needs. Only
@@ -781,7 +786,7 @@ impl Latest {
     }
 }
 
-pub(crate) fn read_latest(path: &Path) -> Result<Option<Latest>, String> {
+pub(crate) fn read_latest(dir: &Folder, name: &str) -> Result<Option<Latest>, String> {
     #[derive(Deserialize)]
     struct Kept {
         revision: u32,
@@ -791,14 +796,17 @@ pub(crate) fn read_latest(path: &Path) -> Result<Option<Latest>, String> {
     struct KeptInput {
         fingerprint: String,
     }
-    refuse_link(path)?;
-    let bytes = match read_plain(path) {
+    let bytes = match dir.read(name) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(text(e)),
+        Err(e) => return Err(file_error(dir, name, e)),
     };
-    let kept: Kept = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("이전 기록을 읽지 못했습니다({}): {e}", path.display()))?;
+    let kept: Kept = serde_json::from_slice(&bytes).map_err(|e| {
+        format!(
+            "이전 기록을 읽지 못했습니다({}): {e}",
+            dir.file(name).display()
+        )
+    })?;
     Ok(Some(Latest {
         bytes,
         revision: kept.revision,
@@ -837,25 +845,27 @@ pub(crate) fn tenths(seconds: f64) -> f64 {
 /// project's `.usage.lock`, or a line another run cut short in between would be joined
 /// to this one. This lock is waited for: it is held for one small write, and a run that
 /// gave up instead would lose the line of a call that was made.
-pub(crate) fn log_usage(dir: &Path, line: &impl Serialize) -> Result<(), String> {
+pub(crate) fn log_usage(dir: &Folder, line: &impl Serialize) -> Result<(), String> {
     use io::{Read, Seek, SeekFrom};
-    let path = dir.join("usage.jsonl");
     let result = (|| {
-        let lock = open_plain(
-            &dir.join(".usage.lock"),
-            fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false),
-        )?;
+        // A link is named in the error, so the message says which file to look at.
+        let open = |name: &str, how: Open| {
+            dir.open(name, how).map_err(|e| {
+                if is_linked(&e) {
+                    io::Error::other(format!(
+                        "{}이나 그 폴더가 링크입니다",
+                        dir.file(name).display()
+                    ))
+                } else {
+                    e
+                }
+            })
+        };
+        let lock = open(".usage.lock", Open::Lock)?;
         lock.lock()?;
         // Opened once the lock is held, and never through a link: a link put there while
         // this run waited is refused, not followed.
-        let mut file = open_plain(
-            &path,
-            fs::OpenOptions::new().read(true).append(true).create(true),
-        )?;
+        let mut file = open("usage.jsonl", Open::Append)?;
         let mut bytes = Vec::new();
         if file.seek(SeekFrom::End(0))? > 0 {
             let mut last = [0_u8];
@@ -870,40 +880,12 @@ pub(crate) fn log_usage(dir: &Path, line: &impl Serialize) -> Result<(), String>
         io::Write::write_all(&mut file, &bytes)?;
         file.sync_all()
     })();
-    result.map_err(|e| format!("사용량 기록을 쓰지 못했습니다({}): {e}", path.display()))
-}
-
-/// Opens `path` with `options` without following a link there: a link is refused. On
-/// Windows the link itself is opened (`FILE_FLAG_OPEN_REPARSE_POINT`) and the open
-/// handle is checked, so a link put in place between a check and the open is never
-/// followed.
-pub(crate) fn open_plain(path: &Path, options: &mut fs::OpenOptions) -> io::Result<fs::File> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    #[cfg(not(windows))]
-    if is_link(path)? {
-        return Err(io::Error::other("링크 파일"));
-    }
-    let file = options.open(path)?;
-    if file.metadata()?.file_type().is_symlink() {
-        return Err(io::Error::other("링크 파일"));
-    }
-    Ok(file)
-}
-
-/// The bytes of the file at `path`, read through `open_plain`: a link there is refused
-/// even when it was put in place after a check.
-pub(crate) fn read_plain(path: &Path) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    io::Read::read_to_end(
-        &mut open_plain(path, fs::OpenOptions::new().read(true))?,
-        &mut bytes,
-    )?;
-    Ok(bytes)
+    result.map_err(|e| {
+        format!(
+            "사용량 기록을 쓰지 못했습니다({}): {e}",
+            dir.file("usage.jsonl").display()
+        )
+    })
 }
 
 /// Refuses a day whose transcript of `chars` characters is too large to send in one call.
@@ -927,10 +909,12 @@ pub fn is_current(
     model: &str,
     effort: &str,
 ) -> Result<bool, String> {
-    let dir = day_dir(vault, transcript)?;
-    let path = dir.join(format!("{}.json", transcript.date));
+    let Some(dir) = Folder::found(vault, &day_folder(transcript)).map_err(folder_error)? else {
+        return Ok(false);
+    };
     let fingerprint = fingerprint(transcript, model, effort);
-    Ok(read_latest(&path)?.is_some_and(|latest| latest.made_from(&fingerprint)))
+    Ok(read_latest(&dir, &format!("{}.json", transcript.date))?
+        .is_some_and(|latest| latest.made_from(&fingerprint)))
 }
 
 /// Makes and keeps the record of `transcript`, unless the latest kept one was made
@@ -955,24 +939,23 @@ pub fn summarize(
     }
     let summary = transcript.summary();
     check_size(summary.chars)?;
-    let dir = day_dir(vault, transcript)?;
+    // The folder is held open until the run ends, and every file is opened through it:
+    // the folder cannot be moved meanwhile, and a link put on the way is not followed.
+    let dir = Folder::made(vault, &day_folder(transcript)).map_err(folder_error)?;
     let date = transcript.date.to_string();
-    let path = dir.join(format!("{date}.json"));
-    fs::create_dir_all(&dir).map_err(text)?;
-    let lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join(format!(".{date}.lock")))
-        .map_err(text)?;
+    let name = format!("{date}.json");
+    let path = dir.file(&name);
+    let lock_name = format!(".{date}.lock");
+    let lock = dir
+        .open(&lock_name, Open::Lock)
+        .map_err(|e| file_error(&dir, &lock_name, e))?;
     match lock.try_lock() {
         Ok(()) => {}
         Err(fs::TryLockError::WouldBlock) => return Ok(Outcome::Busy { path }),
         Err(fs::TryLockError::Error(e)) => return Err(text(e)),
     }
     let fingerprint = fingerprint(transcript, model, effort);
-    let previous = read_latest(&path)?;
+    let previous = read_latest(&dir, &name)?;
     let mut revision = 1;
     if let Some(previous) = &previous {
         if previous.made_from(&fingerprint) {
@@ -1053,7 +1036,7 @@ pub fn summarize(
         sources: transcript.sources.iter().map(SourceKept::from).collect(),
     };
     let bytes = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
-    keep(&dir, &path, &date, previous.as_ref(), &bytes)
+    keep(&dir, &date, previous.as_ref(), &bytes)
         .map_err(|e| failed("save_failed", &reply.usage, reply.seconds, e))?;
     log("saved", &reply.usage, reply.seconds, None)
         .map_err(|e| format!("하루 기록은 저장했습니다({}). {e}", path.display()))?;
@@ -1064,51 +1047,34 @@ pub fn summarize(
     })
 }
 
-/// Writes `bytes` whole to a temporary file in `dir` and renames it to `to`.
-pub(crate) fn publish(dir: &Path, to: &Path, bytes: &[u8]) -> Result<(), String> {
-    let temp = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-    let result = (|| {
-        let mut file = fs::File::create_new(&temp)?;
-        io::Write::write_all(&mut file, bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temp, to)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result.map_err(text)
-}
-
 /// Makes sure `<stem>.r<revision>.json` holds the latest record as it is now. A file
 /// of that name that already holds the same bytes is a run that stopped after this
 /// step, and is taken as done. One that holds anything else is never replaced: that is
 /// an error, and so is one that is a link. With `write` false the file is only looked at.
 pub(crate) fn set_aside(
-    dir: &Path,
+    dir: &Folder,
     stem: &str,
     latest: &Latest,
     write: bool,
 ) -> Result<(), String> {
-    let aside = dir.join(format!("{stem}.r{}.json", latest.revision));
-    refuse_link(&aside)?;
-    match read_plain(&aside) {
+    let aside = format!("{stem}.r{}.json", latest.revision);
+    match dir.read(&aside) {
         Ok(kept) if kept == latest.bytes => Ok(()),
         Ok(_) => Err(format!(
             "남겨 둔 판({})이 지금의 최신 판과 다릅니다. 덮어쓰지 않고 멈췄습니다. 두 파일을 확인해 주세요.",
-            aside.display()
+            dir.file(&aside).display()
         )),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             if write {
-                publish(dir, &aside, &latest.bytes)?;
+                dir.publish(&aside, &latest.bytes).map_err(text)?;
             }
             Ok(())
         }
-        Err(e) => Err(text(e)),
+        Err(e) => Err(file_error(dir, &aside, e)),
     }
 }
 
-/// Publishes `bytes` as the record file `path` (`<dir>/<stem>.json`), after the
+/// Publishes `bytes` as the record file `<stem>.json` of `dir`, after the
 /// record it replaces is set aside. The caller holds the record's lock.
 ///
 /// The lock keeps out other runs, not a person or a program that puts a file there
@@ -1116,13 +1082,13 @@ pub(crate) fn set_aside(
 /// here: if it is not what the run read before the call, nothing is published, and
 /// the file that is there now stays as it is.
 pub(crate) fn keep(
-    dir: &Path,
-    path: &Path,
+    dir: &Folder,
     stem: &str,
     previous: Option<&Latest>,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let now = read_latest(path)?;
+    let name = format!("{stem}.json");
+    let now = read_latest(dir, &name)?;
     let same = match (previous, &now) {
         (None, None) => true,
         (Some(before), Some(now)) => before.bytes == now.bytes,
@@ -1131,13 +1097,13 @@ pub(crate) fn keep(
     if !same {
         return Err(format!(
             "모델을 기다리는 동안 기록({})이 바뀌었습니다. 새 판을 쓰지 않았습니다. 다시 실행해 주세요.",
-            path.display()
+            dir.file(&name).display()
         ));
     }
     if let Some(previous) = previous {
         set_aside(dir, stem, previous, true)?;
     }
-    publish(dir, path, bytes)
+    dir.publish(&name, bytes).map_err(text)
 }
 
 impl DailyRecord {
